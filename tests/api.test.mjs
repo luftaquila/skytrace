@@ -55,12 +55,28 @@ test("ingests receiver aircraft and exposes current state and track", async () =
           aircraft: [
             {
               hex: "abc123",
+              type: "adsb_icao",
               flight: "SKY42",
               lat: 37.55,
               lon: 127.05,
               alt_baro: 32000,
+              alt_geom: 33100,
               gs: 430,
+              ias: 280,
+              tas: 460,
+              mach: 0.76,
               track: 90,
+              true_heading: 91,
+              mag_heading: 83,
+              baro_rate: 64,
+              geom_rate: 32,
+              wd: 240,
+              ws: 55,
+              oat: -30,
+              tat: -2,
+              nac_p: 10,
+              sil: 3,
+              rc: 186,
               seen: 1,
               seen_pos: 1,
               messages: 50,
@@ -79,15 +95,40 @@ test("ingests receiver aircraft and exposes current state and track", async () =
     assert.equal(current.aircraft[0].hex, "abc123");
     assert.equal(current.aircraft[0].flight, "SKY42");
     assert.equal(current.aircraft[0].receiverCount, 1);
+    assert.equal(current.aircraft[0].sourceKind, "adsb");
+    assert.equal(current.aircraft[0].ias, 280);
+    assert.equal(current.aircraft[0].trueHeading, 91);
+    assert.equal(current.aircraft[0].windSpeed, 55);
+    assert.equal(current.summary.withPosition, 1);
 
     const track = await (await fetch(`${baseUrl}/api/aircraft/abc123/track`)).json();
     assert.equal(track.points.length, 1);
     assert.equal(track.points[0].lat, 37.55);
+    assert.equal(track.points[0].sourceType, "adsb_icao");
+    assert.equal(track.points[0].ias, 280);
+    assert.equal(track.points[0].tas, 460);
+    assert.equal(track.points[0].mach, 0.76);
+    assert.equal(track.points[0].windSpeed, 55);
+
+    const kml = await (await fetch(`${baseUrl}/api/aircraft/abc123/track.kml`)).text();
+    assert.match(kml, /<kml/);
+    assert.match(kml, /127.05,37.55/);
 
     const receivers = await (await fetch(`${baseUrl}/api/receivers/public`)).json();
     assert.equal(receivers.receivers.length, 1);
     assert.equal(receivers.receivers[0].name, "Roof Receiver");
     assert.equal(receivers.receivers[0].lat, null);
+
+    const coverage = await (await fetch(`${baseUrl}/api/coverage`)).json();
+    assert.equal(coverage.type, "observed-envelope");
+    assert.equal(coverage.receiverCount, 1);
+    assert.equal(coverage.areas.length, 1);
+    assert.equal(coverage.areas[0].receiverName, "Roof Receiver");
+    assert.equal(coverage.areas[0].receiverLat, undefined);
+    assert.equal(coverage.areas[0].receiverLon, undefined);
+    assert.equal(coverage.points.length, 1);
+    assert.equal(coverage.points[0].lat, 37.55);
+    assert.equal(coverage.points[0].lon, 127.05);
   });
 });
 
@@ -109,5 +150,35 @@ test("rejects missing and mismatched ingest tokens", async () => {
       body: JSON.stringify({ receiver: { id: "rx-2" }, aircraft: [] }),
     });
     assert.equal(mismatch.status, 401);
+  });
+});
+
+test("filters implausible position jumps from track storage", async () => {
+  await withServer(async ({ baseUrl }) => {
+    const now = Date.now() / 1000;
+    for (const [seen, lat, lon] of [
+      [10, 37.5, 127.0],
+      [1, 10.0, 10.0],
+    ]) {
+      const response = await fetch(`${baseUrl}/api/ingest/readsb`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({
+          receiver: { id: "rx-1" },
+          payload: {
+            now,
+            aircraft: [{ hex: "abc124", type: "adsb_icao", lat, lon, alt_baro: 10000, seen, seen_pos: seen }],
+          },
+        }),
+      });
+      assert.equal(response.status, 200);
+    }
+
+    const track = await (await fetch(`${baseUrl}/api/aircraft/abc124/track`)).json();
+    assert.equal(track.points.length, 1);
+    assert.equal(track.points[0].lat, 37.5);
   });
 });

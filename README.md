@@ -27,6 +27,14 @@ For a local file, use `SKYTRACE_AIRCRAFT_FILE=/run/readsb/aircraft.json`.
 - `SKYTRACE_CURRENT_WINDOW_SECONDS`: live aircraft window. Defaults to `90`.
 - `SKYTRACE_TRACK_MIN_INTERVAL_SECONDS`: minimum seconds between stored track
   points per receiver/aircraft. Defaults to `5`.
+- `SKYTRACE_POSITION_FILTER_MAX_MACH`: reject impossible position jumps above
+  this estimated Mach number. Defaults to `3.5`.
+- `SKYTRACE_COVERAGE_WINDOW_HOURS`: public coverage history window. Defaults
+  to `720`.
+- `SKYTRACE_COVERAGE_BEARING_STEP_DEGREES`: bearing step used to build the
+  observed receiver coverage envelope. Defaults to `1`.
+- `SKYTRACE_COVERAGE_MAX_POINTS`: maximum historical track points used for
+  public coverage. Defaults to `50000`.
 
 ## Development
 
@@ -39,6 +47,10 @@ npm start
 ```
 
 The production image serves `web/dist` from the same Express process.
+
+The public API intentionally hides exact receiver coordinates. Coverage is
+published from historical aircraft positions through `/api/coverage`; selected
+aircraft tracks can be exported as KML through `/api/aircraft/:hex/track.kml`.
 
 ## Deployment notes
 

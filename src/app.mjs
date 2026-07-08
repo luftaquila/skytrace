@@ -1,7 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import express from "express";
-import { authenticateIngest, getCurrentAircraft, getPublicReceivers, getTrack, ingestReadsb } from "./ingest.mjs";
+import {
+  authenticateIngest,
+  getCoverage,
+  getCurrentAircraft,
+  getPublicReceivers,
+  getTrack,
+  ingestReadsb,
+  trackToKml,
+} from "./ingest.mjs";
 import { sanitizeReceiverId } from "./normalize-readsb.mjs";
 
 function bearerToken(req) {
@@ -52,6 +60,7 @@ export function createApp({ db, config, sseHub }) {
       userAgent: req.get("user-agent") || null,
       maxObservationAgeSeconds: config.maxObservationAgeSeconds,
       trackMinIntervalSeconds: config.trackMinIntervalSeconds,
+      positionFilterMaxMach: config.positionFilterMaxMach,
     });
 
     sseHub.broadcast("ingest", {
@@ -69,6 +78,27 @@ export function createApp({ db, config, sseHub }) {
     res.json(getCurrentAircraft(db, {
       currentWindowSeconds: config.currentWindowSeconds,
     }));
+  });
+
+  app.get("/api/coverage", (req, res) => {
+    res.json(getCoverage(db, {
+      now: new Date().toISOString(),
+      coverageWindowHours: config.coverageWindowHours,
+      coverageBearingStepDegrees: config.coverageBearingStepDegrees,
+      coverageMaxPoints: config.coverageMaxPoints,
+    }));
+  });
+
+  app.get("/api/aircraft/:hex/track.kml", (req, res) => {
+    const points = getTrack(db, req.params.hex, {
+      from: parseDateQuery(req.query.from),
+      to: parseDateQuery(req.query.to),
+      limit: Number.parseInt(req.query.limit || config.maxTrackQueryPoints, 10),
+      now: new Date().toISOString(),
+    });
+    res.type("application/vnd.google-earth.kml+xml");
+    res.set("content-disposition", `attachment; filename="${String(req.params.hex || "track").toLowerCase()}.kml"`);
+    res.send(trackToKml(req.params.hex, points));
   });
 
   app.get("/api/aircraft/:hex/track", (req, res) => {

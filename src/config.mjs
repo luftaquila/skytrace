@@ -66,5 +66,9 @@ export function loadConfig(env = process.env) {
     maxObservationAgeSeconds: intFromEnv(env, "SKYTRACE_MAX_OBSERVATION_AGE_SECONDS", 120),
     trackMinIntervalSeconds: intFromEnv(env, "SKYTRACE_TRACK_MIN_INTERVAL_SECONDS", 5),
     maxTrackQueryPoints: intFromEnv(env, "SKYTRACE_MAX_TRACK_QUERY_POINTS", 10000),
+    positionFilterMaxMach: Number.parseFloat(env.SKYTRACE_POSITION_FILTER_MAX_MACH || "3.5"),
+    coverageWindowHours: intFromEnv(env, "SKYTRACE_COVERAGE_WINDOW_HOURS", 24 * 30),
+    coverageBearingStepDegrees: Number.parseFloat(env.SKYTRACE_COVERAGE_BEARING_STEP_DEGREES || "1"),
+    coverageMaxPoints: intFromEnv(env, "SKYTRACE_COVERAGE_MAX_POINTS", 50000),
   };
 }

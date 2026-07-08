@@ -14,6 +14,14 @@ test("normalizes readsb aircraft fields", () => {
         alt_baro: "ground",
         gs: 42.4,
         track: 181,
+        type: "adsb_icao",
+        ias: 120,
+        tas: 130,
+        mach: 0.21,
+        true_heading: 182,
+        wd: 270,
+        ws: 15,
+        nac_p: 10,
         seen: 2,
         seen_pos: 3,
         messages: "120",
@@ -27,7 +35,25 @@ test("normalizes readsb aircraft fields", () => {
   assert.equal(result.aircraft[0].onGround, true);
   assert.equal(result.aircraft[0].altBaro, 0);
   assert.equal(result.aircraft[0].messages, 120);
+  assert.equal(result.aircraft[0].sourceKind, "adsb");
+  assert.equal(result.aircraft[0].ias, 120);
+  assert.equal(result.aircraft[0].windDirection, 270);
+  assert.equal(result.aircraft[0].nacP, 10);
   assert.equal(result.aircraft[0].positionAt, "2025-10-09T08:53:17.000Z");
+});
+
+test("accepts non-ICAO target ids", () => {
+  const result = normalizeReadsbPayload({
+    now: 1760000000,
+    aircraft: [
+      { hex: "~ab1234", type: "tisb_trackfile", lat: 37, lon: 127, seen: 0, seen_pos: 0 },
+    ],
+  });
+
+  assert.equal(result.aircraft.length, 1);
+  assert.equal(result.aircraft[0].hex, "~ab1234");
+  assert.equal(result.aircraft[0].nonIcao, true);
+  assert.equal(result.aircraft[0].sourceKind, "tisb");
 });
 
 test("drops invalid aircraft hex and invalid coordinates", () => {
