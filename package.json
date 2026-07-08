@@ -1,0 +1,19 @@
+{
+  "name": "skytrace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.mjs",
+    "start": "node src/index.mjs",
+    "agent": "node bin/skytrace-agent.mjs",
+    "build": "npm --prefix web run build",
+    "test": "node --test --test-force-exit tests/**/*.test.mjs",
+    "check": "npm test && npm run build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.5.0",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {}
+}

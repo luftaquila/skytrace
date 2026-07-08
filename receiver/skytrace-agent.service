@@ -1,0 +1,20 @@
+[Unit]
+Description=Skytrace ADS-B receiver uploader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/skytrace
+EnvironmentFile=/etc/skytrace-agent.env
+ExecStart=/usr/bin/node /opt/skytrace/bin/skytrace-agent.mjs
+Restart=always
+RestartSec=5
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run /var/run /tmp
+
+[Install]
+WantedBy=multi-user.target

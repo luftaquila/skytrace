@@ -1,0 +1,368 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  background: #10100f;
+  color: #f7f3e8;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 390px;
+  width: 100%;
+  height: 100%;
+  background: #10100f;
+  overflow: hidden;
+}
+
+.map-stage {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+}
+
+.map {
+  width: 100%;
+  height: 100%;
+  background: #1b1a18;
+}
+
+.topbar {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  right: 18px;
+  z-index: 500;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  pointer-events: none;
+}
+
+.brand {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 0;
+  color: #fff8df;
+  text-shadow: 0 2px 18px rgb(0 0 0 / 0.55);
+}
+
+.subline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: rgb(18 18 16 / 0.78);
+  color: #f8e7b0;
+  font-size: 13px;
+  backdrop-filter: blur(10px);
+  pointer-events: auto;
+}
+
+.status-dot,
+.receiver-light {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 4px rgb(245 158 11 / 0.16);
+}
+
+.status-dot.online,
+.receiver-light.on {
+  background: #2dd4bf;
+  box-shadow: 0 0 0 4px rgb(45 212 191 / 0.16);
+}
+
+.status-dot.offline {
+  background: #fb7185;
+  box-shadow: 0 0 0 4px rgb(251 113 133 / 0.16);
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgb(255 248 223 / 0.16);
+  border-radius: 7px;
+  background: rgb(18 18 16 / 0.82);
+  color: #fff8df;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+}
+
+.icon-button:hover {
+  background: rgb(38 37 32 / 0.9);
+}
+
+.icon-button.small {
+  width: 32px;
+  height: 32px;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
+  min-width: 0;
+  padding: 16px;
+  border-left: 1px solid #302e29;
+  background: #171715;
+  overflow: auto;
+}
+
+.search-wrap {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid #3a3932;
+  border-radius: 7px;
+  color: #f6c85f;
+  background: #22211d;
+}
+
+.search-wrap input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #fff8df;
+}
+
+.search-wrap input::placeholder {
+  color: #9d9787;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.metric-grid div {
+  min-height: 66px;
+  padding: 10px;
+  border: 1px solid #302e29;
+  border-radius: 7px;
+  background: #1f1e1a;
+}
+
+.metric-grid span {
+  display: block;
+  font-size: 22px;
+  font-weight: 760;
+  color: #fff8df;
+}
+
+.metric-grid small,
+.aircraft-row small,
+.receiver-row small,
+.detail p,
+.detail dt {
+  color: #a6a092;
+}
+
+.detail,
+.list,
+.receiver-list {
+  border: 1px solid #302e29;
+  border-radius: 7px;
+  background: #1d1c19;
+}
+
+.detail {
+  padding: 14px;
+}
+
+.detail-head,
+.list header,
+.receiver-list header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.detail h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.detail p {
+  margin: 2px 0 0;
+  font-size: 13px;
+}
+
+.detail dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.detail dt {
+  font-size: 12px;
+}
+
+.detail dd {
+  margin: 3px 0 0;
+  font-weight: 700;
+}
+
+.select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #d7d0bf;
+}
+
+.select-row select {
+  height: 34px;
+  border: 1px solid #3a3932;
+  border-radius: 6px;
+  background: #11110f;
+  color: #fff8df;
+}
+
+.list header,
+.receiver-list header {
+  justify-content: flex-start;
+  padding: 12px;
+  color: #f6c85f;
+  font-weight: 700;
+}
+
+.aircraft-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  width: 100%;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 0;
+  border-top: 1px solid #302e29;
+  background: transparent;
+  color: #fff8df;
+  text-align: left;
+  cursor: pointer;
+}
+
+.aircraft-row:hover,
+.aircraft-row.active {
+  background: #29271f;
+}
+
+.aircraft-row span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.aircraft-row span:last-child {
+  align-items: flex-end;
+}
+
+.aircraft-row strong,
+.aircraft-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.receiver-row {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 8px 12px;
+  border-top: 1px solid #302e29;
+}
+
+.aircraft-icon {
+  display: grid;
+  place-items: center;
+}
+
+.aircraft-glyph {
+  width: 0;
+  height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-bottom: 24px solid #f6c85f;
+  filter: drop-shadow(0 0 5px rgb(0 0 0 / 0.8));
+  transform-origin: 50% 58%;
+}
+
+.aircraft-icon.selected .aircraft-glyph {
+  border-bottom-color: #2dd4bf;
+  filter: drop-shadow(0 0 8px rgb(45 212 191 / 0.9));
+}
+
+.leaflet-control-attribution {
+  background: rgb(0 0 0 / 0.58);
+  color: #f8e7b0;
+}
+
+.leaflet-control-attribution a {
+  color: #f6c85f;
+}
+
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 58vh) minmax(260px, 42vh);
+  }
+
+  .panel {
+    border-top: 1px solid #302e29;
+    border-left: 0;
+  }
+
+  .topbar {
+    left: 12px;
+    right: 12px;
+  }
+
+  .brand {
+    font-size: 24px;
+  }
+}

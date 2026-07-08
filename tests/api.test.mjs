@@ -1,0 +1,113 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { createApp } from "../src/app.mjs";
+import { loadConfig } from "../src/config.mjs";
+import { openDatabase, syncReceiverTokens } from "../src/db.mjs";
+import { createSseHub } from "../src/sse.mjs";
+
+async function withServer(fn) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "skytrace-test-"));
+  const config = loadConfig({
+    PORT: "0",
+    SKYTRACE_DB_PATH: path.join(dir, "skytrace.db"),
+    SKYTRACE_RECEIVER_TOKENS: JSON.stringify({ "rx-1": "secret-token" }),
+    SKYTRACE_CURRENT_WINDOW_SECONDS: "120",
+    SKYTRACE_MAX_OBSERVATION_AGE_SECONDS: "120",
+    SKYTRACE_TRACK_MIN_INTERVAL_SECONDS: "0",
+    SKYTRACE_STATIC_DIR: path.join(dir, "missing-dist"),
+  });
+  const db = openDatabase(config.dbPath);
+  syncReceiverTokens(db, config.receiverTokens);
+  const app = createApp({ db, config, sseHub: createSseHub() });
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once("listening", resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await fn({ baseUrl, db });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    db.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("ingests receiver aircraft and exposes current state and track", async () => {
+  await withServer(async ({ baseUrl }) => {
+    const now = Date.now() / 1000;
+    const ingest = await fetch(`${baseUrl}/api/ingest/readsb`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer secret-token",
+      },
+      body: JSON.stringify({
+        receiver: {
+          id: "rx-1",
+          name: "Roof Receiver",
+          lat: 37.5,
+          lon: 127.1,
+        },
+        payload: {
+          now,
+          aircraft: [
+            {
+              hex: "abc123",
+              flight: "SKY42",
+              lat: 37.55,
+              lon: 127.05,
+              alt_baro: 32000,
+              gs: 430,
+              track: 90,
+              seen: 1,
+              seen_pos: 1,
+              messages: 50,
+            },
+          ],
+        },
+      }),
+    });
+    assert.equal(ingest.status, 200);
+    const ingestBody = await ingest.json();
+    assert.equal(ingestBody.acceptedCount, 1);
+    assert.equal(ingestBody.trackPoints, 1);
+
+    const current = await (await fetch(`${baseUrl}/api/aircraft/current`)).json();
+    assert.equal(current.count, 1);
+    assert.equal(current.aircraft[0].hex, "abc123");
+    assert.equal(current.aircraft[0].flight, "SKY42");
+    assert.equal(current.aircraft[0].receiverCount, 1);
+
+    const track = await (await fetch(`${baseUrl}/api/aircraft/abc123/track`)).json();
+    assert.equal(track.points.length, 1);
+    assert.equal(track.points[0].lat, 37.55);
+
+    const receivers = await (await fetch(`${baseUrl}/api/receivers/public`)).json();
+    assert.equal(receivers.receivers.length, 1);
+    assert.equal(receivers.receivers[0].name, "Roof Receiver");
+    assert.equal(receivers.receivers[0].lat, null);
+  });
+});
+
+test("rejects missing and mismatched ingest tokens", async () => {
+  await withServer(async ({ baseUrl }) => {
+    const missing = await fetch(`${baseUrl}/api/ingest/readsb`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ receiver: { id: "rx-1" }, aircraft: [] }),
+    });
+    assert.equal(missing.status, 401);
+
+    const mismatch = await fetch(`${baseUrl}/api/ingest/readsb`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer secret-token",
+      },
+      body: JSON.stringify({ receiver: { id: "rx-2" }, aircraft: [] }),
+    });
+    assert.equal(mismatch.status, 401);
+  });
+});
