@@ -879,7 +879,13 @@ async function refreshAll() {
     aircraft.value = current.aircraft || [];
     receivers.value = receiverResult.receivers || [];
     coverage.value = coverageResult || { areas: [], points: [] };
-    lastUpdated.value = current.now;
+    // "Updated" reflects when a receiver actually last sent data, not our poll time —
+    // otherwise it resets to 0 every poll even while the feed is stalled.
+    const lastSeen = receivers.value.reduce((max, receiver) => {
+      const t = Date.parse(receiver.lastSeenAt);
+      return Number.isFinite(t) && t > max ? t : max;
+    }, 0);
+    lastUpdated.value = lastSeen ? new Date(lastSeen).toISOString() : null;
     status.value = "online";
     upsertMarkers();
     drawCoverage();
