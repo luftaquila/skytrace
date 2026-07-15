@@ -703,32 +703,10 @@ function bandMidFeet(band) {
   return (band.minAltitude + max) / 2;
 }
 
-// Backend ring is [lon, lat]; convert to [lat, lon] and Catmull-Rom smooth it into clean
-// curves (keeps the lobes, drops the sawtooth).
-function smoothRing(ring) {
-  const pts = (ring || []).map(([lon, lat]) => [lat, lon]);
-  if (pts.length > 1 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]) pts.pop();
-  const n = pts.length;
-  if (n < 3) return pts;
-  const out = [];
-  const steps = 8;
-  for (let i = 0; i < n; i += 1) {
-    const p0 = pts[(i - 1 + n) % n];
-    const p1 = pts[i];
-    const p2 = pts[(i + 1) % n];
-    const p3 = pts[(i + 2) % n];
-    for (let s = 0; s < steps; s += 1) {
-      const t = s / steps;
-      const t2 = t * t;
-      const t3 = t2 * t;
-      out.push([
-        0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
-        0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3),
-      ]);
-    }
-  }
-  out.push(out[0]);
-  return out;
+// Backend ring is [lon, lat]; Leaflet wants [lat, lon]. Straight segments (no spline) so
+// the real per-bearing reach — airway spikes and no-coverage notches — is shown as-is.
+function ringToLatLngs(ring) {
+  return (ring || []).map(([lon, lat]) => [lat, lon]);
 }
 
 function drawCoverage() {
@@ -741,16 +719,21 @@ function drawCoverage() {
     const bands = area.bands || [];
     const banded = settings.value.coverageBands && bands.length > 0;
 
-    // Overall extent as one soft translucent area (always drawn: altitude bands drop the
-    // ~1/5 of far receptions that report no altitude, so this is the honest boundary).
+    // Overall extent as a single translucent area with its true jagged edge (always drawn:
+    // altitude bands drop the ~1/5 of far receptions with no altitude, so this is the
+    // honest boundary). Dark casing underneath keeps the edge readable over satellite.
     const overallRing = area.polygon?.coordinates?.[0];
     if (overallRing?.length) {
-      L.polygon(smoothRing(overallRing), {
+      const latlngs = ringToLatLngs(overallRing);
+      L.polygon(latlngs, {
+        color: "#071012", weight: (banded ? 1 : 2) + 2, opacity: 0.4, fill: false, lineJoin: "round",
+      }).addTo(coverageLayer);
+      L.polygon(latlngs, {
         color: "#5eead4",
         weight: banded ? 1 : 2,
-        opacity: banded ? 0.55 : 0.9,
+        opacity: banded ? 0.6 : 0.95,
         fillColor: "#2dd4bf",
-        fillOpacity: banded ? 0.05 : 0.12,
+        fillOpacity: banded ? 0.04 : 0.1,
         lineJoin: "round",
       }).bindTooltip(`${area.receiverName || "Receiver"} · ${area.count} positions · max ${formatNumberUnit(altitudeValue(area.maxAltitude))}`)
         .addTo(coverageLayer);
@@ -761,7 +744,7 @@ function drawCoverage() {
       for (const band of [...bands].sort((a, b) => bandMidFeet(b) - bandMidFeet(a))) {
         const ring = band.polygon?.coordinates?.[0];
         if (!ring?.length) continue;
-        L.polyline(smoothRing(ring), {
+        L.polyline(ringToLatLngs(ring), {
           color: altitudeColorFeet(bandMidFeet(band)),
           weight: 2,
           opacity: 0.9,

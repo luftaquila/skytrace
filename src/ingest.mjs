@@ -63,12 +63,14 @@ function closeRing(coords) {
   return ring.length >= 4 ? ring : null;
 }
 
-// Fine sectors keep the outline lobed (following airways/terrain); a light cross-sector
-// average tames sawtooth without flattening it into a blob. The frontend adds spline
-// smoothing on top for clean curves.
+// Fine sectors + NO smoothing so the outline reflects the real per-bearing reach (airway
+// spikes and all), not a rounded blob. Empty directions collapse inward toward the receiver
+// (COVERAGE_PINCH_FLOOR) rather than bulging a fake arc across never-seen bearings.
 const COVERAGE_SECTORS = 72;
-const COVERAGE_SMOOTH_WINDOW = 1;
+const COVERAGE_SMOOTH_WINDOW = 0;
 const COVERAGE_MIN_POINTS = 8;
+const COVERAGE_GAP_FILL = 2;
+const COVERAGE_PINCH_FLOOR = 0.1;
 // Altitude bands (feet) for the per-altitude coverage outlines. Higher aircraft are in
 // line of sight from farther away, so each band typically reaches farther than the one
 // below it; drawing them separately shows that structure instead of one flat blob.
@@ -121,7 +123,8 @@ function coverageRing(positioned, origin) {
   });
   if (ranges.filter((range) => range != null).length < 3) return null;
 
-  // Fill empty sectors by interpolating angularly between the nearest populated ones.
+  // Bridge only tiny sampling gaps; longer no-coverage arcs collapse inward toward the
+  // receiver so the shape stays true to where aircraft were actually received.
   const filled = ranges.slice();
   for (let i = 0; i < COVERAGE_SECTORS; i += 1) {
     if (filled[i] != null) continue;
@@ -137,9 +140,16 @@ function coverageRing(positioned, origin) {
       const value = ranges[(i + d) % COVERAGE_SECTORS];
       if (value != null) { next = value; nextGap = d; break; }
     }
-    filled[i] = prev != null && next != null
-      ? prev + (next - prev) * (prevGap / (prevGap + nextGap))
-      : (prev != null ? prev : next);
+    if (prev == null || next == null) { filled[i] = prev != null ? prev : (next != null ? next : 0); continue; }
+    const base = prev + (next - prev) * (prevGap / (prevGap + nextGap));
+    const run = prevGap + nextGap - 1;
+    if (run <= COVERAGE_GAP_FILL) {
+      filled[i] = base;
+    } else {
+      const depth = Math.min(prevGap, nextGap) / ((run + 1) / 2);
+      const floor = Math.min(prev, next) * COVERAGE_PINCH_FLOOR;
+      filled[i] = base * (1 - depth) + floor * depth;
+    }
   }
 
   // Optional circular triangular-weighted smoothing (disabled at window 0 to keep the
