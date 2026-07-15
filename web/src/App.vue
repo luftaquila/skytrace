@@ -939,8 +939,7 @@ watch(playbackIndex, () => {
 });
 
 onMounted(async () => {
-  map = L.map(mapEl.value, { zoomControl: false, preferCanvas: true }).setView([36.2, 127.8], 7);
-  map.attributionControl.setPrefix(false);
+  map = L.map(mapEl.value, { zoomControl: false, attributionControl: false, preferCanvas: true }).setView([36.2, 127.8], 7);
   L.control.zoom({ position: "bottomright" }).addTo(map);
   applyBaseLayer();
   await refreshAll();
