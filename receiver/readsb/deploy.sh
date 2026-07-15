@@ -52,6 +52,8 @@ log "== 3. install binary =="
 if [ -n "$READSB_BIN" ]; then
   [ -f "$READSB_BIN" ] || die "READSB_BIN=$READSB_BIN not found"
   install -m 0755 "$READSB_BIN" /usr/local/bin/readsb
+elif [ -x /usr/local/bin/readsb ]; then
+  log "readsb already installed — keeping it (rm it or pass READSB_BIN to replace)"
 else
   log "downloading $RELEASE_URL"
   curl -fL --retry 5 --retry-delay 3 -o /tmp/readsb.dl "$RELEASE_URL" || die "download failed"
@@ -86,9 +88,11 @@ for i in $(seq 1 20); do
 done
 [ "$ok" = 1 ] || revert
 
-avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
-log "MemAvailable: ${avail} MB"
-[ "${avail:-0}" -ge 15 ] || { log "MemAvailable too low"; revert; }
+# kernel 3.10 has no MemAvailable in /proc/meminfo, so estimate from
+# MemFree+Buffers+Cached (all present on every kernel).
+avail=$(awk '/^MemFree:/{f=$2} /^Buffers:/{b=$2} /^Cached:/{c=$2} END{print int((f+b+c)/1024)}' /proc/meminfo)
+log "estimated available memory: ${avail:-?} MB"
+[ "${avail:-0}" -ge 15 ] || { log "available memory too low (${avail:-?} MB)"; revert; }
 if dmesg 2>/dev/null | tail -50 | grep -qi 'Out of memory\|oom-kill'; then
   log "OOM detected in dmesg"; revert
 fi
