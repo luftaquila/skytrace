@@ -8,7 +8,8 @@
 #    and are ignored) then REBOOT, rate-limited. NOTE: an earlier version tried a
 #    module reload first, but `rmmod rdawfmac` always hangs on the wedged driver
 #    (killed after 25s, rc=137) — it only delayed recovery, so it's removed.
-#    A soft reboot is the only thing observed to recover this wedge.
+#    A soft reboot is the only thing observed to recover this wedge. A 3-min
+#    startup grace after boot avoids rebooting before WiFi associates (boot-loop).
 #
 # B) readsb SDR stream stall (RTL-SDR USB sample stream dies — dmesg
 #    "Lost N packets on USB" degrading to a full stop): readsb stays "active" and
@@ -21,14 +22,15 @@
 set -u
 
 WAN="${WAN:-1.1.1.1}"          # external target; if this is unreachable for a
-INTERVAL="${INTERVAL:-10}"      # sustained window it's the WiFi, not the gateway.
-BLACKOUT="${BLACKOUT:-4}"       # consecutive WAN failures to declare blackout & reboot (~40s)
+INTERVAL="${INTERVAL:-5}"       # sustained window it's the WiFi, not the gateway.
+BLACKOUT="${BLACKOUT:-4}"       # consecutive WAN failures to declare blackout & reboot (~20s)
 MODULE="${MODULE:-rdawfmac}"
 LOG="${LOG:-/var/log/skytrace-wifi-watchdog.log}"
 STAMPS="${STAMPS:-/var/lib/skytrace-wifi-watchdog.reboots}"
 MAX_REBOOTS_PER_HR="${MAX_REBOOTS_PER_HR:-4}"
+STARTUP_GRACE="${STARTUP_GRACE:-180}" # don't reboot until uptime>this (3 min) — WiFi needs time to associate after boot (else boot-loop)
 STATS="${STATS:-/run/readsb/stats.json}"
-SDR_FAILS="${SDR_FAILS:-4}"     # consecutive checks with 0 samples before restarting readsb (~40s)
+SDR_FAILS="${SDR_FAILS:-4}"     # consecutive checks with 0 samples before restarting readsb (~20s)
 SDR_COOLDOWN="${SDR_COOLDOWN:-90}"  # skip SDR check for this long after a watchdog readsb restart (warmup)
 
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -56,7 +58,11 @@ while true; do
     fails=$((fails+1))
     [ $((fails % 2)) -eq 0 ] && log "WAN unreachable x$fails (~$((fails*INTERVAL))s)"
     if [ "$fails" -ge "$BLACKOUT" ]; then
-      if can_reboot; then
+      up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 9999)
+      if [ "$up" -lt "$STARTUP_GRACE" ]; then
+        # fresh boot — WiFi hasn't associated yet; rebooting now would boot-loop
+        [ $((fails % 4)) -eq 0 ] && log "blackout but uptime ${up}s < grace ${STARTUP_GRACE}s (WiFi still coming up) -> wait"
+      elif can_reboot; then
         log "BLACKOUT (~$((fails*INTERVAL))s WAN down, gateway noise ignored) -> REBOOT"
         date +%s >> "$STAMPS"; sync; reboot
       else
