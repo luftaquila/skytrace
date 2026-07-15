@@ -31,11 +31,11 @@ verifies readsb is producing fresh JSON with RAM headroom (**auto-reverts to
 mutability if not**), and points the skytrace agent at `/run/readsb/aircraft.json`.
 
 ```sh
-# default: download the release asset; pass the receiver location so positions
-# and --max-range are correct (omit LAT/LON to decode airborne positions only).
-sudo LAT=37.5 LON=127.0 bash deploy.sh >/tmp/readsb-deploy.log 2>&1 &
+# default: download the release asset
+sudo bash deploy.sh >/tmp/readsb-deploy.log 2>&1 &
 # or with a scp'd binary
-sudo READSB_BIN=/tmp/readsb LAT=37.5 LON=127.0 bash deploy.sh >/tmp/readsb-deploy.log 2>&1 &
+sudo READSB_BIN=/tmp/readsb bash deploy.sh >/tmp/readsb-deploy.log 2>&1 &
 ```
 
-The board WiFi is unstable, so run detached and poll the log.
+Range is unlimited by design (no receiver location / no `--max-range`) — see
+`readsb.default`. The board WiFi is unstable, so run detached and poll the log.

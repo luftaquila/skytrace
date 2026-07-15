@@ -63,22 +63,9 @@ file /usr/local/bin/readsb || true
 log "== 4. install unit + env =="
 install -m 0644 "$HERE/readsb.service" /etc/systemd/system/readsb.service
 if [ ! -f /etc/default/readsb ]; then
-  # Only add --max-range when a REAL lat/lon is known; a range filter around
-  # the wrong origin silently drops every position.
-  if [ -n "${LAT:-}" ] && [ -n "${LON:-}" ]; then
-    DEC="--lat ${LAT} --lon ${LON} --max-range 400"
-    log "receiver location: ${LAT},${LON}"
-  else
-    DEC=""
-    log "no LAT/LON provided — decoding airborne positions without a location ref"
-  fi
-  cat >/etc/default/readsb <<EOF
-RECEIVER_OPTIONS="--gain auto --ppm 0"
-DECODER_OPTIONS="${DEC}"
-JSON_OPTIONS="--write-json /run/readsb --write-json-every 1"
-EOF
-  chmod 0644 /etc/default/readsb
-  log "wrote /etc/default/readsb"
+  # No location and no --max-range => unlimited range (coverage receiver).
+  install -m 0644 "$HERE/readsb.default" /etc/default/readsb
+  log "wrote /etc/default/readsb (unlimited range)"
 else
   log "/etc/default/readsb already exists — leaving it untouched"
 fi
