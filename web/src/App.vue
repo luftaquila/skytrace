@@ -22,7 +22,7 @@ import {
 } from "@lucide/vue";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 
-const SETTINGS_KEY = "skytrace.settings.v2";
+const SETTINGS_KEY = "skytrace.settings.v3";
 const DEFAULT_SETTINGS = {
   units: "aero",
   baseLayer: "satellite",
