@@ -380,7 +380,7 @@ select {
 
 .aircraft-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
   gap: 12px;
   width: 100%;
   min-height: 58px;
@@ -394,8 +394,32 @@ select {
 }
 
 .aircraft-row:hover,
-.aircraft-row.active {
+.aircraft-row.active,
+.aircraft-row.hovered {
   background: var(--surface-2);
+}
+
+.aircraft-row.is-alert {
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+
+.alt-dot {
+  align-self: center;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid rgb(0 0 0 / 0.5);
+  box-shadow: 0 0 0 1px rgb(238 245 244 / 0.1);
+}
+
+.list-sort {
+  margin-left: auto;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font-size: 12px;
 }
 
 .aircraft-row span {
@@ -738,6 +762,241 @@ select {
   color: var(--accent-2);
 }
 
+.source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.source-chip b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.map-legend {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  z-index: 500;
+  padding: 10px 12px;
+  border: 1px solid rgb(238 245 244 / 0.12);
+  border-radius: 8px;
+  background: rgb(13 16 17 / 0.78);
+  color: var(--text);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.4);
+  pointer-events: none;
+}
+
+.legend-title {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.legend-body {
+  display: flex;
+  gap: 8px;
+  height: 96px;
+}
+
+.legend-bar {
+  width: 10px;
+  height: 100%;
+  border-radius: 4px;
+  border: 1px solid rgb(0 0 0 / 0.4);
+}
+
+.legend-ticks {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.legend-ground {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.legend-ground-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid rgb(0 0 0 / 0.4);
+}
+
+.leaflet-tooltip.aircraft-tt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 9px;
+  border: 1px solid rgb(238 245 244 / 0.16);
+  border-radius: 7px;
+  background: rgb(13 16 17 / 0.92);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.25;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
+  backdrop-filter: blur(8px);
+}
+
+.leaflet-tooltip.aircraft-tt::before {
+  display: none;
+}
+
+.aircraft-tt .tt-l1 {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.aircraft-tt .tt-l2 {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.aircraft-tt .tt-arrow {
+  margin-right: 3px;
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.aircraft-icon.hovered .aircraft-body {
+  stroke: #ffffff;
+  stroke-width: 2.2;
+}
+
+.detail-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.detail-alert.danger {
+  border: 1px solid rgb(251 113 133 / 0.5);
+  background: rgb(251 113 133 / 0.14);
+  color: #ffd9df;
+}
+
+.detail-alert.warning {
+  border: 1px solid rgb(245 158 11 / 0.5);
+  background: rgb(245 158 11 / 0.14);
+  color: #ffe6b8;
+}
+
+.detail-alert-code {
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: rgb(0 0 0 / 0.35);
+  font-variant-numeric: tabular-nums;
+}
+
+.tracklog {
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.tracklog-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.tracklog-toggle small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.tracklog-body {
+  margin-top: 8px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--panel-strong);
+}
+
+.tracklog-body table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tracklog-body thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-weight: 600;
+  text-align: left;
+}
+
+.tracklog-body td {
+  padding: 5px 8px;
+  border-top: 1px solid var(--border-soft);
+  white-space: nowrap;
+}
+
+.tracklog-body tbody tr {
+  cursor: pointer;
+}
+
+.tracklog-body tbody tr:hover {
+  background: var(--surface-2);
+}
+
+.tracklog-body tbody tr.active {
+  background: rgb(248 211 108 / 0.14);
+}
+
+.tracklog-empty,
+.tracklog-more {
+  padding: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
 @media (max-width: 900px) {
   .shell {
     grid-template-columns: 1fr;
@@ -756,6 +1015,16 @@ select {
   .topbar {
     left: 12px;
     right: 12px;
+  }
+
+  .map-legend {
+    left: 12px;
+    bottom: 12px;
+    padding: 8px 10px;
+  }
+
+  .map-legend .legend-body {
+    height: 72px;
   }
 
   .brand {

@@ -74,8 +74,11 @@ const aircraft = ref([]);
 const receivers = ref([]);
 const coverage = ref({ areas: [], points: [] });
 const selectedHex = ref(null);
+const hoveredHex = ref(null);
 const selectedTrack = ref([]);
 const search = ref("");
+const sortKey = ref("callsign");
+const tracklogOpen = ref(false);
 const status = ref("loading");
 const lastUpdated = ref(null);
 const trackHours = ref(24);
@@ -130,6 +133,20 @@ const sourceOptions = computed(() => {
   return ["all", ...keys];
 });
 
+const sourceChips = computed(() =>
+  Object.entries(stats.value.sources)
+    .sort((a, b) => b[1] - a[1])
+    .map(([key, count]) => ({ key, label: sourceLabel({ sourceKind: key }), count })),
+);
+
+function setHover(hex) {
+  hoveredHex.value = hex;
+}
+
+function clearHover(hex) {
+  if (hoveredHex.value === hex) hoveredHex.value = null;
+}
+
 const coverageSummary = computed(() => {
   const areas = coverage.value.areas || [];
   return {
@@ -163,8 +180,22 @@ const filteredAircraft = computed(() => {
     if (hasMax && (alt == null || alt > maxAlt)) return false;
     return true;
   });
-  return rows.slice(0, 600);
+  return sortAircraft(rows, sortKey.value).slice(0, 600);
 });
+
+function sortAircraft(rows, key) {
+  const arr = [...rows];
+  if (key === "altitude") {
+    arr.sort((a, b) => ((b.altBaro ?? b.altGeom) ?? -Infinity) - ((a.altBaro ?? a.altGeom) ?? -Infinity));
+  } else if (key === "speed") {
+    arr.sort((a, b) => (b.gs ?? -Infinity) - (a.gs ?? -Infinity));
+  } else if (key === "recent") {
+    arr.sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt));
+  } else {
+    arr.sort((a, b) => String(a.flight || a.hex).localeCompare(String(b.flight || b.hex)));
+  }
+  return arr;
+}
 
 const selectedAircraft = computed(() => {
   return aircraft.value.find((item) => item.hex === selectedHex.value) || null;
@@ -181,6 +212,23 @@ const kmlHref = computed(() => {
 const selectedHistoryPoint = computed(() => {
   if (!selectedTrack.value.length) return null;
   return selectedTrack.value[Math.min(playbackIndex.value, selectedTrack.value.length - 1)] || null;
+});
+
+const selectedAlert = computed(() => aircraftAlert(selectedAircraft.value));
+
+const TRACKLOG_LIMIT = 500;
+const tracklogRows = computed(() => {
+  const pts = selectedTrack.value;
+  const rows = [];
+  for (let i = pts.length - 1; i >= 0 && rows.length < TRACKLOG_LIMIT; i -= 1) {
+    if (pts[i].lat == null || pts[i].lon == null) continue;
+    rows.push({ index: i, point: pts[i] });
+  }
+  return rows;
+});
+const tracklogHidden = computed(() => {
+  const positioned = selectedTrack.value.filter((point) => point.lat != null && point.lon != null).length;
+  return Math.max(0, positioned - TRACKLOG_LIMIT);
 });
 
 function formatFlight(item) {
@@ -236,6 +284,41 @@ function formatDegrees(value) {
 
 function formatTemp(value) {
   return value == null ? "-" : `${Math.round(value)} C`;
+}
+
+function formatClock(iso) {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "-" : d.toLocaleTimeString(undefined, { hour12: false });
+}
+
+const SPECIAL_SQUAWKS = { "7500": "HIJACK", "7600": "RADIO FAILURE", "7700": "EMERGENCY" };
+
+function aircraftAlert(item) {
+  if (!item) return null;
+  const squawk = String(item.squawk || "").trim();
+  if (SPECIAL_SQUAWKS[squawk]) return { level: "danger", label: SPECIAL_SQUAWKS[squawk], code: squawk };
+  const emergency = item.emergency && item.emergency !== "none" ? String(item.emergency) : null;
+  if (emergency) {
+    return { level: "danger", label: `EMERGENCY: ${emergency.replace(/_/g, " ").toUpperCase()}`, code: squawk || null };
+  }
+  if (item.spi) return { level: "warning", label: "IDENT (SPI)", code: null };
+  if (item.alert) return { level: "warning", label: "ALERT", code: null };
+  return null;
+}
+
+function pointAltitude(point) {
+  if (point.onGround) return "GND";
+  return formatNumberUnit(altitudeValue(point.altBaro ?? point.altGeom));
+}
+
+function pointSpeed(point) {
+  return formatNumberUnit(speedValue(point.gs));
+}
+
+function focusTrackPoint(index) {
+  playbackSpeed.value = 0;
+  playbackIndex.value = index;
 }
 
 const HISTORY_METRICS = [
@@ -333,14 +416,70 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+const ALT_COLOR_MAX_FT = 40000;
+const ALT_COLOR_GROUND = "#9ca3af";
+const ALT_COLOR_NONE = "#e5e7eb";
+
+function altitudeColorFeet(feet) {
+  if (feet == null || !Number.isFinite(Number(feet))) return ALT_COLOR_NONE;
+  const clamped = Math.max(0, Math.min(ALT_COLOR_MAX_FT, Number(feet)));
+  const hue = 20 + (clamped / ALT_COLOR_MAX_FT) * 260;
+  return `hsl(${hue.toFixed(1)} 85% 55%)`;
+}
+
 function altitudeColor(item) {
-  if (item.onGround) return "#9ca3af";
-  const alt = item.altBaro ?? item.altGeom;
-  if (alt == null) return "#e5e7eb";
-  if (alt < 5000) return "#f97316";
-  if (alt < 18000) return "#facc15";
-  if (alt < 32000) return "#38bdf8";
-  return "#c084fc";
+  if (item.onGround) return ALT_COLOR_GROUND;
+  return altitudeColorFeet(item.altBaro ?? item.altGeom);
+}
+
+const altitudeLegend = computed(() => {
+  const steps = 8;
+  const stops = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const pct = Math.round((i / steps) * 100);
+    stops.push(`${altitudeColorFeet((i / steps) * ALT_COLOR_MAX_FT)} ${pct}%`);
+  }
+  const metric = settings.value.units === "metric";
+  const ticks = [1, 0.75, 0.5, 0.25, 0].map((frac) => {
+    const value = frac * ALT_COLOR_MAX_FT * (metric ? 0.3048 : 1);
+    return { label: value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}` };
+  });
+  return {
+    gradient: `linear-gradient(to top, ${stops.join(", ")})`,
+    ticks,
+    unit: metric ? "m" : "ft",
+    groundColor: ALT_COLOR_GROUND,
+  };
+});
+
+function aircraftKind(item) {
+  if (item.onGround) return "ground";
+  const cat = String(item.category || "").toUpperCase();
+  if (cat === "A7") return "helicopter";
+  if (cat.startsWith("C")) return "ground";
+  return "plane";
+}
+
+function planeSizeScale(category) {
+  const cat = String(category || "").toUpperCase();
+  if (cat === "A1" || cat === "A2" || cat === "B1") return 0.85;
+  if (cat === "A4" || cat === "A5") return 1.18;
+  return 1;
+}
+
+function glyphInner(kind) {
+  if (kind === "ground") {
+    return `<rect class="aircraft-body" x="8" y="12" width="20" height="12" rx="3"></rect>
+      <path class="aircraft-detail" d="M11 16h14M13 24v4M23 24v4"></path>
+      <circle class="aircraft-wheel" cx="13" cy="28" r="2"></circle>
+      <circle class="aircraft-wheel" cx="23" cy="28" r="2"></circle>`;
+  }
+  if (kind === "helicopter") {
+    return `<path class="aircraft-body" d="M16.4 7h3.2v18l3.4 3.4v2.2h-13.2v-2.2l3.4-3.4z"></path>
+      <path class="aircraft-detail" d="M3 10.5 33 25.5M3 25.5 33 10.5"></path>`;
+  }
+  return `<path class="aircraft-body" d="M18 2.5c1.4 0 2.4 1.2 2.4 2.8v9.4l12.1 7.2v3.4l-12.1-3.2v6.8l4 3v2.4L18 32.5l-6.4 1.8v-2.4l4-3v-6.8L3.5 25.3v-3.4l12.1-7.2V5.3c0-1.6 1-2.8 2.4-2.8Z"></path>
+    <path class="aircraft-highlight" d="M18 5.4v23.8"></path>`;
 }
 
 function markerHtml(item) {
@@ -351,17 +490,11 @@ function markerHtml(item) {
   const classes = [
     item.emergency && item.emergency !== "none" ? "is-emergency" : "",
   ].filter(Boolean).join(" ");
-  const glyph = item.onGround
-    ? `<svg class="aircraft-svg ground-svg" viewBox="0 0 36 36" aria-hidden="true">
-        <rect class="aircraft-body" x="8" y="12" width="20" height="12" rx="3"></rect>
-        <path class="aircraft-detail" d="M11 16h14M13 24v4M23 24v4"></path>
-        <circle class="aircraft-wheel" cx="13" cy="28" r="2"></circle>
-        <circle class="aircraft-wheel" cx="23" cy="28" r="2"></circle>
-      </svg>`
-    : `<svg class="aircraft-svg plane-svg" viewBox="0 0 36 36" aria-hidden="true" style="transform: rotate(${rotation}deg)">
-        <path class="aircraft-body" d="M18 2.5c1.4 0 2.4 1.2 2.4 2.8v9.4l12.1 7.2v3.4l-12.1-3.2v6.8l4 3v2.4L18 32.5l-6.4 1.8v-2.4l4-3v-6.8L3.5 25.3v-3.4l12.1-7.2V5.3c0-1.6 1-2.8 2.4-2.8Z"></path>
-        <path class="aircraft-highlight" d="M18 5.4v23.8"></path>
-      </svg>`;
+  const kind = aircraftKind(item);
+  const sizeScale = kind === "plane" ? planeSizeScale(item.category) : 1;
+  const glyph = `<svg class="aircraft-svg ${kind}-svg" viewBox="0 0 36 36" aria-hidden="true" style="transform: rotate(${rotation}deg) scale(${sizeScale})">
+      ${glyphInner(kind)}
+    </svg>`;
   return `<span class="aircraft-wrap ${classes}" style="--aircraft-color:${color};--aircraft-scale:${scale}">
     <span class="aircraft-symbol">${glyph}</span>${label}
   </span>`;
@@ -377,6 +510,29 @@ function markerIcon(item) {
   });
 }
 
+function verticalArrowSymbol(item) {
+  if (item.onGround) return "";
+  const rate = item.baroRate ?? item.geomRate;
+  if (rate == null) return "";
+  if (rate > 100) return "↑";
+  if (rate < -100) return "↓";
+  return "→";
+}
+
+function tooltipHtml(item) {
+  // Type slot (e.g. B744) needs a hex→type DB; route/ETA need external route data.
+  // Both are unavailable from raw ADS-B, so only callsign + live state are shown for now.
+  const arrow = verticalArrowSymbol(item);
+  const alt = item.onGround ? "GND" : escapeHtml(formatAltitude(item));
+  const spd = escapeHtml(formatSpeed(item));
+  return `<span class="tt-l1">${escapeHtml(formatFlight(item))}</span>`
+    + `<span class="tt-l2">${arrow ? `<b class="tt-arrow">${arrow}</b>` : ""}${alt} · ${spd}</span>`;
+}
+
+function applyMarkerHover(marker, hex) {
+  marker.getElement()?.classList.toggle("hovered", hoveredHex.value === hex);
+}
+
 function upsertMarkers() {
   if (!map) return;
   const visible = new Set();
@@ -384,18 +540,22 @@ function upsertMarkers() {
     if (item.lat == null || item.lon == null) continue;
     visible.add(item.hex);
     const latLng = [item.lat, item.lon];
-    const title = `${formatFlight(item)} ${formatAltitude(item)} ${formatSpeed(item)} ${sourceLabel(item)}`;
+    const tip = tooltipHtml(item);
     const existing = markers.get(item.hex);
     if (existing) {
       existing.setLatLng(latLng);
       existing.setIcon(markerIcon(item));
-      existing.setTooltipContent(title);
+      existing.setTooltipContent(tip);
+      applyMarkerHover(existing, item.hex);
     } else {
-      const marker = L.marker(latLng, { icon: markerIcon(item), title });
-      marker.bindTooltip(title, { direction: "top", offset: [0, -12] });
+      const marker = L.marker(latLng, { icon: markerIcon(item) });
+      marker.bindTooltip(tip, { direction: "top", offset: [0, -14], className: "aircraft-tt" });
       marker.on("click", () => selectAircraft(item.hex, true));
+      marker.on("mouseover", () => { hoveredHex.value = item.hex; });
+      marker.on("mouseout", () => { if (hoveredHex.value === item.hex) hoveredHex.value = null; });
       marker.addTo(map);
       markers.set(item.hex, marker);
+      applyMarkerHover(marker, item.hex);
     }
   }
 
@@ -563,15 +723,43 @@ function queueHistoryChartRender() {
   nextTick(() => renderHistoryChart());
 }
 
+function trackSegmentColor(point) {
+  if (point.onGround) return ALT_COLOR_GROUND;
+  const alt = point.altBaro ?? point.altGeom;
+  if (alt == null) return ALT_COLOR_NONE;
+  return altitudeColorFeet(Math.round(alt / 500) * 500);
+}
+
 function drawTrack() {
   if (!map) return;
   if (trackLayer) trackLayer.remove();
   trackLayer = L.layerGroup();
-  const points = selectedTrack.value
-    .filter((point) => point.lat != null && point.lon != null)
-    .map((point) => [point.lat, point.lon]);
-  if (points.length >= 2) {
-    L.polyline(points, { color: "#fbbf24", opacity: 0.9, weight: 3 }).addTo(trackLayer);
+  const pts = selectedTrack.value.filter((point) => point.lat != null && point.lon != null);
+  if (pts.length >= 2) {
+    // Dark casing underneath for contrast, then altitude-colored segments on top.
+    L.polyline(pts.map((point) => [point.lat, point.lon]), {
+      color: "#071012", opacity: 0.55, weight: 5, interactive: false, lineCap: "round", lineJoin: "round",
+    }).addTo(trackLayer);
+
+    let run = [[pts[0].lat, pts[0].lon]];
+    let runColor = trackSegmentColor(pts[0]);
+    const flush = () => {
+      if (run.length >= 2) {
+        L.polyline(run, {
+          color: runColor, opacity: 0.95, weight: 3, interactive: false, lineCap: "round", lineJoin: "round",
+        }).addTo(trackLayer);
+      }
+    };
+    for (let i = 1; i < pts.length; i += 1) {
+      const color = trackSegmentColor(pts[i]);
+      run.push([pts[i].lat, pts[i].lon]);
+      if (color !== runColor) {
+        flush();
+        run = [[pts[i].lat, pts[i].lon]];
+        runColor = color;
+      }
+    }
+    flush();
   }
   drawPlaybackMarker();
   trackLayer.addTo(map);
@@ -728,6 +916,10 @@ function resetFilters() {
 }
 
 watch(filteredAircraft, () => upsertMarkers());
+watch(hoveredHex, (next, prev) => {
+  if (prev && markers.has(prev)) applyMarkerHover(markers.get(prev), prev);
+  if (next && markers.has(next)) applyMarkerHover(markers.get(next), next);
+});
 watch(selectedHistoryMetrics, () => queueHistoryChartRender(), { deep: true });
 watch(selectedTrack, () => queueHistoryChartRender());
 watch(playbackIndex, () => {
@@ -772,6 +964,18 @@ onUnmounted(() => {
           <button class="icon-button" title="Refresh" @click="refreshAll"><RefreshCw :size="18" /></button>
         </div>
       </div>
+      <div class="map-legend" aria-hidden="true">
+        <div class="legend-title">Altitude ({{ altitudeLegend.unit }})</div>
+        <div class="legend-body">
+          <div class="legend-bar" :style="{ background: altitudeLegend.gradient }"></div>
+          <div class="legend-ticks">
+            <span v-for="(tick, i) in altitudeLegend.ticks" :key="i">{{ tick.label }}</span>
+          </div>
+        </div>
+        <div class="legend-ground">
+          <span class="legend-ground-swatch" :style="{ background: altitudeLegend.groundColor }"></span>Ground
+        </div>
+      </div>
     </section>
 
     <aside class="panel">
@@ -784,10 +988,20 @@ onUnmounted(() => {
         <div class="metric-grid">
           <div><span>{{ stats.live }}</span><small>Live aircraft</small></div>
           <div><span>{{ stats.withPosition }}</span><small>With position</small></div>
+          <div><span>{{ stats.onGround }}</span><small>On ground</small></div>
+          <div><span>{{ stats.nonIcao }}</span><small>Non-ICAO</small></div>
           <div><span>{{ lastUpdated ? formatAge(lastUpdated) : "-" }}</span><small>Updated</small></div>
+          <div><span>{{ receivers.length }}</span><small>Receivers</small></div>
+        </div>
+        <div v-if="sourceChips.length" class="source-chips">
+          <span v-for="chip in sourceChips" :key="chip.key" class="source-chip">{{ chip.label }} <b>{{ chip.count }}</b></span>
         </div>
 
         <section v-if="selectedAircraft" class="detail">
+          <div v-if="selectedAlert" :class="['detail-alert', selectedAlert.level]">
+            <span class="detail-alert-label">{{ selectedAlert.label }}</span>
+            <span v-if="selectedAlert.code" class="detail-alert-code">{{ selectedAlert.code }}</span>
+          </div>
           <div class="detail-head">
             <div>
               <h2>{{ formatFlight(selectedAircraft) }}</h2>
@@ -867,12 +1081,59 @@ onUnmounted(() => {
               <span>{{ selectedHistoryPoint?.positionAt || "-" }}</span>
               <a :href="kmlHref"><Download :size="14" /> KML</a>
             </div>
+
+            <div class="tracklog">
+              <button type="button" class="tracklog-toggle" @click="tracklogOpen = !tracklogOpen">
+                <ChevronDown :class="['chevron', { open: tracklogOpen }]" :size="16" />
+                Track log <small>{{ selectedTrack.length }} points</small>
+              </button>
+              <div v-if="tracklogOpen" class="tracklog-body">
+                <table>
+                  <thead>
+                    <tr><th>Time</th><th>Alt</th><th>GS</th><th>Trk</th><th>V/S</th><th>Lat, Lon</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="row in tracklogRows"
+                      :key="row.index"
+                      :class="{ active: playbackIndex === row.index }"
+                      @click="focusTrackPoint(row.index)"
+                    >
+                      <td>{{ formatClock(row.point.positionAt) }}</td>
+                      <td>{{ pointAltitude(row.point) }}</td>
+                      <td>{{ pointSpeed(row.point) }}</td>
+                      <td>{{ formatDegrees(row.point.track) }}</td>
+                      <td>{{ formatRate(row.point.baroRate ?? row.point.geomRate) }}</td>
+                      <td>{{ row.point.lat.toFixed(3) }}, {{ row.point.lon.toFixed(3) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-if="!tracklogRows.length" class="tracklog-empty">No positioned track points</div>
+                <div v-else-if="tracklogHidden" class="tracklog-more">+{{ tracklogHidden }} older points not shown</div>
+              </div>
+            </div>
           </div>
         </section>
 
         <section class="list">
-          <header><CircleDot :size="17" /><span>Aircraft</span></header>
-          <button v-for="item in filteredAircraft" :key="item.hex" :class="['aircraft-row', { active: selectedHex === item.hex }]" @click="selectAircraft(item.hex, true)">
+          <header>
+            <CircleDot :size="17" /><span>Aircraft</span>
+            <select v-model="sortKey" class="list-sort">
+              <option value="callsign">Callsign</option>
+              <option value="altitude">Altitude</option>
+              <option value="speed">Speed</option>
+              <option value="recent">Recent</option>
+            </select>
+          </header>
+          <button
+            v-for="item in filteredAircraft"
+            :key="item.hex"
+            :class="['aircraft-row', { active: selectedHex === item.hex, hovered: hoveredHex === item.hex, 'is-alert': !!aircraftAlert(item) }]"
+            @click="selectAircraft(item.hex, true)"
+            @mouseenter="setHover(item.hex)"
+            @mouseleave="clearHover(item.hex)"
+          >
+            <span class="alt-dot" :style="{ background: altitudeColor(item) }"></span>
             <span><strong>{{ formatFlight(item) }}</strong><small>{{ item.hex.toUpperCase() }} · {{ sourceLabel(item) }}</small></span>
             <span><strong>{{ formatAltitude(item) }}</strong><small>{{ formatSpeed(item) }} · {{ formatAge(item.observedAt) }}</small></span>
           </button>
