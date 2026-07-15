@@ -43,16 +43,6 @@ function distanceNauticalMiles(aLat, aLon, bLat, bLon) {
   return 2 * radiusNm * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-function initialBearingDegrees(aLat, aLon, bLat, bLon) {
-  const lat1 = toRadians(aLat);
-  const lat2 = toRadians(bLat);
-  const dLon = toRadians(bLon - aLon);
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x = Math.cos(lat1) * Math.sin(lat2)
-    - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-  return (toDegrees(Math.atan2(y, x)) + 360) % 360;
-}
-
 function finiteLatLon(lat, lon) {
   return Number.isFinite(Number(lat)) && Number.isFinite(Number(lon));
 }
@@ -73,28 +63,28 @@ function closeRing(coords) {
   return ring.length >= 4 ? ring : null;
 }
 
-function coverageRingForReceiver(rows, receiverLat, receiverLon, stepDegrees) {
-  if (!finiteLatLon(receiverLat, receiverLon)) {
-    return closeRing(convexHull(rows.map(pointCoord)));
+function coverageRingForReceiver(rows, receiverLat, receiverLon) {
+  const positioned = rows.filter((row) => finiteLatLon(row.lat, row.lon));
+  if (positioned.length < 3) {
+    return closeRing(convexHull(positioned.map(pointCoord)));
   }
 
-  const step = Math.max(0.1, Math.min(10, Number(stepDegrees) || 1));
-  const buckets = new Map();
-  for (const row of rows) {
-    const bearing = initialBearingDegrees(receiverLat, receiverLon, row.lat, row.lon);
-    const bucket = ((Math.round(bearing / step) * step) % 360).toFixed(3);
-    const distance = distanceNauticalMiles(receiverLat, receiverLon, row.lat, row.lon);
-    const existing = buckets.get(bucket);
-    if (!existing || distance > existing.distance || (
-      distance === existing.distance && String(row.position_at) > String(existing.row.position_at)
-    )) {
-      buckets.set(bucket, { bearing, distance, row });
-    }
+  // A radial "farthest point per bearing" envelope is pathologically sensitive to
+  // outliers: a single freak long-range reception produces a needle spike, and empty
+  // bearings connect distant points into self-crossing chords. Instead, drop far
+  // outliers relative to the bulk of receptions and take the convex hull, which yields
+  // a clean, closed, non-self-intersecting coverage blob for both sparse and dense data.
+  let kept = positioned;
+  if (finiteLatLon(receiverLat, receiverLon)) {
+    const measured = positioned
+      .map((row) => ({ row, distance: distanceNauticalMiles(receiverLat, receiverLon, row.lat, row.lon) }))
+      .sort((a, b) => a.distance - b.distance);
+    const p95 = measured[Math.min(measured.length - 1, Math.floor(measured.length * 0.95))].distance;
+    const cutoff = Math.max(p95 * 1.3, 1);
+    kept = measured.filter((entry) => entry.distance <= cutoff).map((entry) => entry.row);
   }
 
-  return closeRing([...buckets.values()]
-    .sort((a, b) => a.bearing - b.bearing)
-    .map(({ row }) => pointCoord(row)));
+  return closeRing(convexHull(kept.map(pointCoord)));
 }
 
 function cross(o, a, b) {
@@ -692,7 +682,6 @@ export function getCoverage(db, options = {}) {
         group.rows,
         group.receiverLat,
         group.receiverLon,
-        options.coverageBearingStepDegrees,
       );
       return {
         receiverName: group.receiverName,

@@ -81,6 +81,7 @@ const sortKey = ref("callsign");
 const tracklogOpen = ref(false);
 const status = ref("loading");
 const lastUpdated = ref(null);
+const now = ref(Date.now());
 const trackHours = ref(24);
 const settings = ref(loadSettings());
 const controlsOpen = ref(false);
@@ -96,6 +97,7 @@ let playbackMarker;
 let coverageLayer;
 let historyChart;
 let refreshTimer;
+let clockTimer;
 let eventSource;
 let playbackTimer;
 const markers = new Map();
@@ -272,7 +274,7 @@ function formatRate(fpm) {
 
 function formatAge(iso) {
   if (!iso) return "-";
-  const seconds = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  const seconds = Math.max(0, Math.round((now.value - Date.parse(iso)) / 1000));
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   return `${Math.round(seconds / 3600)}h`;
@@ -933,6 +935,7 @@ onMounted(async () => {
   applyBaseLayer();
   await refreshAll();
   refreshTimer = setInterval(refreshAll, 10000);
+  clockTimer = setInterval(() => { now.value = Date.now(); }, 1000);
   eventSource = new EventSource("/api/events");
   eventSource.addEventListener("ingest", () => refreshAll());
   eventSource.onerror = () => { status.value = "reconnecting"; };
@@ -940,6 +943,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   clearInterval(refreshTimer);
+  clearInterval(clockTimer);
   clearInterval(playbackTimer);
   destroyHistoryChart();
   eventSource?.close();
@@ -987,7 +991,6 @@ onUnmounted(() => {
 
         <div class="metric-grid">
           <div><span>{{ stats.live }}</span><small>Live aircraft</small></div>
-          <div><span>{{ stats.withPosition }}</span><small>With position</small></div>
           <div><span>{{ stats.onGround }}</span><small>On ground</small></div>
           <div><span>{{ stats.nonIcao }}</span><small>Non-ICAO</small></div>
           <div><span>{{ lastUpdated ? formatAge(lastUpdated) : "-" }}</span><small>Updated</small></div>
