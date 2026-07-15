@@ -25,7 +25,7 @@ const DEFAULT_SETTINGS = {
   units: "aero",
   baseLayer: "satellite",
   iconScale: 1,
-  labels: true,
+  labels: false,
   coverage: true,
   showGround: true,
   showNonIcao: true,
@@ -488,7 +488,11 @@ function markerHtml(item) {
   const rotation = item.onGround ? 0 : Number.isFinite(item.track) ? item.track : 0;
   const color = altitudeColor(item);
   const scale = Math.max(0.75, Math.min(1.6, Number(settings.value.iconScale) || 1));
-  const label = settings.value.labels ? `<span class="aircraft-label">${escapeHtml(formatFlight(item))}</span>` : "";
+  // Persistent labels clutter the map and hide neighbouring aircraft, so only the
+  // selected aircraft is always labelled; the "Labels" setting opts into all of them.
+  // Every aircraft still shows its callsign in the hover tooltip.
+  const showLabel = settings.value.labels || selectedHex.value === item.hex;
+  const label = showLabel ? `<span class="aircraft-label">${escapeHtml(formatFlight(item))}</span>` : "";
   const classes = [
     item.emergency && item.emergency !== "none" ? "is-emergency" : "",
   ].filter(Boolean).join(" ");
@@ -854,12 +858,17 @@ async function refreshTrack(resetPlayback = true) {
   const from = new Date(to.getTime() - trackHours.value * 60 * 60 * 1000);
   const params = new URLSearchParams({ from: from.toISOString(), to: to.toISOString() });
   const result = await fetchJson(`/api/aircraft/${selectedHex.value}/track?${params}`);
+  // Was the user watching the live edge (vs. scrubbing to a past point) before new
+  // points arrived? If so, follow the new live edge so a stale playback marker does not
+  // spawn behind the moving aircraft; only a deliberate scrub keeps its past position.
+  const wasAtLiveEdge = playbackIndex.value >= selectedTrack.value.length - 1;
   selectedTrack.value = result.points || [];
-  if (resetPlayback) {
-    playbackSpeed.value = 0;
-    playbackIndex.value = selectedTrack.value.length ? selectedTrack.value.length - 1 : 0;
+  const lastIndex = Math.max(0, selectedTrack.value.length - 1);
+  if (resetPlayback || (!playbackSpeed.value && wasAtLiveEdge)) {
+    if (resetPlayback) playbackSpeed.value = 0;
+    playbackIndex.value = lastIndex;
   } else {
-    playbackIndex.value = Math.min(playbackIndex.value, Math.max(0, selectedTrack.value.length - 1));
+    playbackIndex.value = Math.min(playbackIndex.value, lastIndex);
   }
   drawTrack();
 }
@@ -1186,7 +1195,7 @@ onUnmounted(() => {
               <label><span>Icon scale</span><input v-model.number="settings.iconScale" type="range" min="0.75" max="1.6" step="0.05" /></label>
             </div>
             <div class="toggle-row">
-              <label><input v-model="settings.labels" type="checkbox" /> Labels</label>
+              <label><input v-model="settings.labels" type="checkbox" /> All labels</label>
             </div>
           </section>
         </div>
