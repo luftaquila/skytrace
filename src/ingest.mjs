@@ -63,8 +63,10 @@ function closeRing(coords) {
   return ring.length >= 4 ? ring : null;
 }
 
-const COVERAGE_SECTORS = 36;
-const COVERAGE_SMOOTH_WINDOW = 2;
+// Fine sectors + no cross-sector smoothing keep the outline lobed (following airways and
+// terrain) like a real coverage plot, instead of the bland round blob heavy smoothing gave.
+const COVERAGE_SECTORS = 72;
+const COVERAGE_SMOOTH_WINDOW = 0;
 const COVERAGE_MIN_POINTS = 8;
 // Altitude bands (feet) for the per-altitude coverage outlines. Higher aircraft are in
 // line of sight from farther away, so each band typically reaches farther than the one
@@ -109,11 +111,12 @@ function coverageRing(positioned, origin) {
     buckets[Math.min(COVERAGE_SECTORS - 1, Math.floor(bearing / sectorSize))].push(Math.hypot(east, north));
   }
 
-  // 90th-percentile range per sector rejects freak per-sector long-range receptions.
+  // 95th-percentile range per sector: shows most of the real reach while still rejecting
+  // the odd freak long-range hit.
   const ranges = buckets.map((list) => {
     if (!list.length) return null;
     list.sort((a, b) => a - b);
-    return list[Math.min(list.length - 1, Math.floor(list.length * 0.9))];
+    return list[Math.min(list.length - 1, Math.floor(list.length * 0.95))];
   });
   if (ranges.filter((range) => range != null).length < 3) return null;
 
@@ -138,7 +141,8 @@ function coverageRing(positioned, origin) {
       : (prev != null ? prev : next);
   }
 
-  // Circular triangular-weighted smoothing rounds off the remaining spikes.
+  // Optional circular triangular-weighted smoothing (disabled at window 0 to keep the
+  // lobed detail; raise COVERAGE_SMOOTH_WINDOW to round the outline off).
   const ring = [];
   for (let i = 0; i < COVERAGE_SECTORS; i += 1) {
     let acc = 0;
