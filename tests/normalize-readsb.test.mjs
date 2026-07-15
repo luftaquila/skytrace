@@ -42,6 +42,62 @@ test("normalizes readsb aircraft fields", () => {
   assert.equal(result.aircraft[0].positionAt, "2025-10-09T08:53:17.000Z");
 });
 
+test("normalizes legacy dump1090-mutability field names", () => {
+  const result = normalizeReadsbPayload({
+    now: 1760000000,
+    aircraft: [
+      {
+        hex: "71c511",
+        flight: "AAR116",
+        lat: 37.62,
+        lon: 128.24,
+        altitude: 35000,
+        speed: 452,
+        vert_rate: -640,
+        track: 79,
+        squawk: "7156",
+        category: "A3",
+        mlat: [],
+        tisb: [],
+        messages: 4188,
+        seen: 0.6,
+        seen_pos: 0.6,
+        rssi: -22.3,
+      },
+      {
+        hex: "71c533",
+        altitude: "ground",
+        mlat: [],
+        tisb: [],
+        seen: 1,
+      },
+    ],
+  });
+
+  assert.equal(result.aircraft.length, 2);
+  const [a, b] = result.aircraft;
+  assert.equal(a.altBaro, 35000);
+  assert.equal(a.gs, 452);
+  assert.equal(a.baroRate, -640);
+  assert.equal(a.track, 79);
+  assert.equal(a.onGround, false);
+  assert.equal(b.altBaro, 0);
+  assert.equal(b.onGround, true);
+});
+
+test("prefers modern readsb fields over legacy aliases", () => {
+  const result = normalizeReadsbPayload({
+    now: 1760000000,
+    aircraft: [
+      { hex: "abc123", alt_baro: 12000, altitude: 999, gs: 300, speed: 1, baro_rate: -100, vert_rate: 1, seen: 0 },
+    ],
+  });
+
+  assert.equal(result.aircraft[0].altBaro, 12000);
+  assert.equal(result.aircraft[0].gs, 300);
+  assert.equal(result.aircraft[0].baroRate, -100);
+});
+
 test("accepts non-ICAO target ids", () => {
   const result = normalizeReadsbPayload({
     now: 1760000000,

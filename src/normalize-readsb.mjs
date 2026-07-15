@@ -57,7 +57,8 @@ export function normalizeAircraft(raw, sourceNowMs = Date.now()) {
   const hex = normalizeHex(raw?.hex);
   if (!hex) return null;
 
-  const baro = parseAltitude(raw.alt_baro);
+  // readsb/dump1090-fa use alt_baro; legacy dump1090-mutability uses altitude.
+  const baro = parseAltitude(raw.alt_baro ?? raw.altitude);
   const positionAt = raw.seen_pos == null ? null : isoMinusSeconds(sourceNowMs, raw.seen_pos);
   const lat = finiteNumber(raw.lat);
   const lon = finiteNumber(raw.lon);
@@ -76,14 +77,14 @@ export function normalizeAircraft(raw, sourceNowMs = Date.now()) {
     altBaro: baro.altitude,
     altGeom: finiteNumber(raw.alt_geom),
     onGround: baro.onGround || raw.airground === "ground",
-    gs: finiteNumber(raw.gs),
+    gs: finiteNumber(raw.gs ?? raw.speed),
     ias: finiteNumber(raw.ias),
     tas: finiteNumber(raw.tas),
     mach: finiteNumber(raw.mach),
     track: finiteNumber(raw.track),
     trueHeading: finiteNumber(raw.true_heading),
     magHeading: finiteNumber(raw.mag_heading),
-    baroRate: finiteNumber(raw.baro_rate),
+    baroRate: finiteNumber(raw.baro_rate ?? raw.vert_rate),
     geomRate: finiteNumber(raw.geom_rate),
     trackRate: finiteNumber(raw.track_rate),
     roll: finiteNumber(raw.roll),
