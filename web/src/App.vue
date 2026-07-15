@@ -29,7 +29,7 @@ const DEFAULT_SETTINGS = {
   iconScale: 1,
   labels: false,
   coverage: true,
-  coverageBands: true,
+  coverageBands: false,
   airfields: true,
   airfieldsMinor: false,
   showGround: true,
@@ -698,25 +698,37 @@ function upsertMarkers() {
   }
 }
 
-// Backend ring is [lon, lat]; Leaflet wants [lat, lon]. Straight segments (no spline) keep
-// the angular, data-hugging outline instead of rounding it into a blob.
-function ringToLatLngs(ring) {
-  return (ring || []).map(([lon, lat]) => [lat, lon]);
-}
-
 function bandMidFeet(band) {
   const max = band.maxAltitude ?? band.minAltitude + 10000;
   return (band.minAltitude + max) / 2;
 }
 
-function drawCoverageOutline(latLngs, color, weight, tooltip) {
-  if (latLngs.length < 2) return;
-  L.polyline(latLngs, {
-    color: "#071012", weight: weight + 3, opacity: 0.45, interactive: false, lineCap: "round", lineJoin: "round",
-  }).addTo(coverageLayer);
-  L.polyline(latLngs, {
-    color, weight, opacity: 0.95, interactive: true, lineCap: "round", lineJoin: "round",
-  }).bindTooltip(tooltip).addTo(coverageLayer);
+// Backend ring is [lon, lat]; convert to [lat, lon] and Catmull-Rom smooth it into clean
+// curves (keeps the lobes, drops the sawtooth).
+function smoothRing(ring) {
+  const pts = (ring || []).map(([lon, lat]) => [lat, lon]);
+  if (pts.length > 1 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]) pts.pop();
+  const n = pts.length;
+  if (n < 3) return pts;
+  const out = [];
+  const steps = 8;
+  for (let i = 0; i < n; i += 1) {
+    const p0 = pts[(i - 1 + n) % n];
+    const p1 = pts[i];
+    const p2 = pts[(i + 1) % n];
+    const p3 = pts[(i + 2) % n];
+    for (let s = 0; s < steps; s += 1) {
+      const t = s / steps;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      out.push([
+        0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
+        0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3),
+      ]);
+    }
+  }
+  out.push(out[0]);
+  return out;
 }
 
 function drawCoverage() {
@@ -729,30 +741,34 @@ function drawCoverage() {
     const bands = area.bands || [];
     const banded = settings.value.coverageBands && bands.length > 0;
 
-    // Always draw the overall extent (all receptions). Altitude bands only cover points
-    // that report an altitude, and ~1/5 of far receptions have none — so without this the
-    // outline would shrink whenever "by altitude" is on. Keep it as the constant boundary.
+    // Overall extent as one soft translucent area (always drawn: altitude bands drop the
+    // ~1/5 of far receptions that report no altitude, so this is the honest boundary).
     const overallRing = area.polygon?.coordinates?.[0];
     if (overallRing?.length) {
-      drawCoverageOutline(
-        ringToLatLngs(overallRing),
-        banded ? "#c7d2d0" : "#48e0d1",
-        banded ? 1.5 : 3,
-        `${area.receiverName || "Receiver"} · ${area.count} positions · max ${formatNumberUnit(altitudeValue(area.maxAltitude))}`,
-      );
+      L.polygon(smoothRing(overallRing), {
+        color: "#5eead4",
+        weight: banded ? 1 : 2,
+        opacity: banded ? 0.55 : 0.9,
+        fillColor: "#2dd4bf",
+        fillOpacity: banded ? 0.05 : 0.12,
+        lineJoin: "round",
+      }).bindTooltip(`${area.receiverName || "Receiver"} · ${area.count} positions · max ${formatNumberUnit(altitudeValue(area.maxAltitude))}`)
+        .addTo(coverageLayer);
     }
 
-    // Highest band first (largest, underneath) so lower bands stay visible on top.
+    // Altitude bands: thin coloured outlines inside the boundary (highest first).
     if (banded) {
       for (const band of [...bands].sort((a, b) => bandMidFeet(b) - bandMidFeet(a))) {
         const ring = band.polygon?.coordinates?.[0];
         if (!ring?.length) continue;
-        drawCoverageOutline(
-          ringToLatLngs(ring),
-          altitudeColorFeet(bandMidFeet(band)),
-          2.5,
-          `${area.receiverName || "Receiver"} · ${band.label} · ${band.count} pos`,
-        );
+        L.polyline(smoothRing(ring), {
+          color: altitudeColorFeet(bandMidFeet(band)),
+          weight: 2,
+          opacity: 0.9,
+          lineCap: "round",
+          lineJoin: "round",
+        }).bindTooltip(`${area.receiverName || "Receiver"} · ${band.label} · ${band.count} pos`)
+          .addTo(coverageLayer);
       }
     }
   }
