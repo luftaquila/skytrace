@@ -63,28 +63,90 @@ function closeRing(coords) {
   return ring.length >= 4 ? ring : null;
 }
 
+const COVERAGE_SECTORS = 36;
+const COVERAGE_SMOOTH_WINDOW = 2;
+
 function coverageRingForReceiver(rows, receiverLat, receiverLon) {
   const positioned = rows.filter((row) => finiteLatLon(row.lat, row.lon));
-  if (positioned.length < 3) {
+  // Too few receptions for a stable radial envelope: fall back to a convex hull.
+  if (positioned.length < 8) {
     return closeRing(convexHull(positioned.map(pointCoord)));
   }
 
-  // A radial "farthest point per bearing" envelope is pathologically sensitive to
-  // outliers: a single freak long-range reception produces a needle spike, and empty
-  // bearings connect distant points into self-crossing chords. Instead, drop far
-  // outliers relative to the bulk of receptions and take the convex hull, which yields
-  // a clean, closed, non-self-intersecting coverage blob for both sparse and dense data.
-  let kept = positioned;
-  if (finiteLatLon(receiverLat, receiverLon)) {
-    const measured = positioned
-      .map((row) => ({ row, distance: distanceNauticalMiles(receiverLat, receiverLon, row.lat, row.lon) }))
-      .sort((a, b) => a.distance - b.distance);
-    const p95 = measured[Math.min(measured.length - 1, Math.floor(measured.length * 0.95))].distance;
-    const cutoff = Math.max(p95 * 1.3, 1);
-    kept = measured.filter((entry) => entry.distance <= cutoff).map((entry) => entry.row);
+  // A "farthest point per bearing" envelope is pathologically outlier-sensitive (one
+  // freak long-range hit becomes a needle spike) and a convex hull over-states coverage
+  // by swallowing large never-seen regions. Instead build a polar max-range plot: bucket
+  // receptions into bearing sectors about an origin, take a high percentile range per
+  // sector, interpolate empty sectors and smooth. Origin is the receiver when its
+  // location is known, otherwise the centroid of receptions (the public feed hides
+  // receiver coordinates), which still yields a representative lobed coverage outline.
+  let originLat = Number(receiverLat);
+  let originLon = Number(receiverLon);
+  if (!finiteLatLon(originLat, originLon)) {
+    originLat = positioned.reduce((sum, row) => sum + row.lat, 0) / positioned.length;
+    originLon = positioned.reduce((sum, row) => sum + row.lon, 0) / positioned.length;
   }
 
-  return closeRing(convexHull(kept.map(pointCoord)));
+  // Local equirectangular projection to nautical miles (east, north) about the origin.
+  const cosLat = Math.cos(toRadians(originLat)) || 1e-6;
+  const sectorSize = 360 / COVERAGE_SECTORS;
+  const buckets = Array.from({ length: COVERAGE_SECTORS }, () => []);
+  for (const row of positioned) {
+    const east = (row.lon - originLon) * cosLat * 60;
+    const north = (row.lat - originLat) * 60;
+    const bearing = (toDegrees(Math.atan2(east, north)) + 360) % 360;
+    buckets[Math.min(COVERAGE_SECTORS - 1, Math.floor(bearing / sectorSize))].push(Math.hypot(east, north));
+  }
+
+  // 90th-percentile range per sector rejects freak per-sector long-range receptions.
+  const ranges = buckets.map((list) => {
+    if (!list.length) return null;
+    list.sort((a, b) => a - b);
+    return list[Math.min(list.length - 1, Math.floor(list.length * 0.9))];
+  });
+  if (ranges.filter((range) => range != null).length < 3) {
+    return closeRing(convexHull(positioned.map(pointCoord)));
+  }
+
+  // Fill empty sectors by interpolating angularly between the nearest populated ones.
+  const filled = ranges.slice();
+  for (let i = 0; i < COVERAGE_SECTORS; i += 1) {
+    if (filled[i] != null) continue;
+    let prev = null;
+    let next = null;
+    let prevGap = 0;
+    let nextGap = 0;
+    for (let d = 1; d < COVERAGE_SECTORS; d += 1) {
+      const value = ranges[((i - d) % COVERAGE_SECTORS + COVERAGE_SECTORS) % COVERAGE_SECTORS];
+      if (value != null) { prev = value; prevGap = d; break; }
+    }
+    for (let d = 1; d < COVERAGE_SECTORS; d += 1) {
+      const value = ranges[(i + d) % COVERAGE_SECTORS];
+      if (value != null) { next = value; nextGap = d; break; }
+    }
+    filled[i] = prev != null && next != null
+      ? prev + (next - prev) * (prevGap / (prevGap + nextGap))
+      : (prev != null ? prev : next);
+  }
+
+  // Circular triangular-weighted smoothing rounds off the remaining spikes.
+  const ring = [];
+  for (let i = 0; i < COVERAGE_SECTORS; i += 1) {
+    let acc = 0;
+    let weight = 0;
+    for (let k = -COVERAGE_SMOOTH_WINDOW; k <= COVERAGE_SMOOTH_WINDOW; k += 1) {
+      const w = COVERAGE_SMOOTH_WINDOW + 1 - Math.abs(k);
+      acc += filled[((i + k) % COVERAGE_SECTORS + COVERAGE_SECTORS) % COVERAGE_SECTORS] * w;
+      weight += w;
+    }
+    const range = acc / weight;
+    const angle = toRadians((i + 0.5) * sectorSize);
+    ring.push([
+      roundCoord(originLon + (range * Math.sin(angle)) / cosLat / 60),
+      roundCoord(originLat + (range * Math.cos(angle)) / 60),
+    ]);
+  }
+  return closeRing(ring);
 }
 
 function cross(o, a, b) {
