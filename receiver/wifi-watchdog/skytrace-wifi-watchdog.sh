@@ -1,17 +1,22 @@
 #!/bin/bash
-# skytrace WiFi watchdog for the Orange Pi i96 (RDA5991 / rdawfmac over SDIO).
+# skytrace receiver watchdog for the Orange Pi i96. Two independent, unattended
+# self-heals (board-internal, no human):
 #
-# The onboard WiFi periodically wedges at the firmware SDIO control channel
-# (dmesg: "wland_sdio_bus_rxctl: resumed on timeout") — a total blackout where
-# the board is alive locally but can't pass data. This recovers it unattended,
-# board-internal, without a human:
-#   1. detect a REAL blackout: WAN unreachable, sustained (gateway flaps are
-#      noise and are deliberately ignored),
-#   2. try a WiFi module reload first (re-inits the firmware, no full reboot),
-#   3. reboot only as a backstop if the reload doesn't bring WAN back.
+# A) WiFi blackout (RDA5991/rdawfmac SDIO firmware wedge — dmesg
+#    "wland_sdio_bus_rxctl: resumed on timeout"): board alive but can't pass data.
+#      1. detect a REAL blackout: WAN unreachable, sustained (gateway flaps are
+#         noise and are deliberately ignored),
+#      2. reload the WiFi module first (re-inits firmware, no reboot),
+#      3. reboot only as a backstop if that doesn't bring WAN back (rate-limited).
 #
-# Every action is logged to $LOG so we can tell (over a few days) whether the
-# module reload alone is enough, or whether reboots are actually needed.
+# B) readsb SDR stream stall (RTL-SDR USB sample stream dies — dmesg
+#    "Lost N packets on USB" degrading to a full stop): readsb stays "active" and
+#    the board stays online, but it reads 0 samples -> 0 messages -> 0 aircraft.
+#    WAN is fine so (A) never fires. Detected directly via readsb's
+#    samples_processed (traffic-independent, unlike message count); recovered by
+#    restarting readsb, which re-opens the dongle (no reboot).
+#
+# Every action is logged to $LOG.
 set -u
 
 WAN="${WAN:-1.1.1.1}"          # external target; if this is unreachable for a
@@ -22,9 +27,14 @@ MODULE="${MODULE:-rdawfmac}"
 LOG="${LOG:-/var/log/skytrace-wifi-watchdog.log}"
 STAMPS="${STAMPS:-/var/lib/skytrace-wifi-watchdog.reboots}"
 MAX_REBOOTS_PER_HR="${MAX_REBOOTS_PER_HR:-4}"
+STATS="${STATS:-/run/readsb/stats.json}"
+SDR_FAILS="${SDR_FAILS:-4}"     # consecutive checks with 0 samples before restarting readsb (~40s)
+SDR_COOLDOWN="${SDR_COOLDOWN:-90}"  # skip SDR check for this long after a watchdog readsb restart (warmup)
 
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
 wan_ok(){ ping -c1 -W3 "$WAN" >/dev/null 2>&1; }
+# samples_processed over the last minute; -1 if stats unreadable (skip, don't penalize)
+sdr_samples(){ python3 -c "import json;print(json.load(open('$STATS')).get('last1min',{}).get('local',{}).get('samples_processed',-1))" 2>/dev/null || echo -1; }
 
 reload_module(){
   # Runs backgrounded by the caller so a stuck rmmod can never block the loop
@@ -50,8 +60,11 @@ can_reboot(){
 
 fails=0
 reloaded=0
-log "watchdog started (WAN=$WAN interval=${INTERVAL}s blackout=$BLACKOUT grace=$GRACE)"
+sdr_fails=0
+sdr_ok_after=0
+log "watchdog started (WAN=$WAN interval=${INTERVAL}s blackout=$BLACKOUT grace=$GRACE sdr_fails=$SDR_FAILS)"
 while true; do
+  # --- (A) WiFi blackout: WAN reachability ---
   if wan_ok; then
     [ "$fails" -ge "$BLACKOUT" ] && log "RECOVERED (was down ~$((fails*INTERVAL))s, module-reload=$reloaded)"
     fails=0; reloaded=0
@@ -72,5 +85,25 @@ while true; do
       fi
     fi
   fi
+
+  # --- (B) readsb SDR stream stall: samples must keep flowing while readsb runs ---
+  if [ "$(date +%s)" -ge "$sdr_ok_after" ] && systemctl is-active --quiet readsb; then
+    sp=$(sdr_samples)
+    case "$sp" in
+      ''|-1|*[!0-9]*) : ;;                       # unreadable/non-numeric -> skip, don't penalize
+      0)
+        sdr_fails=$((sdr_fails+1))
+        [ $((sdr_fails % 2)) -eq 0 ] && log "readsb SDR: 0 samples x$sdr_fails (~$((sdr_fails*INTERVAL))s)"
+        if [ "$sdr_fails" -ge "$SDR_FAILS" ]; then
+          log "SDR STREAM STALLED (~$((sdr_fails*INTERVAL))s 0 samples, readsb active) -> restart readsb"
+          systemctl restart readsb
+          sdr_fails=0
+          sdr_ok_after=$(( $(date +%s) + SDR_COOLDOWN ))
+        fi
+        ;;
+      *) sdr_fails=0 ;;                           # samples flowing
+    esac
+  fi
+
   sleep "$INTERVAL"
 done
