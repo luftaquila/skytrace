@@ -43,6 +43,10 @@ This board is inexpensive and has chronic quirks that dominate operations:
 3. **Clock resets on boot.** No working RTC battery: the clock comes up in the past
    and NTP steps it forward. readsb may log `system clock jumped` during that
    correction — harmless once NTP settles; give it a minute after boot.
+4. **`systemctl is-system-running` may read `degraded`** because `e2scrub_reap.service`
+   fails — a stock ext4 online-fsck LVM-snapshot reaper that has nothing to do on a
+   board with no LVM. Benign; it's masked (`systemctl mask e2scrub_reap.service`) so
+   the state stays `running`.
 
 Because of (1) and (2), periodic outages are expected. The watchdog recovers them.
 
@@ -54,12 +58,19 @@ Because of (1) and (2), periodic outages are expected. The watchdog recovers the
 
 | Mode | What you see | Signature | Auto-recovery |
 |---|---|---|---|
-| **A. WiFi blackout** | board unreachable; server stops receiving (receiver goes `online:false`) | WAN unreachable, **sustained** (gateway pings flap even when healthy → ignored as noise) | reload the WiFi module (firmware re-init, no reboot); **reboot** as a backstop if that fails, rate-limited |
-| **B. readsb SDR stall** | site shows **0 aircraft** but board is online & `readsb` is "active" | `samples_processed` frozen at 0 while readsb active; `messages` counter frozen | **restart `readsb`** to re-open the dongle (no reboot) |
+| **A. WiFi blackout** | board unreachable; server stops receiving (receiver goes `online:false`) | WAN (1.1.1.1) unreachable ~20s sustained (gateway pings flap even when healthy → ignored as noise) | **reboot**, rate-limited (≤4/hr). No module reload — `rmmod rdawfmac` hangs on the wedged driver (rc=137), so it was dropped; reboot is the only thing that recovers the wedge |
+| **B. readsb SDR stall** | site shows **0 aircraft** but board is online & `readsb` is "active" | `samples_processed` frozen at 0 (~20s) while readsb active; `messages` counter frozen | **restart `readsb`** to re-open the dongle (no reboot) |
 
 Mode B is invisible to Mode A's WAN check (the board stays online), so it's
 detected separately via readsb's `samples_processed` — a **traffic-independent**
 signal (message count would false-negative during quiet hours).
+
+**Startup grace (critical):** the watchdog will **not** reboot during the first
+**3 min** of uptime. After a boot the WiFi takes tens of seconds to associate, so
+without this the ~20s blackout check would reboot before WiFi ever comes up — an
+endless boot-loop. Tunables (env in the unit or top of the script):
+`INTERVAL=5`, `BLACKOUT=4` (→20s), `STARTUP_GRACE=180`, `SDR_FAILS=4` (→20s),
+`MAX_REBOOTS_PER_HR=4`.
 
 ## Last-resort backstop: network smart plug
 
@@ -81,8 +92,10 @@ shutdown) — use it for a hung board, not casually.
 
 **Site shows 0 aircraft**
 1. Server `/api/receivers/public` → the receiver's `online` / `lastSeenAt`:
-   - `online:false` → **Mode A** (WiFi blackout). Watchdog should recover within
-     ~1 min; if not, power-cycle via the plug.
+   - `online:false` → **Mode A** (WiFi blackout). The watchdog reboots after ~20s
+     of blackout (once uptime ≥ 3 min) and the board returns after boot. If it's
+     been down much longer, it's either rate-limited (≤4/hr) or a true hang —
+     power-cycle via the plug.
    - `online:true`, `currentAircraft:0` → **Mode B** or genuinely quiet airspace.
 2. On the board: `systemctl is-active readsb`, then read
    `last1min.local.samples_processed` in `/run/readsb/stats.json`:
