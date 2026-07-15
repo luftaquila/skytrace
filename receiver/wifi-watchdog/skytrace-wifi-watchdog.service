@@ -1,0 +1,14 @@
+[Unit]
+Description=Skytrace WiFi watchdog (recover rdawfmac SDIO firmware hang: reload then reboot)
+After=network.target wpa_supplicant.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/skytrace-wifi-watchdog.sh
+Restart=always
+RestartSec=10
+# Needs root for rmmod/modprobe/reboot.
+User=root
+
+[Install]
+WantedBy=multi-user.target
