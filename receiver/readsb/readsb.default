@@ -1,13 +1,17 @@
 # /etc/default/readsb — skytrace receiver decoder options.
 # Kept minimal for the Orange Pi i96 (227MB RAM, no swap, single core).
+# deploy.sh generates this file from the receiver's LAT/LON; this is a reference.
 
 # RTL-SDR tuning. --gain auto works everywhere; a fixed value (e.g. --gain 49.6)
 # usually decodes better once you know your antenna. --ppm corrects tuner drift.
 RECEIVER_OPTIONS="--gain auto --ppm 0"
 
-# Receiver location improves CPR position decoding. Fill in your coordinates.
-# --max-range caps accepted position range (nm) as a sanity filter.
-DECODER_OPTIONS="--lat 0.0 --lon 0.0 --max-range 300"
+# Receiver location improves CPR decoding and enables --max-range filtering.
+# IMPORTANT: only set --max-range together with a REAL --lat/--lon — a range
+# filter around the wrong origin (e.g. 0,0) silently drops every position.
+# Leaving these empty still decodes airborne positions fine (global CPR).
+#DECODER_OPTIONS="--lat 37.5 --lon 127.0 --max-range 400"
+DECODER_OPTIONS=""
 
 # aircraft.json is written here every second; the skytrace agent reads this path.
 JSON_OPTIONS="--write-json /run/readsb --write-json-every 1"
