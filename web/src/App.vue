@@ -30,7 +30,7 @@ const DEFAULT_SETTINGS = {
   labels: false,
   coverage: true,
   coverageBands: true,
-  points: false,
+  points: true,
   airfields: true,
   airfieldsMinor: false,
   showGround: true,
@@ -588,38 +588,10 @@ function upsertMarkers() {
   }
 }
 
-function catmullRomPoint(p0, p1, p2, p3, t) {
-  const t2 = t * t;
-  const t3 = t2 * t;
-  return [
-    0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
-    0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3),
-  ];
-}
-
-function smoothClosedCoverageLine(ring) {
-  const source = (ring || []).map(([lon, lat]) => [lat, lon]);
-  if (source.length > 1) {
-    const first = source[0];
-    const last = source[source.length - 1];
-    if (first[0] === last[0] && first[1] === last[1]) source.pop();
-  }
-  const points = [...new Map(source.map((point) => [point.join(","), point])).values()];
-  if (points.length < 3) return points;
-
-  const smooth = [];
-  const steps = Math.max(6, Math.ceil(72 / points.length));
-  for (let i = 0; i < points.length; i += 1) {
-    const p0 = points[(i - 1 + points.length) % points.length];
-    const p1 = points[i];
-    const p2 = points[(i + 1) % points.length];
-    const p3 = points[(i + 2) % points.length];
-    for (let step = 0; step < steps; step += 1) {
-      smooth.push(catmullRomPoint(p0, p1, p2, p3, step / steps));
-    }
-  }
-  smooth.push(smooth[0]);
-  return smooth;
+// Backend ring is [lon, lat]; Leaflet wants [lat, lon]. Straight segments (no spline) keep
+// the angular, data-hugging outline instead of rounding it into a blob.
+function ringToLatLngs(ring) {
+  return (ring || []).map(([lon, lat]) => [lat, lon]);
 }
 
 function bandMidFeet(band) {
@@ -651,7 +623,7 @@ function drawCoverage() {
         const ring = band.polygon?.coordinates?.[0];
         if (!ring?.length) continue;
         drawCoverageOutline(
-          smoothClosedCoverageLine(ring),
+          ringToLatLngs(ring),
           altitudeColorFeet(bandMidFeet(band)),
           2.5,
           `${area.receiverName || "Receiver"} · ${band.label} · ${band.count} pos`,
@@ -661,7 +633,7 @@ function drawCoverage() {
       const ring = area.polygon?.coordinates?.[0];
       if (!ring?.length) continue;
       drawCoverageOutline(
-        smoothClosedCoverageLine(ring),
+        ringToLatLngs(ring),
         "#48e0d1",
         3,
         `${area.receiverName || "Receiver"} · ${area.count} positions · max ${formatNumberUnit(altitudeValue(area.maxAltitude))}`,
