@@ -103,6 +103,7 @@ let coverageLayer;
 let airfieldLayer;
 let historyChart;
 let refreshTimer;
+let coverageTimer;
 let clockTimer;
 let eventSource;
 let playbackTimer;
@@ -123,18 +124,18 @@ watch(playbackSpeed, () => {
 
 const stats = computed(() => {
   const rows = aircraft.value;
-  const sources = rows.reduce((acc, item) => {
+  const sources = {};
+  let withPosition = 0;
+  let onGround = 0;
+  let nonIcao = 0;
+  for (const item of rows) {
     const key = item.sourceKind || "unknown";
-    acc[key] = (acc[key] || 0) + 1;
-    return acc;
-  }, {});
-  return {
-    live: rows.length,
-    withPosition: rows.filter((item) => item.lat != null && item.lon != null).length,
-    onGround: rows.filter((item) => item.onGround).length,
-    nonIcao: rows.filter((item) => item.nonIcao).length,
-    sources,
-  };
+    sources[key] = (sources[key] || 0) + 1;
+    if (item.lat != null && item.lon != null) withPosition += 1;
+    if (item.onGround) onGround += 1;
+    if (item.nonIcao) nonIcao += 1;
+  }
+  return { live: rows.length, withPosition, onGround, nonIcao, sources };
 });
 
 const sourceOptions = computed(() => {
@@ -170,13 +171,25 @@ const coverageSummary = computed(() => {
   };
 });
 
-const filteredAircraft = computed(() => {
-  const q = search.value.trim().toLowerCase();
+const searchQuery = computed(() => search.value.trim().toLowerCase());
+
+const altFilter = computed(() => {
   const minAlt = Number.parseFloat(settings.value.altMin);
   const maxAlt = Number.parseFloat(settings.value.altMax);
-  const hasMin = Number.isFinite(minAlt);
-  const hasMax = Number.isFinite(maxAlt);
-  const rows = aircraft.value.filter((item) => {
+  return {
+    minAlt,
+    maxAlt,
+    hasMin: Number.isFinite(minAlt),
+    hasMax: Number.isFinite(maxAlt),
+  };
+});
+
+// Shared predicate for the sidebar list and the map markers, so upsertMarkers() can
+// reuse it without materialising a second filtered array. The search haystack is only
+// built when there is actually a query.
+function passesFilters(item) {
+  const q = searchQuery.value;
+  if (q) {
     const haystack = [
       item.hex,
       item.flight,
@@ -185,17 +198,27 @@ const filteredAircraft = computed(() => {
       item.sourceType,
       item.sourceKind,
     ].filter(Boolean).join(" ").toLowerCase();
-    if (q && !haystack.includes(q)) return false;
-    if (!settings.value.showGround && item.onGround) return false;
-    if (!settings.value.showNonIcao && item.nonIcao) return false;
-    if (settings.value.source !== "all" && item.sourceKind !== settings.value.source) return false;
+    if (!haystack.includes(q)) return false;
+  }
+  if (!settings.value.showGround && item.onGround) return false;
+  if (!settings.value.showNonIcao && item.nonIcao) return false;
+  if (settings.value.source !== "all" && item.sourceKind !== settings.value.source) return false;
+  const { hasMin, minAlt, hasMax, maxAlt } = altFilter.value;
+  if (hasMin || hasMax) {
     const alt = item.altBaro ?? item.altGeom;
     if (hasMin && (alt == null || alt < minAlt)) return false;
     if (hasMax && (alt == null || alt > maxAlt)) return false;
-    return true;
-  });
-  return sortAircraft(rows, sortKey.value).slice(0, 600);
-});
+  }
+  return true;
+}
+
+// Caps the sidebar list only. Map markers are limited separately (MARKER_LIMIT + viewport
+// culling), so the map can show aircraft that fall past this list cap — the two limits
+// intentionally serve different surfaces.
+const LIST_LIMIT = 600;
+const filteredAircraft = computed(() =>
+  sortAircraft(aircraft.value.filter(passesFilters), sortKey.value).slice(0, LIST_LIMIT),
+);
 
 function sortAircraft(rows, key) {
   const arr = [...rows];
@@ -262,9 +285,22 @@ function speedValue(knots) {
   return { value: knots, unit: "kt" };
 }
 
+// Cache one Intl.NumberFormat per fraction-digit count. Number.prototype.toLocaleString
+// with an options object rebuilds a formatter on nearly every call (~13µs) and this runs
+// twice per list row (altitude + speed), so at hundreds of rows it was ~99% of a full
+// re-render's cost. A cached formatter's .format() is ~40x cheaper for identical output.
+const numberFormatters = new Map();
+function numberFormatter(digits) {
+  let fmt = numberFormatters.get(digits);
+  if (!fmt) {
+    fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: digits });
+    numberFormatters.set(digits, fmt);
+  }
+  return fmt;
+}
 function formatNumberUnit(entry, digits = 0) {
   if (!entry) return "-";
-  return `${entry.value.toLocaleString(undefined, { maximumFractionDigits: digits })} ${entry.unit}`;
+  return `${numberFormatter(digits).format(entry.value)} ${entry.unit}`;
 }
 
 function formatAltitude(item, field = "best") {
@@ -443,7 +479,11 @@ function altitudeColorFeet(feet) {
 
 function altitudeColor(item) {
   if (item.onGround) return ALT_COLOR_GROUND;
-  return altitudeColorFeet(item.altBaro ?? item.altGeom);
+  const feet = item.altBaro ?? item.altGeom;
+  // Quantise to 500 ft bands (same as the track colouring) so a climbing or descending
+  // aircraft does not force a marker-icon rebuild on every altitude tick.
+  if (feet == null || !Number.isFinite(Number(feet))) return ALT_COLOR_NONE;
+  return altitudeColorFeet(Math.round(Number(feet) / 500) * 500);
 }
 
 const altitudeLegend = computed(() => {
@@ -496,8 +536,13 @@ function glyphInner(kind) {
     <path class="aircraft-highlight" d="M18 5.4v23.8"></path>`;
 }
 
+function markerRotation(item) {
+  if (item.onGround) return 0;
+  return Number.isFinite(item.track) ? Math.round(item.track) : 0;
+}
+
 function markerHtml(item) {
-  const rotation = item.onGround ? 0 : Number.isFinite(item.track) ? item.track : 0;
+  const rotation = markerRotation(item);
   const color = altitudeColor(item);
   const scale = Math.max(0.75, Math.min(1.6, Number(settings.value.iconScale) || 1));
   // Persistent labels clutter the map and hide neighbouring aircraft, so only the
@@ -528,6 +573,32 @@ function markerIcon(item) {
   });
 }
 
+function markerVisualScale() {
+  return Math.max(0.75, Math.min(1.6, Number(settings.value.iconScale) || 1));
+}
+
+function markerSizeScale(item) {
+  return aircraftKind(item) === "plane" ? planeSizeScale(item.category) : 1;
+}
+
+// Everything that changes the rendered icon HTML *except* position and rotation.
+// When unchanged, upsertMarkers() skips the costly setIcon() innerHTML rebuild and
+// only moves the marker (and, if needed, rotates its glyph) in place.
+function markerSignature(item) {
+  const selected = selectedHex.value === item.hex ? 1 : 0;
+  const showLabel = settings.value.labels || selected;
+  const label = showLabel ? formatFlight(item) : "";
+  const emergency = item.emergency && item.emergency !== "none" ? 1 : 0;
+  return `${aircraftKind(item)}|${altitudeColor(item)}|${markerVisualScale()}|${markerSizeScale(item)}|${selected}|${emergency}|${label}`;
+}
+
+function applyMarkerRotation(marker, rot, item) {
+  const svg = marker.getElement()?.querySelector(".aircraft-svg");
+  if (!svg) return false;
+  svg.style.transform = `rotate(${rot}deg) scale(${markerSizeScale(item)})`;
+  return true;
+}
+
 function verticalArrowSymbol(item) {
   if (item.onGround) return "";
   const rate = item.baroRate ?? item.geomRate;
@@ -551,22 +622,64 @@ function applyMarkerHover(marker, hex) {
   marker.getElement()?.classList.toggle("hovered", hoveredHex.value === hex);
 }
 
+// Slightly beyond the visible bounds so markers don't pop in right at the edge on a pan.
+const MARKER_BOUNDS_PAD = 0.25;
+// Safety cap on simultaneous DOM markers, independent of the sidebar's LIST_LIMIT. It only
+// bites on an extreme zoom-out with very heavy traffic (viewport culling keeps the normal
+// count far below it); when it does, the kept markers follow aircraft.value order, which is
+// arbitrary — acceptable for that edge case.
+const MARKER_LIMIT = 1000;
+
 function upsertMarkers() {
   if (!map) return;
+  const bounds = map.getBounds().pad(MARKER_BOUNDS_PAD);
   const visible = new Set();
-  for (const item of filteredAircraft.value) {
+  let count = 0;
+  for (const item of aircraft.value) {
     if (item.lat == null || item.lon == null) continue;
+    if (!passesFilters(item)) continue;
+    const selected = selectedHex.value === item.hex;
+    // Cull anything off-screen, but always keep the selected aircraft so its highlight
+    // and track survive a pan away. Real position updates still land the instant the
+    // marker is in view — this only trims what the user cannot see.
+    if (!selected && !bounds.contains([item.lat, item.lon])) continue;
+    if (!selected && count >= MARKER_LIMIT) continue;
+    count += 1;
     visible.add(item.hex);
-    const latLng = [item.lat, item.lon];
+
+    const rot = markerRotation(item);
+    const sig = markerSignature(item);
     const tip = tooltipHtml(item);
     const existing = markers.get(item.hex);
     if (existing) {
-      existing.setLatLng(latLng);
-      existing.setIcon(markerIcon(item));
-      existing.setTooltipContent(tip);
+      if (existing._lat !== item.lat || existing._lon !== item.lon) {
+        existing.setLatLng([item.lat, item.lon]);
+        existing._lat = item.lat;
+        existing._lon = item.lon;
+      }
+      if (existing._sig !== sig) {
+        // Appearance changed (colour band, selection, label, …): rebuild the icon,
+        // which also bakes in the current rotation.
+        existing.setIcon(markerIcon(item));
+        existing._sig = sig;
+        existing._rot = rot;
+      } else if (existing._rot !== rot) {
+        // Only the heading changed: nudge the glyph transform instead of rebuilding.
+        if (!applyMarkerRotation(existing, rot, item)) existing.setIcon(markerIcon(item));
+        existing._rot = rot;
+      }
+      if (existing._tip !== tip) {
+        existing.setTooltipContent(tip);
+        existing._tip = tip;
+      }
       applyMarkerHover(existing, item.hex);
     } else {
-      const marker = L.marker(latLng, { icon: markerIcon(item) });
+      const marker = L.marker([item.lat, item.lon], { icon: markerIcon(item) });
+      marker._lat = item.lat;
+      marker._lon = item.lon;
+      marker._sig = sig;
+      marker._rot = rot;
+      marker._tip = tip;
       marker.bindTooltip(tip, { direction: "top", offset: [0, -14], className: "aircraft-tt" });
       marker.on("click", () => selectAircraft(item.hex, true));
       marker.on("mouseover", () => { hoveredHex.value = item.hex; });
@@ -869,16 +982,41 @@ async function fetchJson(url) {
   return response.json();
 }
 
-async function refreshAll() {
+let liveRefreshTimer = null;
+let liveRefreshInFlight = false;
+
+// Live data (aircraft + receivers) is the hot path. Coalesce bursts — several receivers
+// each fire an SSE "ingest" at nearly the same time — into a single fetch after a short,
+// imperceptible delay instead of refetching once per event.
+function scheduleLiveRefresh(delay = 250) {
+  if (liveRefreshTimer != null) return;
+  liveRefreshTimer = setTimeout(runLiveRefresh, delay);
+}
+
+async function runLiveRefresh() {
+  liveRefreshTimer = null;
+  if (liveRefreshInFlight) {
+    scheduleLiveRefresh(50);
+    return;
+  }
+  liveRefreshInFlight = true;
   try {
-    const [current, receiverResult, coverageResult] = await Promise.all([
+    await refreshLive();
+  } finally {
+    liveRefreshInFlight = false;
+  }
+}
+
+async function refreshLive() {
+  try {
+    // Receivers ride the hot path with aircraft (it is a cheap endpoint) so "Updated"
+    // stays fresh; the heavy /api/coverage query is deferred to refreshCoverage().
+    const [current, receiverResult] = await Promise.all([
       fetchJson("/api/aircraft/current"),
       fetchJson("/api/receivers/public"),
-      fetchJson("/api/coverage"),
     ]);
     aircraft.value = current.aircraft || [];
     receivers.value = receiverResult.receivers || [];
-    coverage.value = coverageResult || { areas: [], points: [] };
     // "Updated" reflects when a receiver actually last sent data, not our poll time —
     // otherwise it resets to 0 every poll even while the feed is stalled.
     const lastSeen = receivers.value.reduce((max, receiver) => {
@@ -887,13 +1025,29 @@ async function refreshAll() {
     }, 0);
     lastUpdated.value = lastSeen ? new Date(lastSeen).toISOString() : null;
     status.value = "online";
-    upsertMarkers();
-    drawCoverage();
     if (selectedHex.value) await refreshTrack(false);
   } catch (err) {
     status.value = "offline";
     console.error(err);
   }
+}
+
+// Coverage is a slowly-accumulating historical overlay and its endpoint is the expensive
+// one, so it refreshes on a longer cadence instead of on every position update.
+async function refreshCoverage() {
+  try {
+    coverage.value = (await fetchJson("/api/coverage")) || { areas: [], points: [] };
+    drawCoverage();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+// Manual refresh button: reuse the same coalesced + in-flight-guarded path as live updates
+// so a click during an in-flight refresh can't spawn a second concurrent fetch.
+function refreshAll() {
+  scheduleLiveRefresh(0);
+  refreshCoverage();
 }
 
 async function refreshTrack(resetPlayback = true) {
@@ -970,7 +1124,8 @@ function resetFilters() {
   });
 }
 
-watch(filteredAircraft, () => upsertMarkers());
+watch(aircraft, () => upsertMarkers());
+watch(searchQuery, () => upsertMarkers());
 watch(hoveredHex, (next, prev) => {
   if (prev && markers.has(prev)) applyMarkerHover(markers.get(prev), prev);
   if (next && markers.has(next)) applyMarkerHover(markers.get(next), next);
@@ -987,20 +1142,27 @@ onMounted(async () => {
   // Airfield reference markers sit above coverage but below live aircraft.
   map.createPane("airfields").style.zIndex = 450;
   L.control.zoom({ position: "bottomright" }).addTo(map);
+  // Re-cull markers to the viewport after a pan or zoom (moveend also fires on zoom).
+  map.on("moveend", upsertMarkers);
   applyBaseLayer();
   drawAirfields();
-  await refreshAll();
-  refreshTimer = setInterval(refreshAll, 10000);
+  await refreshLive();
+  await refreshCoverage();
+  // Fallback poll in case the SSE stream drops; live updates are driven by ingest events.
+  refreshTimer = setInterval(() => scheduleLiveRefresh(0), 10000);
+  coverageTimer = setInterval(refreshCoverage, 30000);
   clockTimer = setInterval(() => { now.value = Date.now(); }, 1000);
   eventSource = new EventSource("/api/events");
-  eventSource.addEventListener("ingest", () => refreshAll());
+  eventSource.addEventListener("ingest", () => scheduleLiveRefresh());
   eventSource.onerror = () => { status.value = "reconnecting"; };
 });
 
 onUnmounted(() => {
   clearInterval(refreshTimer);
+  clearInterval(coverageTimer);
   clearInterval(clockTimer);
   clearInterval(playbackTimer);
+  if (liveRefreshTimer != null) clearTimeout(liveRefreshTimer);
   destroyHistoryChart();
   eventSource?.close();
   map?.remove();
