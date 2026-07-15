@@ -30,7 +30,6 @@ const DEFAULT_SETTINGS = {
   labels: false,
   coverage: true,
   coverageBands: true,
-  points: true,
   airfields: true,
   airfieldsMinor: false,
   showGround: true,
@@ -101,7 +100,6 @@ let tileLayer;
 let trackLayer;
 let playbackMarker;
 let coverageLayer;
-let pointsLayer;
 let airfieldLayer;
 let historyChart;
 let refreshTimer;
@@ -114,7 +112,6 @@ watch(settings, (value) => {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(value));
   applyBaseLayer();
   upsertMarkers();
-  drawReceptionPoints();
   drawCoverage();
   drawAirfields();
   queueHistoryChartRender();
@@ -643,30 +640,6 @@ function drawCoverage() {
   coverageLayer.addTo(map);
 }
 
-function drawReceptionPoints() {
-  if (!map) return;
-  if (pointsLayer) pointsLayer.remove();
-  pointsLayer = L.layerGroup();
-  if (settings.value.points) {
-    const pts = coverage.value.points || [];
-    // Subsample if there are a lot, to keep the overlay light.
-    const step = pts.length > 6000 ? Math.ceil(pts.length / 6000) : 1;
-    for (let i = 0; i < pts.length; i += step) {
-      const point = pts[i];
-      if (point.lat == null || point.lon == null) continue;
-      L.circleMarker([point.lat, point.lon], {
-        pane: "receptionPoints",
-        radius: 1.6,
-        stroke: false,
-        fillColor: altitudeColorFeet(point.maxAltitude),
-        fillOpacity: 0.5,
-        interactive: false,
-      }).addTo(pointsLayer);
-    }
-  }
-  pointsLayer.addTo(map);
-}
-
 function airfieldTooltip(field) {
   const codes = [field.icao, field.iata].filter(Boolean).join(" · ");
   const meta = [codes, field.city].filter(Boolean).join(" — ");
@@ -909,7 +882,6 @@ async function refreshAll() {
     lastUpdated.value = current.now;
     status.value = "online";
     upsertMarkers();
-    drawReceptionPoints();
     drawCoverage();
     if (selectedHex.value) await refreshTrack(false);
   } catch (err) {
@@ -1006,8 +978,6 @@ watch(playbackIndex, () => {
 
 onMounted(async () => {
   map = L.map(mapEl.value, { zoomControl: false, attributionControl: false, preferCanvas: true }).setView([36.2, 127.8], 7);
-  // Reception-point overlay sits below the coverage outline and aircraft markers.
-  map.createPane("receptionPoints").style.zIndex = 350;
   // Airfield reference markers sit above coverage but below live aircraft.
   map.createPane("airfields").style.zIndex = 450;
   L.control.zoom({ position: "bottomright" }).addTo(map);
@@ -1264,7 +1234,6 @@ onUnmounted(() => {
               <label><input v-model="settings.showNonIcao" type="checkbox" /> Non-ICAO</label>
               <label><input v-model="settings.coverage" type="checkbox" /> Coverage</label>
               <label><input v-model="settings.coverageBands" type="checkbox" :disabled="!settings.coverage" /> By altitude</label>
-              <label><input v-model="settings.points" type="checkbox" /> Points</label>
               <label><input v-model="settings.airfields" type="checkbox" /> Airfields</label>
               <label><input v-model="settings.airfieldsMinor" type="checkbox" :disabled="!settings.airfields" /> Minor fields</label>
             </div>
