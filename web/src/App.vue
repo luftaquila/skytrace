@@ -17,8 +17,10 @@ import {
   Search,
   Settings,
   SlidersHorizontal,
+  TowerControl,
   X,
 } from "@lucide/vue";
+import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 
 const SETTINGS_KEY = "skytrace.settings.v2";
 const DEFAULT_SETTINGS = {
@@ -29,6 +31,8 @@ const DEFAULT_SETTINGS = {
   coverage: true,
   coverageBands: true,
   points: false,
+  airfields: true,
+  airfieldsMinor: false,
   showGround: true,
   showNonIcao: true,
   source: "all",
@@ -98,6 +102,7 @@ let trackLayer;
 let playbackMarker;
 let coverageLayer;
 let pointsLayer;
+let airfieldLayer;
 let historyChart;
 let refreshTimer;
 let clockTimer;
@@ -111,6 +116,7 @@ watch(settings, (value) => {
   upsertMarkers();
   drawReceptionPoints();
   drawCoverage();
+  drawAirfields();
   queueHistoryChartRender();
 }, { deep: true });
 
@@ -152,6 +158,11 @@ function setHover(hex) {
 function clearHover(hex) {
   if (hoveredHex.value === hex) hoveredHex.value = null;
 }
+
+const airfieldSummary = computed(() => {
+  const coded = AIRFIELDS.filter((field) => !isMinorAirfield(field)).length;
+  return { coded, minor: AIRFIELDS.length - coded, total: AIRFIELDS.length };
+});
 
 const coverageSummary = computed(() => {
   const areas = coverage.value.areas || [];
@@ -684,6 +695,45 @@ function drawReceptionPoints() {
   pointsLayer.addTo(map);
 }
 
+function airfieldTooltip(field) {
+  const codes = [field.icao, field.iata].filter(Boolean).join(" · ");
+  const meta = [codes, field.city].filter(Boolean).join(" — ");
+  return `<span class="af-tt-name">${escapeHtml(field.name)}</span>`
+    + (meta ? `<span class="af-tt-meta">${escapeHtml(meta)}</span>` : "");
+}
+
+function airfieldIcon(field, minor) {
+  const label = minor ? "" : `<span class="airfield-code">${escapeHtml(field.code)}</span>`;
+  return L.divIcon({
+    className: `airfield-icon kind-${field.kind}${minor ? " minor" : ""}`,
+    html: `<span class="airfield-wrap"><span class="airfield-dot"></span>${label}</span>`,
+    iconSize: [1, 1],
+    iconAnchor: [0, 0],
+  });
+}
+
+function drawAirfields() {
+  if (!map) return;
+  if (airfieldLayer) airfieldLayer.remove();
+  airfieldLayer = L.layerGroup();
+  if (settings.value.airfields) {
+    for (const field of AIRFIELDS) {
+      const minor = isMinorAirfield(field);
+      // Uncoded minor strips (military helipads, emergency runways) are hidden
+      // unless explicitly enabled, to keep the coded airfields legible.
+      if (minor && !settings.value.airfieldsMinor) continue;
+      L.marker([field.lat, field.lon], {
+        icon: airfieldIcon(field, minor),
+        pane: "airfields",
+        keyboard: false,
+        zIndexOffset: -1000,
+      }).bindTooltip(airfieldTooltip(field), { direction: "top", offset: [0, -6], className: "airfield-tt" })
+        .addTo(airfieldLayer);
+    }
+  }
+  airfieldLayer.addTo(map);
+}
+
 function selectedTrackSeconds() {
   return selectedTrack.value
     .map((point) => Date.parse(point.positionAt) / 1000)
@@ -986,8 +1036,11 @@ onMounted(async () => {
   map = L.map(mapEl.value, { zoomControl: false, attributionControl: false, preferCanvas: true }).setView([36.2, 127.8], 7);
   // Reception-point overlay sits below the coverage outline and aircraft markers.
   map.createPane("receptionPoints").style.zIndex = 350;
+  // Airfield reference markers sit above coverage but below live aircraft.
+  map.createPane("airfields").style.zIndex = 450;
   L.control.zoom({ position: "bottomright" }).addTo(map);
   applyBaseLayer();
+  drawAirfields();
   await refreshAll();
   refreshTimer = setInterval(refreshAll, 10000);
   clockTimer = setInterval(() => { now.value = Date.now(); }, 1000);
@@ -1210,6 +1263,14 @@ onUnmounted(() => {
           <header><Layers :size="17" /><span>Coverage</span></header>
           <div class="coverage-note">{{ coverageSummary.areas }} outline areas · {{ coverageSummary.positions }} history positions · {{ coverageSummary.receivers }} receivers</div>
         </section>
+
+        <section class="coverage-card">
+          <header><TowerControl :size="17" /><span>Airfields</span></header>
+          <div class="coverage-note">
+            {{ settings.airfields ? (settings.airfieldsMinor ? airfieldSummary.total : airfieldSummary.coded) : 0 }} shown ·
+            {{ airfieldSummary.coded }} coded · {{ airfieldSummary.minor }} minor fields
+          </div>
+        </section>
       </div>
 
       <section :class="['settings-dock', { open: controlsOpen }]">
@@ -1232,6 +1293,8 @@ onUnmounted(() => {
               <label><input v-model="settings.coverage" type="checkbox" /> Coverage</label>
               <label><input v-model="settings.coverageBands" type="checkbox" :disabled="!settings.coverage" /> By altitude</label>
               <label><input v-model="settings.points" type="checkbox" /> Points</label>
+              <label><input v-model="settings.airfields" type="checkbox" /> Airfields</label>
+              <label><input v-model="settings.airfieldsMinor" type="checkbox" :disabled="!settings.airfields" /> Minor fields</label>
             </div>
           </section>
 
