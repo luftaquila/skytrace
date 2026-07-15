@@ -4,10 +4,12 @@
 #
 # A) WiFi blackout (RDA5991/rdawfmac SDIO firmware wedge — dmesg
 #    "wland_sdio_bus_rxctl: resumed on timeout"): board alive but can't pass data.
-#      1. detect a REAL blackout: WAN unreachable, sustained (gateway flaps are
-#         noise and are deliberately ignored),
-#      2. reload the WiFi module first (re-inits firmware, no reboot),
-#      3. reboot only as a backstop if that doesn't bring WAN back (rate-limited).
+#    Detect a REAL blackout (WAN unreachable, sustained; gateway flaps are noise
+#    and are ignored) then REBOOT, rate-limited. NOTE: an earlier version tried a
+#    module reload first, but `rmmod rdawfmac` always hangs on the wedged driver
+#    (killed after 25s, rc=137) — it only delayed recovery, so it's removed.
+#    A soft reboot is the only thing observed to recover this wedge. A 3-min
+#    startup grace after boot avoids rebooting before WiFi associates (boot-loop).
 #
 # B) readsb SDR stream stall (RTL-SDR USB sample stream dies — dmesg
 #    "Lost N packets on USB" degrading to a full stop): readsb stays "active" and
@@ -20,36 +22,21 @@
 set -u
 
 WAN="${WAN:-1.1.1.1}"          # external target; if this is unreachable for a
-INTERVAL="${INTERVAL:-10}"      # sustained window it's the WiFi, not the gateway.
-BLACKOUT="${BLACKOUT:-4}"       # consecutive WAN failures to declare blackout (~40s)
-GRACE="${GRACE:-3}"             # extra failures after a reload before rebooting (~30s)
+INTERVAL="${INTERVAL:-5}"       # sustained window it's the WiFi, not the gateway.
+BLACKOUT="${BLACKOUT:-4}"       # consecutive WAN failures to declare blackout & reboot (~20s)
 MODULE="${MODULE:-rdawfmac}"
 LOG="${LOG:-/var/log/skytrace-wifi-watchdog.log}"
 STAMPS="${STAMPS:-/var/lib/skytrace-wifi-watchdog.reboots}"
 MAX_REBOOTS_PER_HR="${MAX_REBOOTS_PER_HR:-4}"
+STARTUP_GRACE="${STARTUP_GRACE:-180}" # don't reboot until uptime>this (3 min) — WiFi needs time to associate after boot (else boot-loop)
 STATS="${STATS:-/run/readsb/stats.json}"
-SDR_FAILS="${SDR_FAILS:-4}"     # consecutive checks with 0 samples before restarting readsb (~40s)
+SDR_FAILS="${SDR_FAILS:-4}"     # consecutive checks with 0 samples before restarting readsb (~20s)
 SDR_COOLDOWN="${SDR_COOLDOWN:-90}"  # skip SDR check for this long after a watchdog readsb restart (warmup)
 
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
 wan_ok(){ ping -c1 -W3 "$WAN" >/dev/null 2>&1; }
 # samples_processed over the last minute; -1 if stats unreadable (skip, don't penalize)
 sdr_samples(){ python3 -c "import json;print(json.load(open('$STATS')).get('last1min',{}).get('local',{}).get('samples_processed',-1))" 2>/dev/null || echo -1; }
-
-reload_module(){
-  # Runs backgrounded by the caller so a stuck rmmod can never block the loop
-  # (the reboot backstop must still be reachable).
-  log "ACTION reload $MODULE (rmmod/modprobe)"
-  timeout -k 5 25 rmmod "$MODULE" 2>>"$LOG"; log "  rmmod rc=$?"
-  sleep 2
-  modprobe "$MODULE" 2>>"$LOG"; log "  modprobe rc=$?"
-  sleep 6
-  ip link set wlan0 up 2>/dev/null
-  systemctl restart wpa_supplicant 2>/dev/null
-  sleep 4
-  ( dhclient -1 wlan0 || dhcpcd -n wlan0 || systemctl restart networking ) >/dev/null 2>&1 &
-  log "  reload sequence issued"
-}
 
 can_reboot(){
   now=$(date +%s)
@@ -59,28 +46,27 @@ can_reboot(){
 }
 
 fails=0
-reloaded=0
 sdr_fails=0
 sdr_ok_after=0
-log "watchdog started (WAN=$WAN interval=${INTERVAL}s blackout=$BLACKOUT grace=$GRACE sdr_fails=$SDR_FAILS)"
+log "watchdog started (WAN=$WAN interval=${INTERVAL}s blackout=$BLACKOUT sdr_fails=$SDR_FAILS)"
 while true; do
-  # --- (A) WiFi blackout: WAN reachability ---
+  # --- (A) WiFi blackout: WAN reachable? sustained loss => reboot ---
   if wan_ok; then
-    [ "$fails" -ge "$BLACKOUT" ] && log "RECOVERED (was down ~$((fails*INTERVAL))s, module-reload=$reloaded)"
-    fails=0; reloaded=0
+    [ "$fails" -ge "$BLACKOUT" ] && log "RECOVERED (WAN back after ~$((fails*INTERVAL))s)"
+    fails=0
   else
     fails=$((fails+1))
-    [ $((fails % 4)) -eq 0 ] && log "WAN unreachable x$fails (~$((fails*INTERVAL))s)"
-    if [ "$fails" -eq "$BLACKOUT" ] && [ "$reloaded" -eq 0 ]; then
-      log "BLACKOUT declared (~$((fails*INTERVAL))s WAN down, gateway noise ignored)"
-      reload_module &
-      reloaded=1
-    elif [ "$reloaded" -eq 1 ] && [ "$fails" -ge $((BLACKOUT + GRACE)) ]; then
-      if can_reboot; then
-        log "module reload did NOT restore WAN after grace -> REBOOT"
+    [ $((fails % 2)) -eq 0 ] && log "WAN unreachable x$fails (~$((fails*INTERVAL))s)"
+    if [ "$fails" -ge "$BLACKOUT" ]; then
+      up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 9999)
+      if [ "$up" -lt "$STARTUP_GRACE" ]; then
+        # fresh boot — WiFi hasn't associated yet; rebooting now would boot-loop
+        [ $((fails % 4)) -eq 0 ] && log "blackout but uptime ${up}s < grace ${STARTUP_GRACE}s (WiFi still coming up) -> wait"
+      elif can_reboot; then
+        log "BLACKOUT (~$((fails*INTERVAL))s WAN down, gateway noise ignored) -> REBOOT"
         date +%s >> "$STAMPS"; sync; reboot
       else
-        log "still down + reboot rate-limited (>=$MAX_REBOOTS_PER_HR/hr) -> holding (needs hardware/manual)"
+        log "blackout + reboot rate-limited (>=$MAX_REBOOTS_PER_HR/hr) -> holding (hardware WiFi spell)"
         fails=$((BLACKOUT))   # keep re-evaluating without a tight reboot loop
       fi
     fi
