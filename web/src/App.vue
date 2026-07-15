@@ -982,31 +982,6 @@ async function fetchJson(url) {
   return response.json();
 }
 
-let liveRefreshTimer = null;
-let liveRefreshInFlight = false;
-
-// Live data (aircraft + receivers) is the hot path. Coalesce bursts — several receivers
-// each fire an SSE "ingest" at nearly the same time — into a single fetch after a short,
-// imperceptible delay instead of refetching once per event.
-function scheduleLiveRefresh(delay = 250) {
-  if (liveRefreshTimer != null) return;
-  liveRefreshTimer = setTimeout(runLiveRefresh, delay);
-}
-
-async function runLiveRefresh() {
-  liveRefreshTimer = null;
-  if (liveRefreshInFlight) {
-    scheduleLiveRefresh(50);
-    return;
-  }
-  liveRefreshInFlight = true;
-  try {
-    await refreshLive();
-  } finally {
-    liveRefreshInFlight = false;
-  }
-}
-
 async function refreshLive() {
   try {
     // Receivers ride the hot path with aircraft (it is a cheap endpoint) so "Updated"
@@ -1032,8 +1007,10 @@ async function refreshLive() {
   }
 }
 
-// Coverage is a slowly-accumulating historical overlay and its endpoint is the expensive
-// one, so it refreshes on a longer cadence instead of on every position update.
+// Coverage is a heavy query (a 30-day, up-to-50k-row envelope) whose outline barely moves
+// per position, so it refetches only when a batch actually recorded new track points (see
+// the ingest handler) — event-driven, not on a blind timer that both lags real changes and
+// spins while idle.
 async function refreshCoverage() {
   try {
     coverage.value = (await fetchJson("/api/coverage")) || { areas: [], points: [] };
@@ -1043,11 +1020,35 @@ async function refreshCoverage() {
   }
 }
 
-// Manual refresh button: reuse the same coalesced + in-flight-guarded path as live updates
-// so a click during an in-flight refresh can't spawn a second concurrent fetch.
+// Coalesce bursts of refreshes into a single fetch and never let two run concurrently.
+// A short window keeps the live path near-instant; a longer one collapses multi-receiver
+// ingests before hitting the expensive coverage query.
+function makeCoalescer(fn) {
+  let timer = null;
+  let inFlight = false;
+  function run() {
+    timer = null;
+    if (inFlight) {
+      schedule(50);
+      return;
+    }
+    inFlight = true;
+    Promise.resolve(fn()).finally(() => { inFlight = false; });
+  }
+  function schedule(delay = 250) {
+    if (timer != null) return;
+    timer = setTimeout(run, delay);
+  }
+  return { schedule, cancel() { if (timer != null) clearTimeout(timer); } };
+}
+const liveRefresher = makeCoalescer(refreshLive);
+const coverageRefresher = makeCoalescer(refreshCoverage);
+
+// Manual refresh button: go through the guarded/coalesced paths so a click can't spawn a
+// second concurrent fetch.
 function refreshAll() {
-  scheduleLiveRefresh(0);
-  refreshCoverage();
+  liveRefresher.schedule(0);
+  coverageRefresher.schedule(0);
 }
 
 async function refreshTrack(resetPlayback = true) {
@@ -1148,12 +1149,20 @@ onMounted(async () => {
   drawAirfields();
   await refreshLive();
   await refreshCoverage();
-  // Fallback poll in case the SSE stream drops; live updates are driven by ingest events.
-  refreshTimer = setInterval(() => scheduleLiveRefresh(0), 10000);
-  coverageTimer = setInterval(refreshCoverage, 30000);
+  // Fallback polls in case the SSE stream drops; otherwise live updates are driven by
+  // ingest events, and coverage only when a batch actually recorded new track points.
+  refreshTimer = setInterval(() => liveRefresher.schedule(0), 10000);
+  coverageTimer = setInterval(() => coverageRefresher.schedule(0), 60000);
   clockTimer = setInterval(() => { now.value = Date.now(); }, 1000);
   eventSource = new EventSource("/api/events");
-  eventSource.addEventListener("ingest", () => scheduleLiveRefresh());
+  eventSource.addEventListener("ingest", (event) => {
+    liveRefresher.schedule();
+    // Only touch the heavy coverage query when this batch actually stored new track
+    // points; otherwise the 30-day envelope cannot have changed.
+    let trackPoints = 1;
+    try { trackPoints = JSON.parse(event.data)?.trackPoints ?? 1; } catch { /* refetch on parse failure */ }
+    if (trackPoints > 0) coverageRefresher.schedule(1000);
+  });
   eventSource.onerror = () => { status.value = "reconnecting"; };
 });
 
@@ -1162,7 +1171,8 @@ onUnmounted(() => {
   clearInterval(coverageTimer);
   clearInterval(clockTimer);
   clearInterval(playbackTimer);
-  if (liveRefreshTimer != null) clearTimeout(liveRefreshTimer);
+  liveRefresher.cancel();
+  coverageRefresher.cancel();
   destroyHistoryChart();
   eventSource?.close();
   map?.remove();
