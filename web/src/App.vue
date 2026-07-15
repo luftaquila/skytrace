@@ -27,6 +27,8 @@ const DEFAULT_SETTINGS = {
   iconScale: 1,
   labels: false,
   coverage: true,
+  coverageBands: true,
+  points: false,
   showGround: true,
   showNonIcao: true,
   source: "all",
@@ -95,6 +97,7 @@ let tileLayer;
 let trackLayer;
 let playbackMarker;
 let coverageLayer;
+let pointsLayer;
 let historyChart;
 let refreshTimer;
 let clockTimer;
@@ -106,6 +109,7 @@ watch(settings, (value) => {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(value));
   applyBaseLayer();
   upsertMarkers();
+  drawReceptionPoints();
   drawCoverage();
   queueHistoryChartRender();
 }, { deep: true });
@@ -607,38 +611,77 @@ function smoothClosedCoverageLine(ring) {
   return smooth;
 }
 
+function bandMidFeet(band) {
+  const max = band.maxAltitude ?? band.minAltitude + 10000;
+  return (band.minAltitude + max) / 2;
+}
+
+function drawCoverageOutline(latLngs, color, weight, tooltip) {
+  if (latLngs.length < 2) return;
+  L.polyline(latLngs, {
+    color: "#071012", weight: weight + 3, opacity: 0.45, interactive: false, lineCap: "round", lineJoin: "round",
+  }).addTo(coverageLayer);
+  L.polyline(latLngs, {
+    color, weight, opacity: 0.95, interactive: true, lineCap: "round", lineJoin: "round",
+  }).bindTooltip(tooltip).addTo(coverageLayer);
+}
+
 function drawCoverage() {
   if (!map) return;
   if (coverageLayer) coverageLayer.remove();
   coverageLayer = L.layerGroup();
   if (!settings.value.coverage) return;
-  const areas = coverage.value.areas || [];
 
-  for (const area of areas) {
-    const ring = area.polygon?.coordinates?.[0];
-    if (!ring?.length) continue;
-    const latLngs = smoothClosedCoverageLine(ring);
-    if (latLngs.length < 2) continue;
-    L.polyline(latLngs, {
-      color: "#071012",
-      weight: 7,
-      opacity: 0.72,
-      interactive: false,
-      lineCap: "round",
-      lineJoin: "round",
-    }).addTo(coverageLayer);
-    L.polyline(latLngs, {
-      color: "#48e0d1",
-      weight: 3,
-      opacity: 0.92,
-      interactive: true,
-      lineCap: "round",
-      lineJoin: "round",
-    })
-      .bindTooltip(`${area.receiverName || "Receiver"} · ${area.count} positions · max ${formatNumberUnit(altitudeValue(area.maxAltitude))}`)
-      .addTo(coverageLayer);
+  for (const area of coverage.value.areas || []) {
+    const bands = area.bands || [];
+    if (settings.value.coverageBands && bands.length) {
+      // Draw the highest band first (largest, underneath) so lower bands stay visible.
+      for (const band of [...bands].sort((a, b) => bandMidFeet(b) - bandMidFeet(a))) {
+        const ring = band.polygon?.coordinates?.[0];
+        if (!ring?.length) continue;
+        drawCoverageOutline(
+          smoothClosedCoverageLine(ring),
+          altitudeColorFeet(bandMidFeet(band)),
+          2.5,
+          `${area.receiverName || "Receiver"} · ${band.label} · ${band.count} pos`,
+        );
+      }
+    } else {
+      const ring = area.polygon?.coordinates?.[0];
+      if (!ring?.length) continue;
+      drawCoverageOutline(
+        smoothClosedCoverageLine(ring),
+        "#48e0d1",
+        3,
+        `${area.receiverName || "Receiver"} · ${area.count} positions · max ${formatNumberUnit(altitudeValue(area.maxAltitude))}`,
+      );
+    }
   }
   coverageLayer.addTo(map);
+}
+
+function drawReceptionPoints() {
+  if (!map) return;
+  if (pointsLayer) pointsLayer.remove();
+  pointsLayer = L.layerGroup();
+  if (settings.value.points) {
+    const pts = coverage.value.points || [];
+    // Subsample if there are a lot, to keep the overlay light.
+    const step = pts.length > 6000 ? Math.ceil(pts.length / 6000) : 1;
+    for (let i = 0; i < pts.length; i += step) {
+      const point = pts[i];
+      if (point.lat == null || point.lon == null) continue;
+      L.circleMarker([point.lat, point.lon], {
+        pane: "receptionPoints",
+        radius: 1.6,
+        stroke: false,
+        fillColor: altitudeColorFeet(point.maxAltitude),
+        fillOpacity: 0.5,
+        interactive: false,
+      }).addTo(pointsLayer);
+    }
+  }
+  pointsLayer.addTo(map);
 }
 
 function selectedTrackSeconds() {
@@ -844,6 +887,7 @@ async function refreshAll() {
     lastUpdated.value = current.now;
     status.value = "online";
     upsertMarkers();
+    drawReceptionPoints();
     drawCoverage();
     if (selectedHex.value) await refreshTrack(false);
   } catch (err) {
@@ -940,6 +984,8 @@ watch(playbackIndex, () => {
 
 onMounted(async () => {
   map = L.map(mapEl.value, { zoomControl: false, attributionControl: false, preferCanvas: true }).setView([36.2, 127.8], 7);
+  // Reception-point overlay sits below the coverage outline and aircraft markers.
+  map.createPane("receptionPoints").style.zIndex = 350;
   L.control.zoom({ position: "bottomright" }).addTo(map);
   applyBaseLayer();
   await refreshAll();
@@ -1184,6 +1230,8 @@ onUnmounted(() => {
               <label><input v-model="settings.showGround" type="checkbox" /> Ground</label>
               <label><input v-model="settings.showNonIcao" type="checkbox" /> Non-ICAO</label>
               <label><input v-model="settings.coverage" type="checkbox" /> Coverage</label>
+              <label><input v-model="settings.coverageBands" type="checkbox" :disabled="!settings.coverage" /> By altitude</label>
+              <label><input v-model="settings.points" type="checkbox" /> Points</label>
             </div>
           </section>
 
