@@ -614,8 +614,23 @@ function drawCoverage() {
 
   for (const area of coverage.value.areas || []) {
     const bands = area.bands || [];
-    if (settings.value.coverageBands && bands.length) {
-      // Draw the highest band first (largest, underneath) so lower bands stay visible.
+    const banded = settings.value.coverageBands && bands.length > 0;
+
+    // Always draw the overall extent (all receptions). Altitude bands only cover points
+    // that report an altitude, and ~1/5 of far receptions have none — so without this the
+    // outline would shrink whenever "by altitude" is on. Keep it as the constant boundary.
+    const overallRing = area.polygon?.coordinates?.[0];
+    if (overallRing?.length) {
+      drawCoverageOutline(
+        ringToLatLngs(overallRing),
+        banded ? "#c7d2d0" : "#48e0d1",
+        banded ? 1.5 : 3,
+        `${area.receiverName || "Receiver"} · ${area.count} positions · max ${formatNumberUnit(altitudeValue(area.maxAltitude))}`,
+      );
+    }
+
+    // Highest band first (largest, underneath) so lower bands stay visible on top.
+    if (banded) {
       for (const band of [...bands].sort((a, b) => bandMidFeet(b) - bandMidFeet(a))) {
         const ring = band.polygon?.coordinates?.[0];
         if (!ring?.length) continue;
@@ -626,15 +641,6 @@ function drawCoverage() {
           `${area.receiverName || "Receiver"} · ${band.label} · ${band.count} pos`,
         );
       }
-    } else {
-      const ring = area.polygon?.coordinates?.[0];
-      if (!ring?.length) continue;
-      drawCoverageOutline(
-        ringToLatLngs(ring),
-        "#48e0d1",
-        3,
-        `${area.receiverName || "Receiver"} · ${area.count} positions · max ${formatNumberUnit(altitudeValue(area.maxAltitude))}`,
-      );
     }
   }
   coverageLayer.addTo(map);
