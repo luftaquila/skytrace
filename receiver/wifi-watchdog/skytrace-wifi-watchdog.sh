@@ -15,9 +15,9 @@
 set -u
 
 WAN="${WAN:-1.1.1.1}"          # external target; if this is unreachable for a
-INTERVAL="${INTERVAL:-15}"      # sustained window it's the WiFi, not the gateway.
-BLACKOUT="${BLACKOUT:-12}"      # consecutive WAN failures to declare blackout (~3 min)
-GRACE="${GRACE:-8}"             # extra failures after a reload before rebooting (~2 min)
+INTERVAL="${INTERVAL:-10}"      # sustained window it's the WiFi, not the gateway.
+BLACKOUT="${BLACKOUT:-4}"       # consecutive WAN failures to declare blackout (~40s)
+GRACE="${GRACE:-3}"             # extra failures after a reload before rebooting (~30s)
 MODULE="${MODULE:-rdawfmac}"
 LOG="${LOG:-/var/log/skytrace-wifi-watchdog.log}"
 STAMPS="${STAMPS:-/var/lib/skytrace-wifi-watchdog.reboots}"
