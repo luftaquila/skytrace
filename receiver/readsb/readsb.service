@@ -1,0 +1,21 @@
+[Unit]
+Description=readsb ADS-B decoder (skytrace receiver)
+Documentation=https://github.com/wiedehopf/readsb
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/readsb
+ExecStart=/usr/local/bin/readsb --device-type rtlsdr $RECEIVER_OPTIONS $DECODER_OPTIONS $JSON_OPTIONS --quiet
+Restart=always
+RestartSec=5
+Nice=-5
+# systemd creates /run/readsb owned by this service; aircraft.json is written there.
+RuntimeDirectory=readsb
+RuntimeDirectoryMode=0755
+User=readsb
+Group=plugdev
+
+[Install]
+WantedBy=multi-user.target

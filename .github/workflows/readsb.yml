@@ -1,0 +1,64 @@
+name: Build readsb
+
+# Cross-builds the readsb ADS-B decoder for the Orange Pi i96 receiver
+# (armv7l/armhf, Debian 11 bullseye / glibc 2.31) and publishes the binary so
+# the board can pull it directly. See receiver/readsb/Dockerfile.
+
+on:
+  workflow_dispatch:
+    inputs:
+      readsb_ref:
+        description: "wiedehopf/readsb git ref to build (blank = default branch)"
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - receiver/readsb/**
+      - .github/workflows/readsb.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Cross-build readsb (armhf / bullseye)
+        run: |
+          docker buildx build --platform linux/arm/v7 \
+            --progress=plain \
+            --build-arg READSB_REF="${{ github.event.inputs.readsb_ref }}" \
+            -o type=local,dest=./out \
+            receiver/readsb
+
+      - name: Inspect binary
+        run: |
+          file ./out/readsb
+          ( cd ./out && sha256sum readsb | tee readsb.sha256 )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: readsb-armhf-bullseye
+          path: |
+            out/readsb
+            out/readsb.sha256
+          if-no-files-found: error
+
+      - name: Publish rolling release (readsb-armhf)
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create readsb-armhf \
+            --title "readsb (armhf, bullseye)" \
+            --notes "Cross-built readsb for the Orange Pi i96 (armv7l/armhf, Debian 11 bullseye / glibc 2.31), from wiedehopf/readsb. Commit ${{ github.sha }}." \
+            --prerelease 2>/dev/null || true
+          gh release upload readsb-armhf ./out/readsb ./out/readsb.sha256 --clobber
