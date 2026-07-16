@@ -1301,7 +1301,7 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <aside class="panel">
+    <aside class="panel" :class="{ 'dock-open': controlsOpen }">
       <div class="panel-resize" title="Drag to resize" @pointerdown="startPanelResize"></div>
       <div class="panel-main">
         <div class="search-wrap">

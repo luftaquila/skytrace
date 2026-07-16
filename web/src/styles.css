@@ -1188,6 +1188,25 @@ select {
     padding-top: 24px;
   }
 
+  /* Opening Filters & display on a phone turns the dock into a full, scrollable sheet
+     (the short panel can't fit both the list and the settings, so hide the list). */
+  .panel.dock-open .panel-main {
+    display: none;
+  }
+
+  .panel.dock-open .settings-dock {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .panel.dock-open .settings-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+  }
+
   /* Aircraft symbols are oversized relative to a phone viewport — shrink to declutter. */
   .aircraft-wrap {
     transform: scale(calc(var(--aircraft-scale) * 0.68));
