@@ -95,6 +95,42 @@ const playbackIndex = ref(0);
 const chartEl = ref(null);
 const selectedHistoryMetrics = ref(["altBaro", "gs"]);
 
+// Resizable panel: sidebar width (desktop) / panel height in vh (mobile), persisted.
+const LAYOUT_KEY = "skytrace.layout.v1";
+function clampWidth(value) { return Math.min(760, Math.max(320, Number(value) || 440)); }
+function clampPanelVh(value) { return Math.min(85, Math.max(30, Number(value) || 55)); }
+const savedLayout = (() => { try { return JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}"); } catch { return {}; } })();
+const sidebarWidth = ref(clampWidth(savedLayout.sidebarWidth));
+const panelHeight = ref(clampPanelVh(savedLayout.panelHeight));
+const shellStyle = computed(() => ({
+  "--sidebar-width": `${sidebarWidth.value}px`,
+  "--panel-height": `${panelHeight.value}vh`,
+}));
+
+function startPanelResize(event) {
+  event.preventDefault();
+  const mobile = window.matchMedia("(max-width: 900px)").matches;
+  let raf = 0;
+  const onMove = (ev) => {
+    if (mobile) {
+      panelHeight.value = clampPanelVh(((window.innerHeight - ev.clientY) / window.innerHeight) * 100);
+    } else {
+      sidebarWidth.value = clampWidth(window.innerWidth - ev.clientX);
+    }
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; map?.invalidateSize(); });
+  };
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    document.body.style.userSelect = "";
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ sidebarWidth: sidebarWidth.value, panelHeight: panelHeight.value }));
+    map?.invalidateSize();
+  };
+  document.body.style.userSelect = "none";
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
 let map;
 let tileLayer;
 let trackLayer;
@@ -102,6 +138,7 @@ let playbackMarker;
 let coverageLayer;
 let airfieldLayer;
 let historyChart;
+let chartResizeObserver;
 let refreshTimer;
 let coverageTimer;
 let clockTimer;
@@ -681,7 +718,7 @@ function upsertMarkers() {
       marker._rot = rot;
       marker._tip = tip;
       marker.bindTooltip(tip, { direction: "top", offset: [0, -14], className: "aircraft-tt" });
-      marker.on("click", () => selectAircraft(item.hex, true));
+      marker.on("click", () => toggleAircraft(item.hex));
       marker.on("mouseover", () => { hoveredHex.value = item.hex; });
       marker.on("mouseout", () => { if (hoveredHex.value === item.hex) hoveredHex.value = null; });
       marker.addTo(map);
@@ -805,6 +842,10 @@ function selectedTrackSeconds() {
 }
 
 function destroyHistoryChart() {
+  if (chartResizeObserver) {
+    chartResizeObserver.disconnect();
+    chartResizeObserver = null;
+  }
   if (historyChart) {
     historyChart.destroy();
     historyChart = null;
@@ -880,6 +921,14 @@ function renderHistoryChart() {
     legend: { show: true },
   }, data, chartEl.value);
   setHistoryChartCursor();
+
+  // Keep the chart filling its container as the panel/sidebar is resized.
+  chartResizeObserver = new ResizeObserver(() => {
+    if (!historyChart || !chartEl.value) return;
+    const next = Math.max(260, Math.floor(chartEl.value.clientWidth));
+    if (next !== historyChart.width) historyChart.setSize({ width: next, height: 220 });
+  });
+  chartResizeObserver.observe(chartEl.value);
 }
 
 function queueHistoryChartRender() {
@@ -1105,6 +1154,16 @@ function clearSelection() {
   upsertMarkers();
 }
 
+// Clicking a marker toggles selection; clicking a different one switches to it.
+function toggleAircraft(hex) {
+  if (selectedHex.value === hex) clearSelection();
+  else selectAircraft(hex, true);
+}
+
+function onGlobalKeydown(event) {
+  if (event.key === "Escape" && selectedHex.value) clearSelection();
+}
+
 function fitVisibleAircraft() {
   const points = filteredAircraft.value
     .filter((item) => item.lat != null && item.lon != null)
@@ -1151,6 +1210,9 @@ onMounted(async () => {
   L.control.zoom({ position: "bottomright" }).addTo(map);
   // Re-cull markers to the viewport after a pan or zoom (moveend also fires on zoom).
   map.on("moveend", upsertMarkers);
+  // Clicking empty map (coverage is non-interactive, markers stop propagation) deselects.
+  map.on("click", () => { if (selectedHex.value) clearSelection(); });
+  window.addEventListener("keydown", onGlobalKeydown);
   applyBaseLayer();
   drawAirfields();
   await refreshLive();
@@ -1180,13 +1242,14 @@ onUnmounted(() => {
   liveRefresher.cancel();
   coverageRefresher.cancel();
   destroyHistoryChart();
+  window.removeEventListener("keydown", onGlobalKeydown);
   eventSource?.close();
   map?.remove();
 });
 </script>
 
 <template>
-  <main class="shell">
+  <main class="shell" :style="shellStyle">
     <section class="map-stage">
       <div ref="mapEl" class="map"></div>
       <div class="topbar">
@@ -1217,6 +1280,7 @@ onUnmounted(() => {
     </section>
 
     <aside class="panel">
+      <div class="panel-resize" title="Drag to resize" @pointerdown="startPanelResize"></div>
       <div class="panel-main">
         <div class="search-wrap">
           <Search :size="18" />
@@ -1352,7 +1416,7 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <section class="list">
+        <section v-show="!selectedAircraft" class="list">
           <header>
             <CircleDot :size="17" /><span>Aircraft</span>
             <select v-model="sortKey" class="list-sort">
