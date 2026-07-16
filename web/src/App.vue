@@ -427,20 +427,6 @@ const HISTORY_METRICS = [
 
 const metricLookup = new Map(HISTORY_METRICS.map((metric) => [metric.key, metric]));
 
-function metricUnit(kind) {
-  if (kind === "alt") return settings.value.units === "metric" ? "m" : "ft";
-  if (kind === "speed") {
-    if (settings.value.units === "metric") return "km/h";
-    if (settings.value.units === "imperial") return "mph";
-    return "kt";
-  }
-  if (kind === "rate") return settings.value.units === "metric" ? "m/s" : "ft/min";
-  if (kind === "degrees") return "deg";
-  if (kind === "temp") return "C";
-  if (kind === "rssi") return "dBFS";
-  return "";
-}
-
 function metricChartValue(metric, point) {
   const value = metric.get(point);
   if (value == null || value === "") return null;
@@ -877,18 +863,31 @@ function renderHistoryChart() {
 
   const width = Math.max(280, chartEl.value.clientWidth || 360);
   const scales = Object.fromEntries(availableMetrics.map((metric) => [metric.key, { auto: true }]));
+  // Compact tick labels (25,000 -> 25k) + small font + narrow axes; the coloured series
+  // buttons above already name each metric, so the rotated axis labels are dropped.
+  const compactTick = (value) => {
+    if (value == null) return "";
+    if (Math.abs(value) >= 1000) {
+      const k = value / 1000;
+      return `${Number.isInteger(k) ? k : k.toFixed(1)}k`;
+    }
+    return `${value}`;
+  };
+  const axisFont = "10px system-ui, -apple-system, sans-serif";
   const axes = [
     {
       stroke: "#96a3a4",
+      font: axisFont,
       grid: { stroke: "rgb(238 245 244 / 0.08)" },
     },
     ...availableMetrics.map((metric, index) => ({
       scale: metric.key,
       side: index % 2 ? 1 : 3,
       stroke: metric.color,
-      label: `${metric.label}${metricUnit(metric.kind) ? ` (${metricUnit(metric.kind)})` : ""}`,
-      labelSize: 18,
-      size: 46,
+      font: axisFont,
+      size: 30,
+      gap: 2,
+      values: (self, splits) => splits.map(compactTick),
       grid: { stroke: index === 0 ? "rgb(238 245 244 / 0.08)" : "transparent" },
     })),
   ];
