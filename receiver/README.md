@@ -20,7 +20,8 @@ Systemd services on the board:
 | `skytrace-wifi-watchdog` | self-heal | recovers the two failure modes below, unattended |
 
 Contents here: `readsb/` (cross-build + deploy, see its README), `wifi-watchdog/`
-(the watchdog), `skytrace-agent.service` (uploader unit).
+(on-board self-heal), `plug-watchdog/` (external power-cycle backstop that runs
+off the board), `skytrace-agent.service` (uploader unit).
 
 ## Hardware notes (Orange Pi i96 / RDA8810)
 
@@ -32,7 +33,12 @@ This board is inexpensive and has chronic quirks that dominate operations:
    still alive locally but passes no network data (total blackout). RF signal is
    fine; it's a firmware/SDIO hang. **No clean software fix** — the driver exposes
    no tunables and the firmware is closed. WiFi power-save and BT-coexistence are
-   already disabled (via `rc.local`) and do **not** prevent it.
+   already disabled (via `rc.local`) and do **not** prevent it. A **warm reboot
+   does not power-cycle the WiFi chip**, so a true firmware wedge *survives* it —
+   only a **cold power-cycle** reliably clears a bad spell (measured 2026-07-16:
+   a warm reboot, the on-board watchdog's own included, gave no recovery in 7+
+   min; a cold power-cycle via the plug brought it back in ~58s). Hence the
+   external plug watchdog below is the true backstop for a bad spell.
 2. **RTL-SDR USB is marginal (`musb-hdrc` controller).** Two sub-modes:
    - **(2a) VBUS brownout storm** — the dongle repeatedly disconnects/re-enumerates
      (`dmesg`: `VBUS_ERROR`, ever-climbing `device number`). readsb can't hold the
@@ -73,11 +79,20 @@ endless boot-loop. Tunables (env in the unit or top of the script):
 There is no reboot rate-limit — the startup grace already keeps reboots ~5 min
 apart, so during a bad spell the board keeps retrying instead of giving up.
 
-## Last-resort backstop: network smart plug
+## Last-resort backstop: network smart plug (automated)
 
 The board is powered through a **Tasmota smart plug** (its address is configured
-out-of-band and intentionally not committed). When even the watchdog's reboot
-can't recover a true hang, power-cycle the board:
+out-of-band and intentionally not committed). When even the on-board watchdog's
+reboot can't recover a true hang — which is the norm for a firmware-level WiFi
+wedge, since a warm reboot never power-cycles the WiFi chip — the plug is the
+only remote recovery.
+
+This is now **automated** by the **external plug watchdog** (`plug-watchdog/`),
+which runs on an always-on machine on the board's LAN and cold power-cycles the
+board when it has been unreachable ~3 min (long enough that the on-board
+warm-reboot watchdog has clearly failed). See `plug-watchdog/README.md`.
+
+Manual control, same plug:
 
 ```sh
 curl "http://<plug>/cm?cmnd=Power%20Off"   # cut power

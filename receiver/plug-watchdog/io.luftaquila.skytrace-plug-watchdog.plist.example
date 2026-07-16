@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd agent for the external plug watchdog.
+  Copy to ~/Library/LaunchAgents/io.luftaquila.skytrace-plug-watchdog.plist,
+  replace the __PLACEHOLDERS__ with your real values (these are intentionally
+  not committed), then:
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.luftaquila.skytrace-plug-watchdog.plist
+  See README.md. Set DRY_RUN=1 to observe detection without ever toggling power.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.luftaquila.skytrace-plug-watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__HOME__/.config/skytrace/skytrace-plug-watchdog.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- Tasmota plug base URL (the hardware kill-switch) -->
+        <key>PLUG_URL</key>
+        <string>http://__PLUG_IP__</string>
+        <!-- board tailscale IP (stable across LAN-IP flip-flops) -->
+        <key>BOARD_TS</key>
+        <string>__BOARD_TAILSCALE_IP__</string>
+        <!-- board last-known LAN IP (optional; may change across reboots) -->
+        <key>BOARD_LAN</key>
+        <string>__BOARD_LAN_IP__</string>
+        <!-- optional: adds the "server reports receiver online & fresh" UP signal -->
+        <key>SERVER_URL</key>
+        <string>https://__SERVER_HOST__</string>
+        <key>RECEIVER_NAME</key>
+        <string>__RECEIVER_NAME__</string>
+        <!-- tunables (defaults live in the script; shown here for easy tuning) -->
+        <key>POLL</key>
+        <string>30</string>
+        <key>DOWN_SECS</key>
+        <string>180</string>
+        <key>COOLDOWN</key>
+        <string>180</string>
+        <key>CYCLE_CAP</key>
+        <string>4</string>
+        <key>BACKOFF</key>
+        <string>900</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/skytrace-plug-watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/skytrace-plug-watchdog.err.log</string>
+</dict>
+</plist>
