@@ -1311,8 +1311,6 @@ onUnmounted(() => {
 
         <div class="metric-grid">
           <div><span>{{ stats.live }}</span><small>Live aircraft</small></div>
-          <div><span>{{ stats.onGround }}</span><small>On ground</small></div>
-          <div><span>{{ stats.nonIcao }}</span><small>Non-ICAO</small></div>
           <div><span>{{ lastUpdated ? formatAge(lastUpdated) : "-" }}</span><small>Updated</small></div>
           <div><span>{{ receivers.length }}</span><small>Receivers</small></div>
         </div>
