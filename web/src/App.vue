@@ -885,8 +885,9 @@ function renderHistoryChart() {
       side: index % 2 ? 1 : 3,
       stroke: metric.color,
       font: axisFont,
-      size: 30,
-      gap: 2,
+      gap: 3,
+      // No fixed size: let uPlot auto-size the gutter to the (now compact) ticks so the
+      // numbers aren't clipped.
       values: (self, splits) => splits.map(compactTick),
       grid: { stroke: index === 0 ? "rgb(238 245 244 / 0.08)" : "transparent" },
     })),
