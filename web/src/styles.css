@@ -1184,8 +1184,17 @@ select {
     background: var(--accent);
   }
 
+  /* On a phone the whole column scrolls as one (search + stats scroll away to give the
+     list room) instead of a cramped inner list-scroll under fixed top cards. */
   .panel-main {
     padding-top: 24px;
+    overflow-y: auto;
+  }
+
+  .list {
+    flex: 0 0 auto;
+    min-height: 0;
+    overflow: visible;
   }
 
   /* Opening Filters & display on a phone turns the dock into a full, scrollable sheet
