@@ -164,7 +164,14 @@ select {
   gap: 12px;
   min-height: 0;
   padding: 14px;
-  overflow: auto;
+  overflow: hidden;
+}
+
+/* Search + stats stay put; the list (or detail) takes the rest and scrolls on its own. */
+.panel-main > .search-wrap,
+.panel-main > .metric-grid,
+.panel-main > .source-chips {
+  flex: 0 0 auto;
 }
 
 .search-wrap {
@@ -199,8 +206,8 @@ select {
 }
 
 .metric-grid div {
-  min-height: 66px;
-  padding: 10px;
+  min-height: 48px;
+  padding: 7px 9px;
   border: 1px solid var(--border-soft);
   border-radius: 7px;
   background: var(--surface);
@@ -208,9 +215,16 @@ select {
 
 .metric-grid span {
   display: block;
-  font-size: 22px;
+  font-size: 18px;
   font-weight: 760;
+  line-height: 1.15;
   color: var(--text);
+}
+
+.dock-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .metric-grid small,
@@ -231,7 +245,24 @@ select {
   background: var(--surface);
 }
 
+/* Aircraft list fills the panel and scrolls internally, with a pinned header. */
+.list {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow-y: auto;
+}
+
+.list header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface);
+}
+
 .detail {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: 14px;
 }
 
@@ -1094,7 +1125,30 @@ select {
 @media (max-width: 900px) {
   .shell {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 58vh) minmax(260px, 42vh);
+    grid-template-rows: minmax(0, 45vh) minmax(320px, 55vh);
+  }
+
+  /* Aircraft symbols are oversized relative to a phone viewport — shrink to declutter. */
+  .aircraft-wrap {
+    transform: scale(calc(var(--aircraft-scale) * 0.68));
+  }
+
+  /* Reclaim vertical space for the list on phones. */
+  .source-chips {
+    display: none;
+  }
+
+  .metric-grid div {
+    min-height: 42px;
+    padding: 6px 8px;
+  }
+
+  .metric-grid span {
+    font-size: 16px;
+  }
+
+  .metric-grid small {
+    font-size: 11px;
   }
 
   .panel {

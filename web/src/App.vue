@@ -725,8 +725,9 @@ function drawCoverage() {
     const overallRing = area.polygon?.coordinates?.[0];
     if (overallRing?.length) {
       const latlngs = ringToLatLngs(overallRing);
+      // Non-interactive: no hover tooltip, and clicks pass through to the map/markers.
       L.polygon(latlngs, {
-        color: "#071012", weight: (banded ? 1 : 2) + 2, opacity: 0.4, fill: false, lineJoin: "round",
+        color: "#071012", weight: (banded ? 1 : 2) + 2, opacity: 0.4, fill: false, interactive: false, lineJoin: "round",
       }).addTo(coverageLayer);
       L.polygon(latlngs, {
         color: "#5eead4",
@@ -734,9 +735,9 @@ function drawCoverage() {
         opacity: banded ? 0.6 : 0.95,
         fillColor: "#2dd4bf",
         fillOpacity: banded ? 0.04 : 0.1,
+        interactive: false,
         lineJoin: "round",
-      }).bindTooltip(`${area.receiverName || "Receiver"} · ${area.count} positions · max ${formatNumberUnit(altitudeValue(area.maxAltitude))}`)
-        .addTo(coverageLayer);
+      }).addTo(coverageLayer);
     }
 
     // Altitude bands: thin coloured outlines inside the boundary (highest first).
@@ -748,10 +749,10 @@ function drawCoverage() {
           color: altitudeColorFeet(bandMidFeet(band)),
           weight: 2,
           opacity: 0.9,
+          interactive: false,
           lineCap: "round",
           lineJoin: "round",
-        }).bindTooltip(`${area.receiverName || "Receiver"} · ${band.label} · ${band.count} pos`)
-          .addTo(coverageLayer);
+        }).addTo(coverageLayer);
       }
     }
   }
@@ -1374,28 +1375,6 @@ onUnmounted(() => {
             <span><strong>{{ formatAltitude(item) }}</strong><small>{{ formatSpeed(item) }} · {{ formatAge(item.observedAt) }}</small></span>
           </button>
         </section>
-
-        <section class="receiver-list">
-          <header><RadioTower :size="17" /><span>Receivers</span></header>
-          <div v-for="receiver in receivers" :key="receiver.id" class="receiver-row">
-            <span :class="['receiver-light', { on: receiver.online }]"></span>
-            <span>{{ receiver.name }}</span>
-            <small>{{ receiver.currentAircraft }} aircraft</small>
-          </div>
-        </section>
-
-        <section class="coverage-card">
-          <header><Layers :size="17" /><span>Coverage</span></header>
-          <div class="coverage-note">{{ coverageSummary.areas }} outline areas · {{ coverageSummary.positions }} history positions · {{ coverageSummary.receivers }} receivers</div>
-        </section>
-
-        <section class="coverage-card">
-          <header><TowerControl :size="17" /><span>Airfields</span></header>
-          <div class="coverage-note">
-            {{ settings.airfields ? (settings.airfieldsMinor ? airfieldSummary.total : airfieldSummary.coded) : 0 }} shown ·
-            {{ airfieldSummary.coded }} coded · {{ airfieldSummary.minor }} minor fields
-          </div>
-        </section>
       </div>
 
       <section :class="['settings-dock', { open: controlsOpen }]">
@@ -1405,6 +1384,28 @@ onUnmounted(() => {
           <ChevronDown :class="['chevron', { open: controlsOpen }]" :size="18" />
         </button>
         <div v-show="controlsOpen" class="settings-body">
+          <section class="receiver-list">
+            <header><RadioTower :size="17" /><span>Receivers</span></header>
+            <div v-for="receiver in receivers" :key="receiver.id" class="receiver-row">
+              <span :class="['receiver-light', { on: receiver.online }]"></span>
+              <span>{{ receiver.name }}</span>
+              <small>{{ receiver.currentAircraft }} aircraft</small>
+            </div>
+          </section>
+
+          <div class="dock-stats">
+            <section class="coverage-card">
+              <header><Layers :size="17" /><span>Coverage</span></header>
+              <div class="coverage-note">{{ coverageSummary.areas }} areas · {{ coverageSummary.positions }} positions</div>
+            </section>
+            <section class="coverage-card">
+              <header><TowerControl :size="17" /><span>Airfields</span></header>
+              <div class="coverage-note">
+                {{ settings.airfields ? (settings.airfieldsMinor ? airfieldSummary.total : airfieldSummary.coded) : 0 }} shown · {{ airfieldSummary.minor }} minor
+              </div>
+            </section>
+          </div>
+
           <section class="controls">
             <header><Filter :size="17" /><span>Filters</span><button type="button" @click="resetFilters">Reset</button></header>
             <div class="control-grid">
