@@ -58,7 +58,7 @@ Because of (1) and (2), periodic outages are expected. The watchdog recovers the
 
 | Mode | What you see | Signature | Auto-recovery |
 |---|---|---|---|
-| **A. WiFi blackout** | board unreachable; server stops receiving (receiver goes `online:false`) | WAN (1.1.1.1) unreachable ~20s sustained (gateway pings flap even when healthy → ignored as noise) | **reboot**, rate-limited (≤4/hr). No module reload — `rmmod rdawfmac` hangs on the wedged driver (rc=137), so it was dropped; reboot is the only thing that recovers the wedge |
+| **A. WiFi blackout** | board unreachable; server stops receiving (receiver goes `online:false`) | WAN (1.1.1.1) unreachable ~20s sustained (gateway pings flap even when healthy → ignored as noise) | **reboot** (no rate limit — the 3-min startup grace paces reboots ~5 min apart). No module reload — `rmmod rdawfmac` hangs on the wedged driver (rc=137), so it was dropped; reboot is the only thing that recovers the wedge |
 | **B. readsb SDR stall** | site shows **0 aircraft** but board is online & `readsb` is "active" | `samples_processed` frozen at 0 (~20s) while readsb active; `messages` counter frozen | **restart `readsb`** to re-open the dongle (no reboot) |
 
 Mode B is invisible to Mode A's WAN check (the board stays online), so it's
@@ -69,8 +69,9 @@ signal (message count would false-negative during quiet hours).
 **3 min** of uptime. After a boot the WiFi takes tens of seconds to associate, so
 without this the ~20s blackout check would reboot before WiFi ever comes up — an
 endless boot-loop. Tunables (env in the unit or top of the script):
-`INTERVAL=5`, `BLACKOUT=4` (→20s), `STARTUP_GRACE=180`, `SDR_FAILS=4` (→20s),
-`MAX_REBOOTS_PER_HR=4`.
+`INTERVAL=5`, `BLACKOUT=4` (→20s), `STARTUP_GRACE=180`, `SDR_FAILS=4` (→20s).
+There is no reboot rate-limit — the startup grace already keeps reboots ~5 min
+apart, so during a bad spell the board keeps retrying instead of giving up.
 
 ## Last-resort backstop: network smart plug
 
@@ -94,8 +95,9 @@ shutdown) — use it for a hung board, not casually.
 1. Server `/api/receivers/public` → the receiver's `online` / `lastSeenAt`:
    - `online:false` → **Mode A** (WiFi blackout). The watchdog reboots after ~20s
      of blackout (once uptime ≥ 3 min) and the board returns after boot. If it's
-     been down much longer, it's either rate-limited (≤4/hr) or a true hang —
-     power-cycle via the plug.
+     been down much longer, WiFi is in a bad spell that re-wedges within seconds
+     of each recovery — reboots only buy brief windows; power-cycle via the plug
+     or wait the spell out. No software recovery keeps it up through a bad spell.
    - `online:true`, `currentAircraft:0` → **Mode B** or genuinely quiet airspace.
 2. On the board: `systemctl is-active readsb`, then read
    `last1min.local.samples_processed` in `/run/readsb/stats.json`:
