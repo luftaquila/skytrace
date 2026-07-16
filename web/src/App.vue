@@ -942,19 +942,41 @@ function trackSegmentColor(point) {
   return altitudeColorFeet(Math.round(alt / 500) * 500);
 }
 
+// A single hex can cover several flights over the track window; split the trace across
+// long tracking gaps (landed / out of range) so we don't draw a straight line bridging
+// hours of missing data.
+const TRACK_GAP_MS = 10 * 60 * 1000;
+
 function drawTrack() {
   if (!map) return;
   if (trackLayer) trackLayer.remove();
   trackLayer = L.layerGroup();
   const pts = selectedTrack.value.filter((point) => point.lat != null && point.lon != null);
-  if (pts.length >= 2) {
+
+  // Break the point list into contiguous segments at gaps longer than TRACK_GAP_MS.
+  const segments = [];
+  let segment = [];
+  let prevTime = null;
+  for (const point of pts) {
+    const time = Date.parse(point.positionAt);
+    if (segment.length && Number.isFinite(time) && Number.isFinite(prevTime) && time - prevTime > TRACK_GAP_MS) {
+      segments.push(segment);
+      segment = [];
+    }
+    segment.push(point);
+    prevTime = time;
+  }
+  if (segment.length) segments.push(segment);
+
+  for (const segPts of segments) {
+    if (segPts.length < 2) continue;
     // Dark casing underneath for contrast, then altitude-colored segments on top.
-    L.polyline(pts.map((point) => [point.lat, point.lon]), {
+    L.polyline(segPts.map((point) => [point.lat, point.lon]), {
       color: "#071012", opacity: 0.55, weight: 5, interactive: false, lineCap: "round", lineJoin: "round",
     }).addTo(trackLayer);
 
-    let run = [[pts[0].lat, pts[0].lon]];
-    let runColor = trackSegmentColor(pts[0]);
+    let run = [[segPts[0].lat, segPts[0].lon]];
+    let runColor = trackSegmentColor(segPts[0]);
     const flush = () => {
       if (run.length >= 2) {
         L.polyline(run, {
@@ -962,12 +984,12 @@ function drawTrack() {
         }).addTo(trackLayer);
       }
     };
-    for (let i = 1; i < pts.length; i += 1) {
-      const color = trackSegmentColor(pts[i]);
-      run.push([pts[i].lat, pts[i].lon]);
+    for (let i = 1; i < segPts.length; i += 1) {
+      const color = trackSegmentColor(segPts[i]);
+      run.push([segPts[i].lat, segPts[i].lon]);
       if (color !== runColor) {
         flush();
-        run = [[pts[i].lat, pts[i].lon]];
+        run = [[segPts[i].lat, segPts[i].lon]];
         runColor = color;
       }
     }
