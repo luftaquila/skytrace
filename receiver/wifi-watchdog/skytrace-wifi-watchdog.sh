@@ -5,7 +5,7 @@
 # A) WiFi blackout (RDA5991/rdawfmac SDIO firmware wedge — dmesg
 #    "wland_sdio_bus_rxctl: resumed on timeout"): board alive but can't pass data.
 #    Detect a REAL blackout (WAN unreachable, sustained; gateway flaps are noise
-#    and are ignored) then REBOOT, rate-limited. NOTE: an earlier version tried a
+#    and are ignored) then REBOOT (no rate limit — the startup grace paces it). NOTE: an earlier version tried a
 #    module reload first, but `rmmod rdawfmac` always hangs on the wedged driver
 #    (killed after 25s, rc=137) — it only delayed recovery, so it's removed.
 #    A soft reboot is the only thing observed to recover this wedge. A 3-min
@@ -26,8 +26,6 @@ INTERVAL="${INTERVAL:-5}"       # sustained window it's the WiFi, not the gatewa
 BLACKOUT="${BLACKOUT:-4}"       # consecutive WAN failures to declare blackout & reboot (~20s)
 MODULE="${MODULE:-rdawfmac}"
 LOG="${LOG:-/var/log/skytrace-wifi-watchdog.log}"
-STAMPS="${STAMPS:-/var/lib/skytrace-wifi-watchdog.reboots}"
-MAX_REBOOTS_PER_HR="${MAX_REBOOTS_PER_HR:-4}"
 STARTUP_GRACE="${STARTUP_GRACE:-180}" # don't reboot until uptime>this (3 min) — WiFi needs time to associate after boot (else boot-loop)
 STATS="${STATS:-/run/readsb/stats.json}"
 SDR_FAILS="${SDR_FAILS:-4}"     # consecutive checks with 0 samples before restarting readsb (~20s)
@@ -37,13 +35,6 @@ log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
 wan_ok(){ ping -c1 -W3 "$WAN" >/dev/null 2>&1; }
 # samples_processed over the last minute; -1 if stats unreadable (skip, don't penalize)
 sdr_samples(){ python3 -c "import json;print(json.load(open('$STATS')).get('last1min',{}).get('local',{}).get('samples_processed',-1))" 2>/dev/null || echo -1; }
-
-can_reboot(){
-  now=$(date +%s)
-  [ -f "$STAMPS" ] || : > "$STAMPS"
-  awk -v n="$now" '$1 > n-3600' "$STAMPS" > "$STAMPS.tmp" 2>/dev/null && mv "$STAMPS.tmp" "$STAMPS"
-  [ "$(wc -l < "$STAMPS")" -lt "$MAX_REBOOTS_PER_HR" ]
-}
 
 fails=0
 sdr_fails=0
@@ -62,12 +53,9 @@ while true; do
       if [ "$up" -lt "$STARTUP_GRACE" ]; then
         # fresh boot — WiFi hasn't associated yet; rebooting now would boot-loop
         [ $((fails % 4)) -eq 0 ] && log "blackout but uptime ${up}s < grace ${STARTUP_GRACE}s (WiFi still coming up) -> wait"
-      elif can_reboot; then
-        log "BLACKOUT (~$((fails*INTERVAL))s WAN down, gateway noise ignored) -> REBOOT"
-        date +%s >> "$STAMPS"; sync; reboot
       else
-        log "blackout + reboot rate-limited (>=$MAX_REBOOTS_PER_HR/hr) -> holding (hardware WiFi spell)"
-        fails=$((BLACKOUT))   # keep re-evaluating without a tight reboot loop
+        log "BLACKOUT (~$((fails*INTERVAL))s WAN down, gateway noise ignored) -> REBOOT"
+        sync; reboot
       fi
     fi
   fi
