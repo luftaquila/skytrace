@@ -114,13 +114,11 @@ function coverageRing(positioned, origin) {
     buckets[Math.min(COVERAGE_SECTORS - 1, Math.floor(bearing / sectorSize))].push(Math.hypot(east, north));
   }
 
-  // 95th-percentile range per sector: shows most of the real reach while still rejecting
-  // the odd freak long-range hit.
-  const ranges = buckets.map((list) => {
-    if (!list.length) return null;
-    list.sort((a, b) => a - b);
-    return list[Math.min(list.length - 1, Math.floor(list.length * 0.95))];
-  });
+  // Farthest reception per sector so the outline actually reaches every aircraft we've
+  // received in that bearing (implausible jumps are already filtered upstream). This makes
+  // the boundary grow to include a plane as soon as it flies beyond the previous edge,
+  // instead of leaving it outside a statistical percentile.
+  const ranges = buckets.map((list) => (list.length ? list.reduce((m, v) => (v > m ? v : m), 0) : null));
   if (ranges.filter((range) => range != null).length < 3) return null;
 
   // Bridge only tiny sampling gaps; longer no-coverage arcs collapse inward toward the
