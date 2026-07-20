@@ -1,26 +1,19 @@
 [Unit]
 Description=readsb ADS-B decoder (skytrace receiver)
 Documentation=https://github.com/wiedehopf/readsb
-After=network.target
 Wants=network.target
+After=network.target
 
 [Service]
 Type=simple
 EnvironmentFile=/etc/default/readsb
-# readsb uses larger USB transfers than dump1090-mutability and hits the kernel
-# usbfs buffer limit on this board ("Failed to allocate zero-copy buffer" ->
-# FATAL). Lift the limit before start. The '+' runs it as root despite User=.
-ExecStartPre=+/bin/sh -c 'echo 0 > /sys/module/usbcore/parameters/usbfs_memory_mb'
-ExecStart=/usr/local/bin/readsb --device-type rtlsdr $RECEIVER_OPTIONS $DECODER_OPTIONS $JSON_OPTIONS --quiet
-# Longer restart delay: if readsb ever exits, don't hammer-restart (rapid
-# restarts reset the RTL dongle and can destabilize this board's USB controller).
-Restart=always
-RestartSec=20
-Nice=-5
-# Runs as root (matches the proven-working manual invocation on this board).
-# systemd creates /run/readsb; aircraft.json (world-readable) is written there.
+ExecStart=/usr/local/bin/readsb $RECEIVER_OPTIONS $DECODER_OPTIONS $JSON_OPTIONS $NET_OPTIONS --quiet
+User=readsb
 RuntimeDirectory=readsb
 RuntimeDirectoryMode=0755
+Restart=always
+RestartSec=5
+Nice=-5
 
 [Install]
 WantedBy=multi-user.target
