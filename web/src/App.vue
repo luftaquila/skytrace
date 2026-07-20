@@ -143,6 +143,7 @@ let refreshTimer;
 let coverageTimer;
 let clockTimer;
 let eventSource;
+let sseRetryTimer;
 let playbackTimer;
 const markers = new Map();
 
@@ -1244,7 +1245,14 @@ onMounted(async () => {
   refreshTimer = setInterval(() => liveRefresher.schedule(0), 10000);
   coverageTimer = setInterval(() => coverageRefresher.schedule(0), 60000);
   clockTimer = setInterval(() => { now.value = Date.now(); }, 1000);
+  connectEvents();
+});
+
+function connectEvents() {
+  eventSource?.close();
   eventSource = new EventSource("/api/events");
+  // A (re)opened stream may have missed events while down — resync immediately.
+  eventSource.onopen = () => liveRefresher.schedule(0);
   eventSource.addEventListener("ingest", (event) => {
     liveRefresher.schedule();
     // Only touch the heavy coverage query when this batch actually stored new track
@@ -1253,8 +1261,18 @@ onMounted(async () => {
     try { trackPoints = JSON.parse(event.data)?.trackPoints ?? 1; } catch { /* refetch on parse failure */ }
     if (trackPoints > 0) coverageRefresher.schedule(1000);
   });
-  eventSource.onerror = () => { status.value = "reconnecting"; };
-});
+  eventSource.onerror = () => {
+    status.value = "reconnecting";
+    // The browser only retries transient drops on its own; an HTTP error response
+    // (e.g. a 502 while the server redeploys) fails the stream PERMANENTLY per the
+    // EventSource spec, silently demoting the tab to the 10s fallback poll forever —
+    // rebuild the stream ourselves.
+    if (eventSource.readyState === EventSource.CLOSED) {
+      clearTimeout(sseRetryTimer);
+      sseRetryTimer = setTimeout(connectEvents, 5000);
+    }
+  };
+}
 
 onUnmounted(() => {
   clearInterval(refreshTimer);
@@ -1265,6 +1283,7 @@ onUnmounted(() => {
   coverageRefresher.cancel();
   destroyHistoryChart();
   window.removeEventListener("keydown", onGlobalKeydown);
+  clearTimeout(sseRetryTimer);
   eventSource?.close();
   map?.remove();
 });

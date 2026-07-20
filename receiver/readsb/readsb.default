@@ -1,5 +1,4 @@
 # /etc/default/readsb — skytrace receiver decoder options.
-# Minimal for the Orange Pi i96 (227MB RAM, no swap, single core).
 #
 # No --lat/--lon and no --max-range => UNLIMITED range. This is a coverage
 # receiver: keep every position it can hear. readsb's --max-range default
@@ -7,7 +6,14 @@
 # filter never applies and airborne positions decode unfiltered via global CPR.
 # (Setting --lat/--lon would enable surface positions but also activate that
 # 300nm cap, so we intentionally leave the location unset.)
+#
+# readsb defaults every listen port to 0: --net alone opens NO listener, so
+# the beast output port for a piaware relay must be explicit (localhost:30005).
+# Extra aggregator --net-connector entries (feed UUIDs stay out of the repo)
+# go in NET_OPTIONS on the deployed board; note that only the
+# beast_reduce_plus_out connector type sends a uuid — beast_reduce_out never does.
 
-RECEIVER_OPTIONS="--gain auto --ppm 0"
+RECEIVER_OPTIONS="--device-type rtlsdr --gain auto --ppm 0"
 DECODER_OPTIONS=""
 JSON_OPTIONS="--write-json /run/readsb --write-json-every 1"
+NET_OPTIONS="--net --net-bind-address 127.0.0.1 --net-bo-port 30005"

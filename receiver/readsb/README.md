@@ -1,41 +1,30 @@
 # readsb for the skytrace receiver
 
-The Orange Pi i96 receiver originally ran **dump1090-mutability**, which emits a
-legacy `aircraft.json` (`altitude`/`speed`/`vert_rate`, no `type`). The skytrace
-server normalizer tolerates those names, but **readsb** is the real upgrade: it
-emits the modern format natively (`alt_baro`/`gs`/`type`) and decodes far more
-(IAS/TAS/Mach, nav/selected altitude, headings, wind/OAT via Mode-S EHS/MRAR).
+[readsb](https://github.com/wiedehopf/readsb) is the ADS-B decoder: it emits
+the modern `aircraft.json` format natively (`alt_baro`/`gs`/`type`) and decodes
+far more than dump1090 variants (IAS/TAS/Mach, nav/selected altitude, headings,
+wind/OAT via Mode-S EHS/MRAR).
 
-readsb isn't packaged for Debian 11 bullseye armhf, and the board (227MB RAM,
-no swap) can't build it on-device — so it's **cross-built in CI** and the board
-just pulls the binary.
+readsb isn't packaged for Debian, and the ODROID-C2 (4 cores, 2GB RAM) builds
+it on-device in a couple of minutes — no cross-build needed.
 
-## Build (CI)
-
-`.github/workflows/readsb.yml` cross-builds `Dockerfile` for `linux/arm/v7` on a
-`debian:bullseye` base (glibc 2.31, matching the board) and publishes the binary
-as a workflow artifact **and** a rolling prerelease `readsb-armhf`. Trigger it
-via *Actions → Build readsb → Run workflow*, or by pushing changes here.
-
-Download URL for the board:
-`https://github.com/luftaquila/skytrace/releases/download/readsb-armhf/readsb`
-
-The produced binary is `ELF ARM EABI5 (armhf)`, glibc ≤ 2.29, runtime deps
-`librtlsdr0 libusb-1.0-0 libzstd1 libncurses6 libtinfo6 zlib1g`.
-
-## Deploy (on the board, as root)
-
-`deploy.sh` installs runtime deps, drops the binary + `readsb.service` +
-`/etc/default/readsb`, switches the decoder from dump1090-mutability to readsb,
-verifies readsb is producing fresh JSON with RAM headroom (**auto-reverts to
-mutability if not**), and points the skytrace agent at `/run/readsb/aircraft.json`.
+## Install (on the board, as root)
 
 ```sh
-# default: download the release asset
-sudo bash deploy.sh >/tmp/readsb-deploy.log 2>&1 &
-# or with a scp'd binary
-sudo READSB_BIN=/tmp/readsb bash deploy.sh >/tmp/readsb-deploy.log 2>&1 &
+bash install.sh                    # wiedehopf/readsb default branch
+READSB_REF=v3.14.16 bash install.sh
 ```
 
+`install.sh` installs build/runtime deps, blacklists the `dvb_usb_rtl28xxu`
+kernel module, builds readsb from source, creates the unprivileged `readsb`
+user (group `plugdev`, plus a udev rule for the dongle), installs
+`readsb.service` + `/etc/default/readsb`, and enables the service. An existing
+`/etc/default/readsb` is left untouched, so board-local options (feed
+connectors) survive reinstalls.
+
+## Configuration
+
 Range is unlimited by design (no receiver location / no `--max-range`) — see
-`readsb.default`. The board WiFi is unstable, so run detached and poll the log.
+the rationale in `readsb.default`. `--net` serves beast output on
+`localhost:30005` for a piaware relay; aggregator feeds are extra
+`--net-connector` entries added on the board only.
