@@ -1,23 +1,29 @@
 // Top Gun style 3D tactical view: a self-contained three.js scene with Korean terrain
-// built from free AWS Terrarium DEM tiles, a glowing grid/contour shader, WebGL altitude
-// sticks / trails / conflict links, and a DOM overlay reusing the 2D marker HTML so the
-// visual language (altitude colors, IDENT/conflict blink, coasting fade) stays identical.
+// built from free AWS Terrarium DEM tiles, a glowing grid/contour shader, and true 3D
+// aircraft — lit meshes oriented by heading + climb angle so direction and attitude read
+// from any camera angle — with WebGL altitude sticks / trails / conflict links / coverage
+// volume, and DOM data-block labels billboarded beside each target.
 //
 // This module is only ever loaded via dynamic import from App.vue, so three.js stays out
 // of the initial bundle. All app state and formatting comes in through the `deps` object;
 // nothing here touches Vue reactivity directly.
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 
 // Fixed scene region: South Korea + surrounding seas, comfortably covering the
 // receiver's ADS-B horizon. DEM z8 keeps the initial download to ~60 tiles.
 const REGION = { lonMin: 123.5, lonMax: 132.5, latMin: 32.5, latMax: 40.0 };
-const SCENE_CENTER = { lon: 127.8, lat: 36.2 }; // matches the 2D map's initial view
+// Scene origin (= range-ring center, local coordinate origin): Yuseong IC, Daejeon —
+// effectively the receiver's location without publishing its exact coordinates.
+const SCENE_CENTER = { lon: 127.33113, lat: 36.36599 };
 const DEM_ZOOM = 8;
 const DEM_URL = (z, x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
 // Downsample factor applied to the stitched DEM pixels when building the mesh grid.
-const DEM_STRIDE = 4;
+// Stride 2 => ~1.2 km cells; checked against surveyed peaks (Hallasan/Jirisan/Seoraksan),
+// stride 4 shaved 15-20% off summits while stride 2 stays close to the source pixels.
+const DEM_STRIDE = 2;
 
 const FT_TO_M = 0.3048;
 const EARTH_R = 6378137;
@@ -105,9 +111,10 @@ export function createTactical3d({ container, deps }) {
   // --- DOM scaffolding -------------------------------------------------------------------
   const overlayEl = document.createElement("div");
   overlayEl.className = "t3d-overlay";
-  const tooltipEl = document.createElement("div");
-  tooltipEl.className = "t3d-tt aircraft-tt";
-  tooltipEl.style.display = "none";
+  // Single hover popover, used for airfields only — aircraft carry their data blocks.
+  const afTooltipEl = document.createElement("div");
+  afTooltipEl.className = "t3d-tt airfield-tt";
+  afTooltipEl.style.display = "none";
   const loadingEl = document.createElement("div");
   loadingEl.className = "t3d-loading";
   loadingEl.textContent = "ACQUIRING TERRAIN DATA…";
@@ -122,7 +129,7 @@ export function createTactical3d({ container, deps }) {
   renderer.domElement.className = "t3d-canvas";
   container.appendChild(renderer.domElement);
   container.appendChild(overlayEl);
-  container.appendChild(tooltipEl);
+  container.appendChild(afTooltipEl);
   container.appendChild(loadingEl);
   container.appendChild(hintEl);
 
@@ -155,6 +162,47 @@ export function createTactical3d({ container, deps }) {
     vertexShader: TERRAIN_VERT,
     fragmentShader: TERRAIN_FRAG,
   });
+
+  // --- Lights (aircraft meshes are lit so their 3D form conveys attitude; the terrain
+  // shader is unlit and ignores these) ---------------------------------------------------
+  scene.add(new THREE.HemisphereLight(0x9fd8ff, 0x0a1512, 1.0));
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.25);
+  keyLight.position.set(-0.45, 1, 0.3);
+  scene.add(keyLight);
+
+  // --- Aircraft geometries (built once; nose points -Z = north at identity) --------------
+  const WHITE = new THREE.Color(0xffffff);
+  const AMBER = new THREE.Color(0xf59e0b);
+  const RED = new THREE.Color(0xfb7185);
+  const BASE_NOSE = new THREE.Vector3(0, 0, -1);
+  const _fwd = new THREE.Vector3();
+
+  function buildPlaneGeo() {
+    const fus = new THREE.CylinderGeometry(0.05, 0.07, 0.82, 12); fus.rotateX(Math.PI / 2);
+    const nose = new THREE.ConeGeometry(0.07, 0.3, 12); nose.rotateX(-Math.PI / 2); nose.translate(0, 0, -0.56);
+    const wing = new THREE.BoxGeometry(1.05, 0.02, 0.26); wing.translate(0, -0.01, 0.05);
+    const tailplane = new THREE.BoxGeometry(0.44, 0.02, 0.13); tailplane.translate(0, 0, 0.4);
+    const fin = new THREE.BoxGeometry(0.02, 0.2, 0.17); fin.translate(0, 0.1, 0.4);
+    return mergeGeometries([fus, nose, wing, tailplane, fin]);
+  }
+  function buildHeliGeo() {
+    const body = new THREE.SphereGeometry(0.2, 14, 12); body.scale(1, 0.92, 1.55);
+    const boom = new THREE.BoxGeometry(0.05, 0.05, 0.62); boom.translate(0, 0.03, 0.52);
+    const fin = new THREE.BoxGeometry(0.02, 0.17, 0.09); fin.translate(0, 0.09, 0.78);
+    const rotor = new THREE.CylinderGeometry(0.64, 0.64, 0.012, 24); rotor.translate(0, 0.2, 0);
+    return mergeGeometries([body, boom, fin, rotor]);
+  }
+  function buildGroundGeo() {
+    const hull = new THREE.BoxGeometry(0.34, 0.16, 0.6);
+    const top = new THREE.BoxGeometry(0.26, 0.14, 0.3); top.translate(0, 0.14, 0.03);
+    return mergeGeometries([hull, top]);
+  }
+  const GEO = { plane: buildPlaneGeo(), helicopter: buildHeliGeo(), ground: buildGroundGeo() };
+  const GEO_LEN = { plane: 1.12, helicopter: 1.1, ground: 0.6 }; // nose-to-tail units, for screen-size scaling
+  const aircraftMatBase = new THREE.MeshStandardMaterial({ roughness: 0.42, metalness: 0.14 });
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  const TARGET_PX = 34; // apparent aircraft length in screen px, held constant across zoom
 
   // --- Terrain / elevation state ---------------------------------------------------------
   let terrainMesh = null;
@@ -348,108 +396,143 @@ export function createTactical3d({ container, deps }) {
   let conflictLine = null;
   const conflictLabels = []; // {x, y, z, el}
 
-  // --- Aircraft DOM markers ---------------------------------------------------------------
-  // hex -> {el, glyphEl, blockEl, sigGlyph, sigBlock, rot, x, y(raw m * EX), z, visible}
+  // --- Aircraft targets: a lit 3D mesh (direction + attitude) plus a billboarded DOM
+  // data block. hex -> {hex, interactive, el, blockEl, mesh, mat, geoKind, sigBlock,
+  // x, y, z, groundY, stick, baseColor, flags…, scaleMul, blink, visible} ------------------
   const targets = new Map();
-  let ghost = null; // playback marker: same shape as a target, non-interactive
-  let pointerHex = null; // hex under the mouse pointer (drives the tooltip)
-  let tooltipHex = null;
+  let raycastMeshes = []; // meshes tested on hover/click; rebuilt each dataPass
+  let ghostTarget = null; // playback marker, non-interactive
+  let hoverHex = null; // aircraft under the pointer / hovered in the list
+  let hoverAf = null; // airfield entry under the pointer (drives the single popover)
   let exagg = 2;
   let needsRender = true;
   let running = false;
   let rafId = 0;
 
-  function makeMarkerEl(hex, interactive) {
+  function makeTarget(hex, interactive) {
     const el = document.createElement("div");
-    el.className = "t3d-marker aircraft-icon";
-    const glyphEl = document.createElement("span");
-    glyphEl.className = "t3d-glyph";
+    el.className = "t3d-marker";
     const blockEl = document.createElement("span");
     blockEl.className = "t3d-block";
-    el.appendChild(glyphEl);
     el.appendChild(blockEl);
-    if (interactive) {
-      // Events bubble up from .aircraft-symbol (the only pointer-events:auto child), so
-      // binding on the holder survives glyph innerHTML rebuilds.
-      el.addEventListener("click", (event) => {
-        event.stopPropagation();
-        deps.onSelect(hex);
-      });
-      el.addEventListener("mouseover", () => {
-        pointerHex = hex;
-        deps.onHover(hex);
-        showTooltip(hex);
-      });
-      el.addEventListener("mouseout", (event) => {
-        if (el.contains(event.relatedTarget)) return;
-        pointerHex = null;
-        deps.onHover(null);
-        hideTooltip();
-      });
-    } else {
-      el.classList.add("t3d-ghost");
-    }
+    if (!interactive) el.classList.add("t3d-ghost");
     overlayEl.appendChild(el);
-    return { el, glyphEl, blockEl, sigGlyph: "", sigBlock: "", rot: null, x: 0, y: 0, z: 0, visible: true };
+    return { hex, interactive, el, blockEl, mesh: null, mat: null, geoKind: null, sigBlock: "", visible: true };
   }
 
-  function updateMarker(target, item, selected) {
-    const sigGlyph = `${deps.markerSignature(item)}`;
-    const rot = deps.markerRotation(item);
-    if (target.sigGlyph !== sigGlyph) {
-      target.glyphEl.innerHTML = deps.markerHtml(item);
-      target.sigGlyph = sigGlyph;
-      target.rot = rot;
-    } else if (target.rot !== rot) {
-      const svg = target.glyphEl.querySelector(".aircraft-svg");
-      if (svg) svg.style.transform = `rotate(${rot}deg) scale(${deps.markerSizeScale(item)})`;
-      target.rot = rot;
-    }
-    const sigBlock = deps.datablockHtml(item);
-    if (target.sigBlock !== sigBlock) {
-      target.blockEl.innerHTML = sigBlock;
-      target.sigBlock = sigBlock;
-    }
-    target.el.classList.toggle("selected", selected);
+  function setTargetMesh(target, kind) {
+    if (target.geoKind === kind && target.mesh) return;
+    if (target.mesh) { scene.remove(target.mesh); target.mat.dispose(); }
+    const mat = aircraftMatBase.clone();
+    const mesh = new THREE.Mesh(GEO[kind] || GEO.plane, mat);
+    mesh.frustumCulled = false;
+    mesh.userData.hex = target.hex;
+    scene.add(mesh);
+    target.mesh = mesh;
+    target.mat = mat;
+    target.geoKind = kind;
+  }
+
+  function removeTarget(target) {
+    if (target.mesh) { scene.remove(target.mesh); target.mat.dispose(); }
+    target.el.remove();
+  }
+
+  function updateTarget(target, item, selected, conflictSet) {
+    const kind = deps.aircraftKind(item);
+    setTargetMesh(target, kind);
+
     const groundY = sampleElevation(item.lon, item.lat);
     const altFt = item.altBaro ?? item.altGeom;
-    const altM = item.onGround || altFt == null ? groundY : Math.max(groundY, altFt * FT_TO_M);
+    const airborne = !item.onGround && altFt != null;
+    const altM = airborne ? Math.max(groundY, altFt * FT_TO_M) : groundY;
     target.x = toLocalX(item.lon);
     target.z = toLocalZ(item.lat);
     target.y = altM * exagg;
     target.groundY = groundY * exagg;
-    target.stick = !item.onGround && altFt != null;
-    target.color = parseCssColor(deps.altitudeColor(item));
+    target.stick = airborne;
+    target.mesh.position.set(target.x, target.y, target.z);
+
+    // Orient by heading (yaw) and climb angle (pitch). setFromUnitVectors gives the
+    // minimal rotation from the base nose (-Z) to the flight vector, so wings stay level
+    // (no fake bank) while nose points exactly where the aircraft is going and climbing.
+    const th = (Number.isFinite(item.track) ? item.track : 0) * (Math.PI / 180);
+    let phi = 0;
+    if (airborne) {
+      const vs = item.baroRate ?? item.geomRate; // ft/min
+      const gsMps = (item.gs ?? 0) * 0.514444;
+      if (vs != null && gsMps > 5) phi = Math.atan2(vs * 0.00508, gsMps);
+      phi = Math.max(-0.5, Math.min(0.5, phi)); // clamp to ±~29° so steep VS stays readable
+    }
+    const cf = Math.cos(phi);
+    _fwd.set(Math.sin(th) * cf, Math.sin(phi), -Math.cos(th) * cf);
+    target.mesh.quaternion.setFromUnitVectors(BASE_NOSE, _fwd);
+
+    const sigBlock = deps.datablockHtml(item);
+    if (target.sigBlock !== sigBlock) { target.blockEl.innerHTML = sigBlock; target.sigBlock = sigBlock; }
+
+    target.baseColor = parseCssColor(deps.altitudeColor(item));
+    target.ground = item.onGround;
+    target.emergency = !!(item.emergency && item.emergency !== "none");
+    target.ident = !!item.spi;
+    target.conflict = conflictSet.has(item.hex);
+    target.coasting = deps.isCoasting(item);
+    target.selected = selected;
+    target.hovered = target.interactive && item.hex === hoverHex;
+    target.ghost = !target.interactive;
+    applyTargetStyle(target);
   }
 
-  function showTooltip(hex) {
-    const item = deps.getAircraft().find((row) => row.hex === hex);
-    if (!item) return;
-    tooltipEl.innerHTML = deps.tooltipHtml(item);
-    tooltipEl.style.display = "";
-    tooltipHex = hex;
-    needsRender = true;
-  }
-  function hideTooltip() {
-    tooltipEl.style.display = "none";
-    tooltipHex = null;
+  // Steady-state material + scale for a target's flags. Blink (ident/conflict) is layered
+  // on top per-frame; baseRender* hold the values to restore between blink flashes.
+  function applyTargetStyle(t) {
+    const mat = t.mat;
+    let color = t.baseColor.clone();
+    let emis = t.baseColor.clone().multiplyScalar(0.55);
+    let scaleMul = t.ground ? 0.75 : 1;
+    if (t.ghost) { emis = t.baseColor.clone().multiplyScalar(0.3); scaleMul *= 0.9; }
+    if (t.emergency) emis = RED.clone().multiplyScalar(0.7);
+    if (t.selected) { color = t.baseColor.clone().lerp(WHITE, 0.12); emis = t.baseColor.clone().lerp(WHITE, 0.25).multiplyScalar(0.95); scaleMul *= 1.6; }
+    if (t.hovered) { color = t.baseColor.clone().lerp(WHITE, 0.45); emis = emis.clone().lerp(WHITE, 0.4); scaleMul = Math.max(scaleMul, t.ground ? 1 : 1.28); }
+    mat.color.copy(color);
+    mat.emissive.copy(emis);
+    mat.opacity = t.coasting ? 0.5 : (t.ghost ? 0.65 : 1);
+    mat.transparent = t.coasting || t.ghost;
+    t.scaleMul = scaleMul;
+    t.baseRenderColor = color;
+    t.baseRenderEmissive = emis;
+    t.blink = t.conflict ? "conflict" : t.ident ? "ident" : null;
+    t.blockEl.classList.toggle("selected", !!t.selected);
+    t.blockEl.classList.toggle("hovered", !!t.hovered);
   }
 
-  // --- Airfields (terrain-pinned DOM reference points) -------------------------------------
-  const airfieldEls = []; // {x, y(raw), z, el}
+  // --- Airfields (terrain-pinned DOM reference points, graded + hover info) ----------------
+  const airfieldEls = []; // {x, y(raw m), z, el, field}
   function rebuildAirfields() {
     for (const f of airfieldEls) f.el.remove();
     airfieldEls.length = 0;
+    if (hoverAf) { hoverAf = null; afTooltipEl.style.display = "none"; }
     const settings = deps.getSettings();
     if (!settings.airfields) return;
     for (const field of AIRFIELDS) {
       const minor = isMinorAirfield(field);
       if (minor && !settings.airfieldsMinor) continue;
       const el = document.createElement("div");
-      el.className = `t3d-airfield${minor ? " minor" : ""}`;
+      el.className = `t3d-airfield kind-${field.kind}${minor ? " minor" : ""}`;
       el.innerHTML = `<span class="t3d-af-dot"></span>${minor ? "" : `<span class="t3d-af-code">${field.code}</span>`}`;
       overlayEl.appendChild(el);
-      airfieldEls.push({ x: toLocalX(field.lon), y: sampleElevation(field.lon, field.lat), z: toLocalZ(field.lat), el });
+      const entry = { x: toLocalX(field.lon), y: sampleElevation(field.lon, field.lat) * exagg, z: toLocalZ(field.lat), el, field };
+      const dot = el.querySelector(".t3d-af-dot");
+      dot.addEventListener("mouseenter", () => {
+        hoverAf = entry;
+        afTooltipEl.innerHTML = deps.airfieldTooltip(field);
+        afTooltipEl.style.display = "";
+        needsRender = true;
+      });
+      dot.addEventListener("mouseleave", () => {
+        if (hoverAf === entry) { hoverAf = null; afTooltipEl.style.display = "none"; }
+      });
+      airfieldEls.push(entry);
     }
   }
 
@@ -460,6 +543,9 @@ export function createTactical3d({ container, deps }) {
     uniforms.uExagg.value = exagg;
 
     const selectedHex = deps.getSelectedHex();
+    const conflictSet = new Set();
+    for (const pair of deps.getConflicts()) { conflictSet.add(pair.a.hex); conflictSet.add(pair.b.hex); }
+
     const seen = new Set();
     let stickCount = 0;
     let dotCount = 0;
@@ -471,16 +557,16 @@ export function createTactical3d({ container, deps }) {
       seen.add(item.hex);
       let target = targets.get(item.hex);
       if (!target) {
-        target = makeMarkerEl(item.hex, true);
+        target = makeTarget(item.hex, true);
         targets.set(item.hex, target);
       }
-      updateMarker(target, item, selectedHex === item.hex);
+      updateTarget(target, item, selectedHex === item.hex, conflictSet);
 
-      const c = target.color;
+      const c = target.baseColor;
       if (target.stick) {
         const p = stickCount * 6;
         sticks.positions.array.set([target.x, target.y, target.z, target.x, target.groundY, target.z], p);
-        sticks.colors.array.set([c.r, c.g, c.b, c.r * 0.2, c.g * 0.2, c.b * 0.2], p);
+        sticks.colors.array.set([c.r, c.g, c.b, c.r * 0.15, c.g * 0.15, c.b * 0.15], p);
         stickCount += 1;
       }
       const d = dotCount * 3;
@@ -490,11 +576,13 @@ export function createTactical3d({ container, deps }) {
     }
     for (const [hex, target] of targets) {
       if (!seen.has(hex)) {
-        target.el.remove();
+        removeTarget(target);
         targets.delete(hex);
-        if (pointerHex === hex) { pointerHex = null; hideTooltip(); }
+        if (hoverHex === hex) hoverHex = null;
       }
     }
+    raycastMeshes = [];
+    for (const t of targets.values()) if (t.mesh) raycastMeshes.push(t.mesh);
     sticks.geometry.setDrawRange(0, stickCount * 2);
     sticks.positions.needsUpdate = true;
     sticks.colors.needsUpdate = true;
@@ -505,16 +593,11 @@ export function createTactical3d({ container, deps }) {
     // Playback ghost marker along the selected track.
     const ghostItem = deps.getPlaybackGhost();
     if (ghostItem) {
-      if (!ghost) ghost = makeMarkerEl("__ghost__", false);
-      updateMarker(ghost, ghostItem, false);
-    } else if (ghost) {
-      ghost.el.remove();
-      ghost = null;
-    }
-
-    if (tooltipHex) {
-      const item = deps.getAircraft().find((row) => row.hex === tooltipHex);
-      if (item) tooltipEl.innerHTML = deps.tooltipHtml(item);
+      if (!ghostTarget) ghostTarget = makeTarget("__ghost__", false);
+      updateTarget(ghostTarget, ghostItem, false, conflictSet);
+    } else if (ghostTarget) {
+      removeTarget(ghostTarget);
+      ghostTarget = null;
     }
 
     rebuildTrail();
@@ -600,6 +683,71 @@ export function createTactical3d({ container, deps }) {
     scene.add(conflictLine);
   }
 
+  // --- Coverage volume: the receiver's reception envelope as stacked altitude-band shells,
+  // so the reachable airspace reads as a 3D dome. Rebuilt only when coverage/exaggeration
+  // changes (not per-second), via the exported drawCoverage(). --------------------------
+  let coverageGroup = null;
+  function bandMidFeet(band) {
+    const max = band.maxAltitude ?? band.minAltitude + 10000;
+    return (band.minAltitude + max) / 2;
+  }
+  function addCoverageShell(group, ring, y, color) {
+    const pts = ring.map(([lon, lat]) => [toLocalX(lon), toLocalZ(lat)]);
+    const n = pts.length;
+    if (n < 3) return;
+    // Fan-triangulate from the centroid — reception envelopes are star-shaped about the
+    // receiver, so a centroid fan fills them without a general triangulator.
+    let cx = 0;
+    let cz = 0;
+    for (const [x, z] of pts) { cx += x; cz += z; }
+    cx /= n; cz /= n;
+    const fill = [cx, y, cz];
+    for (const [x, z] of pts) fill.push(x, y, z);
+    const idx = [];
+    for (let i = 1; i <= n; i += 1) idx.push(0, i, i === n ? 1 : i + 1);
+    const fillGeo = new THREE.BufferGeometry();
+    fillGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(fill), 3));
+    fillGeo.setIndex(idx);
+    const fillMesh = new THREE.Mesh(fillGeo, new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.06, side: THREE.DoubleSide, depthWrite: false,
+    }));
+    fillMesh.frustumCulled = false;
+    group.add(fillMesh);
+    const loop = [];
+    for (const [x, z] of pts) loop.push(x, y, z);
+    loop.push(pts[0][0], y, pts[0][1]);
+    const loopGeo = new THREE.BufferGeometry();
+    loopGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(loop), 3));
+    const line = new THREE.Line(loopGeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.55 }));
+    line.frustumCulled = false;
+    group.add(line);
+  }
+  function drawCoverage() {
+    if (coverageGroup) {
+      coverageGroup.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+      scene.remove(coverageGroup);
+      coverageGroup = null;
+    }
+    if (!deps.getSettings().coverage) return;
+    const areas = deps.getCoverage()?.areas || [];
+    if (!areas.length) return;
+    const group = new THREE.Group();
+    for (const area of areas) {
+      const bands = (area.bands || []).filter((b) => b.polygon?.coordinates?.[0]?.length >= 3);
+      if (bands.length) {
+        for (const band of bands) {
+          const mid = bandMidFeet(band);
+          addCoverageShell(group, band.polygon.coordinates[0], mid * FT_TO_M * exagg, parseCssColor(deps.altitudeColorFeet(mid)));
+        }
+      } else if (area.polygon?.coordinates?.[0]?.length >= 3) {
+        addCoverageShell(group, area.polygon.coordinates[0], 60, new THREE.Color(0x2dd4bf));
+      }
+    }
+    coverageGroup = group;
+    scene.add(group);
+    needsRender = true;
+  }
+
   // --- Per-frame DOM overlay sync ----------------------------------------------------------
   const _v = new THREE.Vector3();
   let viewW = 1;
@@ -634,17 +782,16 @@ export function createTactical3d({ container, deps }) {
         target.el.style.zIndex = String(Math.max(1, 4_000_000 - Math.round(_p.depth)));
       }
     }
-    if (ghost) placeEl(ghost);
+    if (ghostTarget) placeEl(ghostTarget);
     for (const entry of airfieldEls) placeEl(entry);
     for (const entry of staticLabels) placeEl(entry);
     for (const entry of conflictLabels) placeEl(entry);
-    if (tooltipHex) {
-      const target = targets.get(tooltipHex);
-      if (target && target.visible && projectToScreen(target.x, target.y, target.z, _p)) {
-        tooltipEl.style.display = "";
-        tooltipEl.style.transform = `translate3d(${_p.x.toFixed(1)}px, ${(_p.y - 22).toFixed(1)}px, 0) translate(-50%, -100%)`;
+    if (hoverAf) {
+      if (projectToScreen(hoverAf.x, hoverAf.y, hoverAf.z, _p)) {
+        afTooltipEl.style.display = "";
+        afTooltipEl.style.transform = `translate3d(${_p.x.toFixed(1)}px, ${(_p.y - 12).toFixed(1)}px, 0) translate(-50%, -100%)`;
       } else {
-        tooltipEl.style.display = "none";
+        afTooltipEl.style.display = "none";
       }
     }
   }
@@ -714,16 +861,35 @@ export function createTactical3d({ container, deps }) {
     needsRender = true;
   }
 
-  // --- Input: click empty space deselects (with a drag guard so orbiting never deselects) ---
+  // --- Input: raycast aircraft meshes for hover + click; empty space deselects (with a
+  // drag guard so orbiting never selects/deselects) ------------------------------------
   let downX = 0;
   let downY = 0;
+  function pickHex(event) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    ndc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    ndc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(ndc, camera);
+    return raycaster.intersectObjects(raycastMeshes, false)[0]?.object.userData.hex || null;
+  }
   renderer.domElement.addEventListener("pointerdown", (event) => {
     downX = event.clientX;
     downY = event.clientY;
   });
+  renderer.domElement.addEventListener("pointermove", (event) => {
+    if (!running || event.buttons) return; // ignore while dragging the camera
+    const hex = pickHex(event);
+    if (hex !== hoverHex) {
+      hoverHex = hex;
+      deps.onHover(hex);
+      renderer.domElement.style.cursor = hex ? "pointer" : "";
+    }
+  });
   renderer.domElement.addEventListener("click", (event) => {
     if (Math.hypot(event.clientX - downX, event.clientY - downY) > 5) return;
-    deps.onMapClick();
+    const hex = pickHex(event);
+    if (hex) deps.onSelect(hex);
+    else deps.onMapClick();
   });
 
   // --- Resize / render loop ------------------------------------------------------------------
@@ -743,6 +909,37 @@ export function createTactical3d({ container, deps }) {
 
   controls.addEventListener("change", () => { needsRender = true; });
 
+  // Scale each aircraft to a constant apparent size (so distant traffic stays visible) and
+  // flash IDENT/conflict targets. Runs just before render so it uses the final camera.
+  function updateTargetVisuals() {
+    const now = performance.now();
+    const identOn = Math.floor(now / 500) % 2 === 0;
+    const conflictOn = Math.floor(now / 300) % 2 === 0;
+    const pxFactor = (2 * Math.tan(((camera.fov * Math.PI) / 180) / 2)) / Math.max(200, viewH);
+    let blinkers = false;
+    const visit = (t) => {
+      if (!t.mesh) return;
+      // Meshes are added straight to the scene, so mesh.position is already world space.
+      const dist = camera.position.distanceTo(t.mesh.position) || 1;
+      t.mesh.scale.setScalar((TARGET_PX * pxFactor * dist * t.scaleMul) / GEO_LEN[t.geoKind]);
+      if (t.blink) {
+        blinkers = true;
+        const on = t.blink === "conflict" ? conflictOn : identOn;
+        if (on) {
+          const col = t.blink === "conflict" ? RED : AMBER;
+          t.mat.color.copy(col);
+          t.mat.emissive.copy(col).multiplyScalar(0.85);
+        } else {
+          t.mat.color.copy(t.baseRenderColor);
+          t.mat.emissive.copy(t.baseRenderEmissive);
+        }
+      }
+    };
+    for (const t of targets.values()) visit(t);
+    if (ghostTarget) visit(ghostTarget);
+    if (blinkers) needsRender = true; // keep animating while any target is flashing
+  }
+
   function frame() {
     if (!running) return;
     rafId = requestAnimationFrame(frame);
@@ -758,6 +955,8 @@ export function createTactical3d({ container, deps }) {
     const moved = controls.update();
     if (moved || needsRender) {
       needsRender = false;
+      camera.updateMatrixWorld();
+      updateTargetVisuals();
       renderer.render(scene, camera);
       syncOverlay();
     }
@@ -773,25 +972,29 @@ export function createTactical3d({ container, deps }) {
       rafId = requestAnimationFrame(frame);
     } else {
       cancelAnimationFrame(rafId);
-      hideTooltip();
+      hoverHex = null;
+      hoverAf = null;
+      afTooltipEl.style.display = "none";
+      renderer.domElement.style.cursor = "";
     }
   }
 
-  // Per-second housekeeping from the app clock: refresh the open tooltip's age text.
-  function tickClock() {
-    if (!tooltipHex) return;
-    const ageEl = tooltipEl.querySelector(".tt-age");
-    if (ageEl) ageEl.textContent = deps.getAgeText(tooltipHex);
-  }
-
+  // Hover driven from the sidebar list: highlight the matching aircraft mesh. (Pointer
+  // hover on the canvas is handled directly by the raycaster above.)
   function setHoverClass(prevHex, nextHex) {
-    if (prevHex && targets.has(prevHex)) targets.get(prevHex).el.classList.remove("hovered");
-    if (nextHex && targets.has(nextHex)) targets.get(nextHex).el.classList.add("hovered");
+    hoverHex = nextHex;
+    for (const hex of [prevHex, nextHex]) {
+      const t = hex && targets.get(hex);
+      if (t) { t.hovered = hex === nextHex; applyTargetStyle(t); }
+    }
     needsRender = true;
   }
 
   function applySettings() {
+    exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
+    uniforms.uExagg.value = exagg;
     rebuildAirfields();
+    drawCoverage();
     dataPass();
   }
 
@@ -800,14 +1003,18 @@ export function createTactical3d({ container, deps }) {
     setActive(false);
     resizeObserver.disconnect();
     controls.dispose();
+    for (const t of targets.values()) removeTarget(t);
+    targets.clear();
+    if (ghostTarget) removeTarget(ghostTarget);
     scene.traverse((obj) => {
       obj.geometry?.dispose?.();
       if (obj.material && obj.material !== terrainMaterial) obj.material.dispose?.();
     });
+    for (const geo of Object.values(GEO)) geo.dispose();
+    aircraftMatBase.dispose();
     terrainMaterial.dispose();
     renderer.dispose();
-    for (const el of [renderer.domElement, overlayEl, tooltipEl, loadingEl, hintEl]) el.remove();
-    targets.clear();
+    for (const el of [renderer.domElement, overlayEl, afTooltipEl, loadingEl, hintEl]) el.remove();
   }
 
   buildTerrain();
@@ -816,9 +1023,9 @@ export function createTactical3d({ container, deps }) {
     setActive,
     resize,
     dataPass,
+    drawCoverage,
     applySettings,
     setHoverClass,
-    tickClock,
     panTo,
     fitAircraft,
     setCameraFromMap,

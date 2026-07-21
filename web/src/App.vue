@@ -755,28 +755,31 @@ function verticalArrowSymbol(item) {
 }
 
 function tooltipHtml(item) {
-  // Type slot (e.g. B744) needs a hex→type DB; route/ETA need external route data.
-  // Both are unavailable from raw ADS-B, so only callsign + live state are shown for now.
-  const arrow = verticalArrowSymbol(item);
-  const alt = item.onGround ? "GND" : escapeHtml(formatAltitude(item));
-  const spd = escapeHtml(formatSpeed(item));
-  // Age is baked in at build time; upsertMarkers() re-derives the tooltip on every live
-  // refresh, so the age stays fresh without a per-second rebuild.
-  const age = escapeHtml(formatAge(item.observedAt));
-  return `<span class="tt-l1">${escapeHtml(formatFlight(item))}<span class="tt-age">${age}</span></span>`
-    + `<span class="tt-l2">${arrow ? `<b class="tt-arrow">${arrow}</b>` : ""}${alt} · ${spd}</span>`;
+  // Same tactical data-block styling and layout as the 3D view: callsign over the shared
+  // status line (trend+altitude · speed · age). The .tt-age span is patched every second
+  // by patchTooltipAge() so the age stays live while the pointer rests on a marker.
+  return `<span class="tt-l1">${escapeHtml(formatFlight(item))}</span>`
+    + `<span class="tt-l2">${targetLine(item, false)}</span>`;
 }
 
-// Tactical data block under each 3D target: callsign + altitude/trend/speed, the way a
-// radar scope tags every track. Altitude is quantised to 100 ft so the text (and the DOM
-// rebuild it triggers) stays stable while an aircraft drifts a few feet.
-function datablockHtml(item) {
+// Second line shared by the 3D data block and the 2D hover popover: the vertical-trend
+// arrow immediately before the altitude, then speed, then the update age (#s), each field
+// separated by a middle dot. Altitude is quantised to 100 ft so the label text (and the
+// DOM rebuild it triggers) stays stable while an aircraft drifts a few feet.
+function targetLine(item, altRound) {
   const altFt = item.altBaro ?? item.altGeom;
-  const alt = item.onGround ? "GND" : altFt == null ? "-" : altText(Math.round(altFt / 100) * 100);
+  const feet = altRound && altFt != null ? Math.round(altFt / 100) * 100 : altFt;
+  const alt = item.onGround ? "GND" : feet == null ? "-" : altText(feet);
   const arrow = verticalArrowSymbol(item);
-  const spd = item.gs == null ? "" : formatSpeed(item);
-  const line2 = [alt, arrow, spd].filter(Boolean).join(" ");
-  return `<span class="t3d-datablock"><b>${escapeHtml(formatFlight(item))}</b><span>${escapeHtml(line2)}</span></span>`;
+  const parts = [`${escapeHtml(arrow)}${escapeHtml(alt)}`];
+  if (item.gs != null) parts.push(escapeHtml(formatSpeed(item)));
+  parts.push(`<span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>`);
+  return parts.join(" · ");
+}
+
+// Tactical data block beside each 3D target: callsign over the shared status line.
+function datablockHtml(item) {
+  return `<span class="t3d-datablock"><b>${escapeHtml(formatFlight(item))}</b><span>${targetLine(item, true)}</span></span>`;
 }
 
 function applyMarkerHover(marker, hex) {
@@ -1323,7 +1326,8 @@ async function refreshLive() {
 async function refreshCoverage() {
   try {
     coverage.value = (await fetchJson("/api/coverage")) || { areas: [], points: [] };
-    drawCoverage();
+    if (view3dActive.value) tac3d?.drawCoverage();
+    else drawCoverage();
   } catch (err) {
     console.error(err);
   }
@@ -1469,8 +1473,8 @@ function renderTrackView() {
 }
 
 // The 3D module (and three.js with it) loads on first use only, keeping the 2D bundle
-// unchanged. All app state flows in through these getters/callbacks; visual identity
-// (marker HTML, colors, signatures) stays defined here and is reused verbatim.
+// unchanged. All app state flows in through these getters/callbacks; the visual identity
+// (altitude colors, data-block text, filters) stays defined here and is reused verbatim.
 async function ensureTactical3d() {
   tac3dPromise ??= import("./tactical3d.js").then(({ createTactical3d }) => {
     tac3d = createTactical3d({
@@ -1480,21 +1484,17 @@ async function ensureTactical3d() {
         getSelectedHex: () => selectedHex.value,
         getSelectedTrack: () => selectedTrack.value,
         getConflicts: () => conflicts.value,
+        getCoverage: () => coverage.value,
         getPlaybackGhost,
         getSettings: () => settings.value,
-        getAgeText: (hex) => {
-          const item = aircraft.value.find((row) => row.hex === hex);
-          return item ? formatAge(item.observedAt) : "";
-        },
-        markerHtml,
-        markerSignature,
-        markerRotation,
-        markerSizeScale,
         datablockHtml,
-        tooltipHtml,
+        airfieldTooltip,
+        aircraftKind,
         passesFilters,
         isDropped,
+        isCoasting,
         altitudeColor,
+        altitudeColorFeet,
         trackSegmentColor,
         onSelect: toggleAircraft,
         onHover: (hex) => { hoveredHex.value = hex; },
@@ -1567,7 +1567,8 @@ watch(playbackIndex, () => {
 });
 
 onMounted(async () => {
-  map = L.map(mapEl.value, { zoomControl: false, attributionControl: false, preferCanvas: true }).setView([36.2, 127.8], 7);
+  // Centered on Yuseong IC, Daejeon (same reference point as the 3D scene origin / rings).
+  map = L.map(mapEl.value, { zoomControl: false, attributionControl: false, preferCanvas: true }).setView([36.36599, 127.33113], 7);
   // Airfield reference markers sit above coverage but below live aircraft.
   map.createPane("airfields").style.zIndex = 450;
   L.control.zoom({ position: "bottomright" }).addTo(map);
@@ -1598,10 +1599,9 @@ onMounted(async () => {
   clockTimer = setInterval(() => {
     now.value = Date.now();
     if (view3dActive.value) {
-      // Coast/drop transitions and the open tooltip's age are time-driven; a dataPass is
-      // cheap (string diffs, ~100 targets) so run it every tick for fresh 3D visuals.
+      // Coast/drop transitions and each data block's age (#s) are time-driven; a dataPass
+      // is cheap (~100 targets) so run it every tick to keep the 3D labels fresh.
       tac3d?.dataPass();
-      tac3d?.tickClock();
       return;
     }
     if (hoveredHex.value) patchTooltipAge(markers.get(hoveredHex.value), hoveredHex.value);

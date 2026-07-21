@@ -1125,21 +1125,21 @@ select {
   border: 1px solid rgb(0 0 0 / 0.4);
 }
 
-.leaflet-tooltip.aircraft-tt,
-.t3d-tt.aircraft-tt {
+/* 2D hover popover shares the 3D data-block look: monospace, teal accent bar, dark glass. */
+.leaflet-tooltip.aircraft-tt {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 6px 9px;
-  border: 1px solid rgb(238 245 244 / 0.16);
-  border-radius: 7px;
-  background: rgb(13 16 17 / 0.92);
-  color: var(--text);
-  font-size: 12px;
-  line-height: 1.25;
+  gap: 1px;
+  padding: 4px 9px;
+  border: 0;
+  border-left: 2px solid rgb(72 224 209 / 0.6);
+  border-radius: 4px;
+  background: rgb(5 10 12 / 0.86);
+  color: #9fe8df;
+  font: 600 11px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   white-space: nowrap;
-  box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
-  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.5);
+  backdrop-filter: blur(6px);
 }
 
 .leaflet-tooltip.aircraft-tt::before {
@@ -1147,30 +1147,19 @@ select {
 }
 
 .aircraft-tt .tt-l1 {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  color: #eafffb;
+}
+
+.aircraft-tt .tt-l2 {
+  color: #9fe8df;
+  font-variant-numeric: tabular-nums;
 }
 
 .aircraft-tt .tt-age {
   color: var(--muted);
-  font-size: 10.5px;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.aircraft-tt .tt-l2 {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.aircraft-tt .tt-arrow {
-  margin-right: 3px;
-  color: var(--accent);
-  font-weight: 800;
 }
 
 .aircraft-icon.hovered .aircraft-body {
@@ -1439,9 +1428,8 @@ select {
   contain: layout style;
 }
 
-/* Marker holder is a 0x0 anchor at the target's screen position; the glyph markup from
-   markerHtml() is offset so the aircraft symbol centers on the anchor (2D iconAnchor 18,18).
-   All 2D state classes (is-ident/is-conflict/is-coasting/selected/hovered) apply as-is. */
+/* Aircraft themselves are 3D meshes in the WebGL scene; this DOM node is just the anchor
+   for the data-block label, positioned at the target's projected screen point. */
 .t3d-marker {
   position: absolute;
   top: 0;
@@ -1452,22 +1440,10 @@ select {
   will-change: transform;
 }
 
-.t3d-glyph {
-  position: absolute;
-  left: -18px;
-  top: -18px;
-  display: inline-flex;
-}
-
-/* The tactical data block replaces the 2D hover label. */
-.t3d-marker .aircraft-label {
-  display: none;
-}
-
 .t3d-block {
   position: absolute;
-  left: 15px;
-  top: 13px;
+  left: 14px;
+  top: 10px;
   pointer-events: none;
 }
 
@@ -1490,20 +1466,43 @@ select {
   color: #eafffb;
 }
 
+.t3d-block.selected .t3d-datablock {
+  border-left-color: var(--accent);
+  background: rgb(72 224 209 / 0.16);
+}
+
+.t3d-block.hovered .t3d-datablock b {
+  color: #ffffff;
+}
+
 .t3d-ghost {
-  opacity: 0.7;
+  opacity: 0.72;
 }
 
-.t3d-ghost .aircraft-symbol {
-  pointer-events: none;
-}
-
+/* Airfield hover popover: absolutely positioned in the overlay (not a Leaflet tooltip),
+   reusing the shared .airfield-tt look. */
 .t3d-tt {
   position: absolute;
   left: 0;
   top: 0;
   z-index: 4000002;
   pointer-events: none;
+}
+
+.t3d-tt.airfield-tt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 9px;
+  border: 1px solid rgb(238 245 244 / 0.16);
+  border-radius: 7px;
+  background: rgb(13 16 17 / 0.92);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.25;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
+  backdrop-filter: blur(8px);
 }
 
 .t3d-airfield {
@@ -1514,31 +1513,45 @@ select {
   align-items: center;
   gap: 5px;
   pointer-events: none;
+  --af-color: #c3ccd6;
 }
 
+/* Grade colours mirror the 2D airfield markers. */
+.t3d-airfield.kind-large { --af-color: #ffd23f; }
+.t3d-airfield.kind-medium { --af-color: #ff9f45; }
+.t3d-airfield.kind-small { --af-color: #c3ccd6; }
+.t3d-airfield.minor { --af-color: #8b98a5; }
+
 .t3d-af-dot {
-  width: 7px;
-  height: 7px;
-  margin: -3.5px 0 0 -3.5px;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
   border-radius: 50%;
-  border: 1px solid var(--accent);
-  background: rgb(72 224 209 / 0.22);
-  box-shadow: 0 0 7px rgb(72 224 209 / 0.65);
+  border: 1px solid #071012;
+  background: var(--af-color);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--af-color) 65%, transparent), 0 0 0 1px rgb(255 255 255 / 0.3);
+  pointer-events: auto;
+  cursor: default;
 }
+
+.t3d-airfield.kind-large .t3d-af-dot { width: 10px; height: 10px; }
+.t3d-airfield.kind-small .t3d-af-dot { width: 6px; height: 6px; }
 
 .t3d-airfield.minor .t3d-af-dot {
   width: 5px;
   height: 5px;
-  opacity: 0.5;
+  opacity: 0.55;
   box-shadow: none;
 }
 
 .t3d-af-code {
   font: 700 10px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   letter-spacing: 0.06em;
-  color: #8fe6db;
+  color: #cfe9e4;
   text-shadow: 0 1px 3px #000;
 }
+
+.t3d-airfield.kind-large .t3d-af-code { font-size: 11px; color: #ffe8a3; }
 
 .t3d-ringlabel,
 .t3d-compass {
