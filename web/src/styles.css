@@ -1125,7 +1125,8 @@ select {
   border: 1px solid rgb(0 0 0 / 0.4);
 }
 
-.leaflet-tooltip.aircraft-tt {
+.leaflet-tooltip.aircraft-tt,
+.t3d-tt.aircraft-tt {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1413,4 +1414,192 @@ select {
   .settings-toggle small {
     display: none;
   }
+}
+
+/* --- 3D tactical view ------------------------------------------------------------------ */
+
+.map-3d {
+  position: relative;
+  overflow: hidden;
+  background: #050a0c;
+}
+
+.map-3d .t3d-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.t3d-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  pointer-events: none;
+  contain: layout style;
+}
+
+/* Marker holder is a 0x0 anchor at the target's screen position; the glyph markup from
+   markerHtml() is offset so the aircraft symbol centers on the anchor (2D iconAnchor 18,18).
+   All 2D state classes (is-ident/is-conflict/is-coasting/selected/hovered) apply as-is. */
+.t3d-marker {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.t3d-glyph {
+  position: absolute;
+  left: -18px;
+  top: -18px;
+  display: inline-flex;
+}
+
+/* The tactical data block replaces the 2D hover label. */
+.t3d-marker .aircraft-label {
+  display: none;
+}
+
+.t3d-block {
+  position: absolute;
+  left: 15px;
+  top: 13px;
+  pointer-events: none;
+}
+
+.t3d-datablock {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 6px;
+  border-left: 2px solid rgb(72 224 209 / 0.55);
+  background: rgb(5 10 12 / 0.7);
+  font: 600 10.5px/1.3 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: #9fe8df;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px #000;
+}
+
+.t3d-datablock b {
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  color: #eafffb;
+}
+
+.t3d-ghost {
+  opacity: 0.7;
+}
+
+.t3d-ghost .aircraft-symbol {
+  pointer-events: none;
+}
+
+.t3d-tt {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 4000002;
+  pointer-events: none;
+}
+
+.t3d-airfield {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  pointer-events: none;
+}
+
+.t3d-af-dot {
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  background: rgb(72 224 209 / 0.22);
+  box-shadow: 0 0 7px rgb(72 224 209 / 0.65);
+}
+
+.t3d-airfield.minor .t3d-af-dot {
+  width: 5px;
+  height: 5px;
+  opacity: 0.5;
+  box-shadow: none;
+}
+
+.t3d-af-code {
+  font: 700 10px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.06em;
+  color: #8fe6db;
+  text-shadow: 0 1px 3px #000;
+}
+
+.t3d-ringlabel,
+.t3d-compass {
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: -6px 0 0 -10px;
+  pointer-events: none;
+  font: 600 10px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.08em;
+  color: rgb(72 224 209 / 0.5);
+}
+
+.t3d-compass {
+  margin: -8px 0 0 -5px;
+  font-size: 13px;
+  font-weight: 800;
+  color: rgb(72 224 209 / 0.78);
+  text-shadow: 0 0 8px rgb(72 224 209 / 0.55);
+}
+
+.conflict-label.t3d-pin {
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: -6px 0 0 -30px;
+  pointer-events: none;
+  z-index: 4000001;
+}
+
+.t3d-loading {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 5;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  font: 700 13px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.35em;
+  color: var(--accent);
+  text-shadow: 0 0 12px rgb(72 224 209 / 0.6);
+  animation: t3d-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes t3d-pulse {
+  50% { opacity: 0.35; }
+}
+
+.t3d-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  z-index: 5;
+  transform: translateX(-50%);
+  padding: 7px 12px;
+  border: 1px solid rgb(238 245 244 / 0.14);
+  border-radius: 7px;
+  background: rgb(13 16 17 / 0.8);
+  color: var(--muted);
+  font-size: 12px;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+  white-space: nowrap;
 }

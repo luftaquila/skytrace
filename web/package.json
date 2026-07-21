@@ -11,6 +11,7 @@
   "dependencies": {
     "@lucide/vue": "^1.23.0",
     "leaflet": "^1.9.4",
+    "three": "^0.185.1",
     "uplot": "^1.6.32",
     "vue": "^3.5.26"
   },

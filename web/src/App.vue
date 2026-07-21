@@ -14,6 +14,7 @@ import {
   Play,
   RadioTower,
   RefreshCw,
+  Rotate3d,
   Ruler,
   Search,
   Settings,
@@ -41,6 +42,8 @@ const DEFAULT_SETTINGS = {
   flightLevels: false,
   coastDrop: true,
   proximity: true,
+  view3d: false,
+  terrainExaggeration: 2,
 };
 
 const baseLayers = {
@@ -79,6 +82,10 @@ function loadSettings() {
 }
 
 const mapEl = ref(null);
+const map3dEl = ref(null);
+// True only once the 3D scene is ready and shown; the containers swap on this, not on
+// settings.view3d, so the UI never flips to a blank canvas while the chunk/DEM loads.
+const view3dActive = ref(false);
 const aircraft = ref([]);
 const receivers = ref([]);
 const coverage = ref({ areas: [], points: [] });
@@ -155,10 +162,17 @@ let clockTimer;
 let eventSource;
 let sseRetryTimer;
 let playbackTimer;
+let tac3d;
+let tac3dPromise;
 const markers = new Map();
 
 watch(settings, (value) => {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(value));
+  if (view3dActive.value) {
+    tac3d?.applySettings();
+    queueHistoryChartRender();
+    return;
+  }
   applyBaseLayer();
   upsertMarkers();
   drawCoverage();
@@ -753,6 +767,18 @@ function tooltipHtml(item) {
     + `<span class="tt-l2">${arrow ? `<b class="tt-arrow">${arrow}</b>` : ""}${alt} · ${spd}</span>`;
 }
 
+// Tactical data block under each 3D target: callsign + altitude/trend/speed, the way a
+// radar scope tags every track. Altitude is quantised to 100 ft so the text (and the DOM
+// rebuild it triggers) stays stable while an aircraft drifts a few feet.
+function datablockHtml(item) {
+  const altFt = item.altBaro ?? item.altGeom;
+  const alt = item.onGround ? "GND" : altFt == null ? "-" : altText(Math.round(altFt / 100) * 100);
+  const arrow = verticalArrowSymbol(item);
+  const spd = item.gs == null ? "" : formatSpeed(item);
+  const line2 = [alt, arrow, spd].filter(Boolean).join(" ");
+  return `<span class="t3d-datablock"><b>${escapeHtml(formatFlight(item))}</b><span>${escapeHtml(line2)}</span></span>`;
+}
+
 function applyMarkerHover(marker, hex) {
   marker.getElement()?.classList.toggle("hovered", hoveredHex.value === hex);
 }
@@ -1243,7 +1269,7 @@ function startPlaybackTimer() {
       return;
     }
     playbackIndex.value += 1;
-    drawTrack();
+    renderTrackView();
   }, Math.max(80, 1000 / playbackSpeed.value));
 }
 
@@ -1255,7 +1281,7 @@ function setPlaybackSpeed(speed) {
   if (!selectedTrack.value.length) return;
   if (playbackIndex.value >= selectedTrack.value.length - 1) playbackIndex.value = 0;
   playbackSpeed.value = speed;
-  drawTrack();
+  renderTrackView();
   setHistoryChartCursor();
 }
 
@@ -1352,17 +1378,19 @@ async function refreshTrack(resetPlayback = true) {
   } else {
     playbackIndex.value = Math.min(playbackIndex.value, lastIndex);
   }
-  drawTrack();
+  renderTrackView();
 }
 
 async function selectAircraft(hex, pan = false) {
   selectedHex.value = hex;
-  upsertMarkers();
+  if (view3dActive.value) tac3d?.dataPass();
+  else upsertMarkers();
   await refreshTrack();
   await nextTick();
   const item = selectedAircraft.value;
   if (pan && item?.lat != null && item?.lon != null) {
-    map.setView([item.lat, item.lon], Math.max(map.getZoom(), 8), { animate: true });
+    if (view3dActive.value) tac3d?.panTo(item.lon, item.lat);
+    else map.setView([item.lat, item.lon], Math.max(map.getZoom(), 8), { animate: true });
   }
 }
 
@@ -1379,7 +1407,8 @@ function clearSelection() {
     playbackMarker.remove();
     playbackMarker = null;
   }
-  upsertMarkers();
+  if (view3dActive.value) tac3d?.dataPass();
+  else upsertMarkers();
 }
 
 // Clicking a marker toggles selection; clicking a different one switches to it.
@@ -1395,11 +1424,13 @@ function onGlobalKeydown(event) {
 }
 
 function fitVisibleAircraft() {
-  const points = filteredAircraft.value
-    .filter((item) => item.lat != null && item.lon != null)
-    .map((item) => [item.lat, item.lon]);
-  if (!points.length) return;
-  map.fitBounds(points, { padding: [48, 48], maxZoom: 10 });
+  const items = filteredAircraft.value.filter((item) => item.lat != null && item.lon != null);
+  if (!items.length) return;
+  if (view3dActive.value) {
+    tac3d?.fitAircraft(items.map((item) => ({ lat: item.lat, lon: item.lon })));
+    return;
+  }
+  map.fitBounds(items.map((item) => [item.lat, item.lon]), { padding: [48, 48], maxZoom: 10 });
 }
 
 function applyBaseLayer() {
@@ -1408,6 +1439,100 @@ function applyBaseLayer() {
   if (tileLayer) tileLayer.remove();
   tileLayer = L.tileLayer(next.url, next.options).addTo(map);
   tileLayer.bringToBack();
+}
+
+// Playback ghost for the 3D view — same rules as drawPlaybackMarker(): only shown while
+// scrubbed off the live edge or actively playing back.
+function getPlaybackGhost() {
+  if (!selectedTrack.value.length) return null;
+  const latestIndex = selectedTrack.value.length - 1;
+  if (!playbackSpeed.value && playbackIndex.value >= latestIndex) return null;
+  const point = selectedTrack.value[Math.min(playbackIndex.value, latestIndex)];
+  if (!point || point.lat == null || point.lon == null) return null;
+  return {
+    ...(selectedAircraft.value || {}),
+    hex: selectedHex.value || point.hex,
+    lat: point.lat,
+    lon: point.lon,
+    altBaro: point.altBaro,
+    altGeom: point.altGeom,
+    gs: point.gs,
+    track: point.track,
+    onGround: point.onGround,
+  };
+}
+
+// The selected track renders on whichever engine is visible.
+function renderTrackView() {
+  if (view3dActive.value) tac3d?.dataPass();
+  else drawTrack();
+}
+
+// The 3D module (and three.js with it) loads on first use only, keeping the 2D bundle
+// unchanged. All app state flows in through these getters/callbacks; visual identity
+// (marker HTML, colors, signatures) stays defined here and is reused verbatim.
+async function ensureTactical3d() {
+  tac3dPromise ??= import("./tactical3d.js").then(({ createTactical3d }) => {
+    tac3d = createTactical3d({
+      container: map3dEl.value,
+      deps: {
+        getAircraft: () => aircraft.value,
+        getSelectedHex: () => selectedHex.value,
+        getSelectedTrack: () => selectedTrack.value,
+        getConflicts: () => conflicts.value,
+        getPlaybackGhost,
+        getSettings: () => settings.value,
+        getAgeText: (hex) => {
+          const item = aircraft.value.find((row) => row.hex === hex);
+          return item ? formatAge(item.observedAt) : "";
+        },
+        markerHtml,
+        markerSignature,
+        markerRotation,
+        markerSizeScale,
+        datablockHtml,
+        tooltipHtml,
+        passesFilters,
+        isDropped,
+        altitudeColor,
+        trackSegmentColor,
+        onSelect: toggleAircraft,
+        onHover: (hex) => { hoveredHex.value = hex; },
+        onMapClick: () => { if (selectedHex.value) clearSelection(); },
+      },
+    });
+    return tac3d;
+  });
+  return tac3dPromise;
+}
+
+async function setView3d(on) {
+  settings.value.view3d = on;
+  if (on) {
+    if (measureMode.value) toggleMeasure(); // measure is 2D-only
+    await ensureTactical3d();
+    if (settings.value.view3d !== true) return; // toggled back off while loading
+    view3dActive.value = true;
+    await nextTick();
+    tac3d.setActive(true);
+    tac3d.setCameraFromMap(map.getCenter(), map.getZoom());
+    tac3d.applySettings();
+  } else {
+    view3dActive.value = false;
+    if (tac3d) {
+      const cam = tac3d.getCameraForMap();
+      tac3d.setActive(false);
+      await nextTick();
+      map.invalidateSize();
+      map.setView(cam.center, cam.zoom, { animate: false });
+    }
+    // Leaflet layers were frozen while hidden — bring everything back in sync.
+    upsertMarkers();
+    drawConflicts();
+    drawTrack();
+    drawCoverage();
+    drawAirfields();
+  }
 }
 
 function resetFilters() {
@@ -1420,16 +1545,24 @@ function resetFilters() {
   });
 }
 
-watch(aircraft, () => { upsertMarkers(); drawConflicts(); });
-watch(searchQuery, () => upsertMarkers());
+watch(aircraft, () => {
+  if (view3dActive.value) { tac3d?.dataPass(); return; }
+  upsertMarkers();
+  drawConflicts();
+});
+watch(searchQuery, () => {
+  if (view3dActive.value) { tac3d?.dataPass(); return; }
+  upsertMarkers();
+});
 watch(hoveredHex, (next, prev) => {
+  if (view3dActive.value) { tac3d?.setHoverClass(prev, next); return; }
   if (prev && markers.has(prev)) applyMarkerHover(markers.get(prev), prev);
   if (next && markers.has(next)) applyMarkerHover(markers.get(next), next);
 });
 watch(selectedHistoryMetrics, () => queueHistoryChartRender(), { deep: true });
 watch(selectedTrack, () => queueHistoryChartRender());
 watch(playbackIndex, () => {
-  drawTrack();
+  renderTrackView();
   setHistoryChartCursor();
 });
 
@@ -1464,9 +1597,17 @@ onMounted(async () => {
   coverageTimer = setInterval(() => coverageRefresher.schedule(0), 60000);
   clockTimer = setInterval(() => {
     now.value = Date.now();
+    if (view3dActive.value) {
+      // Coast/drop transitions and the open tooltip's age are time-driven; a dataPass is
+      // cheap (string diffs, ~100 targets) so run it every tick for fresh 3D visuals.
+      tac3d?.dataPass();
+      tac3d?.tickClock();
+      return;
+    }
     if (hoveredHex.value) patchTooltipAge(markers.get(hoveredHex.value), hoveredHex.value);
   }, 1000);
   connectEvents();
+  if (settings.value.view3d) setView3d(true);
 });
 
 function connectEvents() {
@@ -1506,6 +1647,8 @@ onUnmounted(() => {
   window.removeEventListener("keydown", onGlobalKeydown);
   clearTimeout(sseRetryTimer);
   eventSource?.close();
+  tac3d?.destroy();
+  tac3d = null;
   map?.remove();
 });
 </script>
@@ -1513,7 +1656,8 @@ onUnmounted(() => {
 <template>
   <main class="shell" :style="shellStyle">
     <section class="map-stage">
-      <div ref="mapEl" class="map"></div>
+      <div v-show="!view3dActive" ref="mapEl" class="map"></div>
+      <div v-show="view3dActive" ref="map3dEl" class="map map-3d"></div>
       <div class="topbar">
         <div>
           <div class="brand">Skytrace</div>
@@ -1523,7 +1667,8 @@ onUnmounted(() => {
           </div>
         </div>
         <div class="toolbar">
-          <button class="icon-button" :class="{ active: measureMode }" title="Measure range/bearing (Esc to exit)" @click="toggleMeasure"><Ruler :size="18" /></button>
+          <button class="icon-button" :class="{ active: view3dActive }" title="3D tactical view" @click="setView3d(!settings.view3d)"><Rotate3d :size="18" /></button>
+          <button v-if="!view3dActive" class="icon-button" :class="{ active: measureMode }" title="Measure range/bearing (Esc to exit)" @click="toggleMeasure"><Ruler :size="18" /></button>
           <button class="icon-button" title="Fit aircraft" @click="fitVisibleAircraft"><LocateFixed :size="18" /></button>
           <button class="icon-button" title="Refresh" @click="refreshAll"><RefreshCw :size="18" /></button>
         </div>
@@ -1763,6 +1908,7 @@ onUnmounted(() => {
               <label><span>Units</span><select v-model="settings.units"><option value="aero">Aeronautical</option><option value="metric">Metric</option><option value="imperial">Imperial</option></select></label>
               <label><span>Map</span><select v-model="settings.baseLayer"><option v-for="layer in Object.keys(baseLayers)" :key="layer" :value="layer">{{ baseLayers[layer].label }}</option></select></label>
               <label><span>Icon scale</span><input v-model.number="settings.iconScale" type="range" min="0.75" max="1.6" step="0.05" /></label>
+              <label v-if="view3dActive"><span>Terrain ×{{ Number(settings.terrainExaggeration).toFixed(1) }}</span><input v-model.number="settings.terrainExaggeration" type="range" min="1" max="4" step="0.1" /></label>
             </div>
             <div class="toggle-row">
               <label><input v-model="settings.labels" type="checkbox" /> All labels</label>
