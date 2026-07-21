@@ -778,7 +778,7 @@ function targetLine(item, altRound) {
   const arrow = verticalArrowSymbol(item);
   const trend = arrow === "↑" ? "up" : arrow === "↓" ? "down" : "level";
   const arrowHtml = arrow ? `<span class="tt-trend ${trend}">${arrow}</span>` : "";
-  const parts = [`${arrowHtml}${escapeHtml(alt)}`];
+  const parts = [`<span class="tt-alt">${arrowHtml}${escapeHtml(alt)}</span>`];
   if (item.gs != null) parts.push(escapeHtml(formatSpeed(item)));
   parts.push(`<span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>`);
   return parts.join(" · ");

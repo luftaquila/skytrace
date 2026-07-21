@@ -100,11 +100,38 @@ export function createTactical3d({ container, deps }) {
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6 },
     },
   });
-  map.dragRotate.enable();
+  // Swapped mouse drag (per request): LEFT-drag rotates/tilts, RIGHT-drag pans. MapLibre has
+  // no button-swap option, so drive both by hand off the canvas' mouse events. Wheel-zoom,
+  // keyboard and touch pinch/rotate keep working through their own handlers.
+  map.dragPan.disable();
+  map.dragRotate.disable();
   map.touchZoomRotate.enableRotation();
+  const cv = map.getCanvas();
+  let drag = null;
+  const onCtx = (e) => e.preventDefault();
+  const onDown = (e) => {
+    if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
+    else if (e.button === 2) drag = { mode: "pan", x: e.clientX, y: e.clientY };
+  };
+  const onMove = (e) => {
+    if (!drag) return;
+    if (drag.mode === "rotate") {
+      map.setBearing(drag.bearing - (e.clientX - drag.x) * 0.35);
+      map.setPitch(Math.max(0, Math.min(map.getMaxPitch(), drag.pitch - (e.clientY - drag.y) * 0.25)));
+    } else {
+      map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0 });
+      drag.x = e.clientX; drag.y = e.clientY; // pan is incremental
+    }
+  };
+  const onUp = () => { drag = null; };
+  cv.addEventListener("contextmenu", onCtx);
+  cv.addEventListener("mousedown", onDown);
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
 
   const overlay = new MapboxOverlay({ interleaved: true, layers: [] });
   map.addControl(overlay);
+  if (typeof window !== "undefined" && window.__T3D_DEBUG) { window.__t3dMap = map; window.__t3dOverlay = overlay; }
 
   // --- DOM overlay: data-block popovers + pins (exact old styling), airfield popover ------
   const overlayEl = document.createElement("div");
@@ -217,10 +244,12 @@ export function createTactical3d({ container, deps }) {
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
         getColor: [255, 255, 255, 66], sizeScale: 1,
         material: { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] },
-        pickable: false, parameters: { depthTest: true, depthMask: false },
+        // No depth test => no depth write => the translucent dome never occludes the aircraft,
+        // sticks or trails drawn after it (was chopping them into segments from the side).
+        pickable: false, parameters: { depthTest: false },
       }),
-      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 3, widthMinPixels: 2, jointRounded: true, capRounded: true, parameters: { depthTest: false } }),
-      new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1 }),
+      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 3.5, widthMinPixels: 2.5, jointRounded: true, capRounded: true, parameters: { depthTest: false } }),
+      new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.2, widthMinPixels: 1.5, parameters: { depthTest: false } }),
       new ScenegraphLayer({
         id: "aircraft", data: list, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
         getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 140 : 255], sizeScale: 220, sizeMinPixels: 26, sizeMaxPixels: 90, _lighting: "pbr",
@@ -427,6 +456,8 @@ export function createTactical3d({ container, deps }) {
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {
     disposed = true;
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
     try { map.removeControl(overlay); } catch { /* gone */ }
     map.remove();
     for (const el of [overlayEl, afTooltipEl, loadingEl, hintEl]) el.remove();

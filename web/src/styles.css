@@ -1193,8 +1193,10 @@ select {
   font-weight: 600;
 }
 
+/* Altitude token: keeps the trend arrow vertically centred on the altitude digits. */
+.tt-alt { display: inline-flex; align-items: center; }
 /* Vertical-trend arrow: green climbing, red descending, muted level. */
-.tt-trend { font-weight: 900; margin-right: 0.4em; }
+.tt-trend { font-weight: 900; margin-right: 0.4em; line-height: 1; }
 .tt-trend.up { color: #34d399; }
 .tt-trend.down { color: #fb7185; }
 .tt-trend.level { color: #8aa0a0; }
