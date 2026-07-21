@@ -968,11 +968,28 @@ function drawCoverage() {
   coverageLayer.addTo(map);
 }
 
+// Runways grouped by owning airport ICAO, for the airport popover.
+const runwaysByIcao = (() => {
+  const m = new Map();
+  for (const r of RUNWAYS) {
+    if (!m.has(r.icao)) m.set(r.icao, []);
+    m.get(r.icao).push(r);
+  }
+  return m;
+})();
+
 function airfieldTooltip(field) {
   const codes = [field.icao, field.iata].filter(Boolean).join(" · ");
   const meta = [codes, field.city].filter(Boolean).join(" — ");
+  const rwys = field.icao ? runwaysByIcao.get(field.icao) || [] : [];
+  const rwHtml = rwys.length
+    ? `<span class="af-tt-rwys">${rwys
+        .map((r) => `<span class="af-tt-rw"><b>${escapeHtml(r.ident)}</b><span>${r.len.toLocaleString()} ft</span></span>`)
+        .join("")}</span>`
+    : "";
   return `<span class="af-tt-name">${escapeHtml(field.name)}</span>`
-    + (meta ? `<span class="af-tt-meta">${escapeHtml(meta)}</span>` : "");
+    + (meta ? `<span class="af-tt-meta">${escapeHtml(meta)}</span>` : "")
+    + rwHtml;
 }
 
 function airfieldIcon(field, minor) {
@@ -1013,14 +1030,10 @@ function drawAirfields() {
   if (settings.value.airfields) {
     // Real runways to scale (position/length/heading/width) — visible when zoomed in.
     for (const rwy of RUNWAYS) {
-      const c = runwayCorners(rwy);
-      // Asphalt with a crisp white edge, plus a dashed centreline — reads as a real runway.
-      L.polygon(c, {
+      // Asphalt pavement with a crisp white edge — reads as a real runway (no centreline).
+      L.polygon(runwayCorners(rwy), {
         color: "#e8edf2", weight: 1, opacity: 0.85, fillColor: "#262b31", fillOpacity: 0.92,
         interactive: false, lineJoin: "miter",
-      }).addTo(airfieldLayer);
-      L.polyline([[rwy.le[1], rwy.le[0]], [rwy.he[1], rwy.he[0]]], {
-        color: "#e8edf2", weight: 1, opacity: 0.8, dashArray: "6 6", interactive: false,
       }).addTo(airfieldLayer);
     }
     for (const field of AIRFIELDS) {

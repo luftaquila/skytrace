@@ -238,14 +238,15 @@ export function createTactical3d({ container, deps }) {
   const mirrorX = (g) => { const c = g.clone(); c.scale(-1, 1, 1); c.computeVertexNormals(); return c; };
 
   function buildPlaneGeo() {
-    // Smooth rounded fuselage (capsule) with a slight nose taper, swept solid wings, engine
-    // nacelles under the wings, swept tailplanes and a swept vertical fin.
-    const fus = new THREE.CapsuleGeometry(0.052, 0.62, 8, 20); fus.rotateX(Math.PI / 2); fus.translate(0, 0, 0.03);
-    const nose = new THREE.ConeGeometry(0.052, 0.2, 20); nose.rotateX(-Math.PI / 2); nose.translate(0, 0, -0.42);
-    const wing = slab([[0.05, -0.05], [0.66, 0.2], [0.66, 0.27], [0.05, 0.12]], -0.01, 0.012);
-    const stab = slab([[0.03, 0.3], [0.26, 0.42], [0.26, 0.47], [0.03, 0.4]], 0.02, 0.009);
-    const fin = vfin([[0.3, 0], [0.46, 0], [0.47, 0.22], [0.36, 0.22]], 0, 0.01);
-    const nac = new THREE.CylinderGeometry(0.032, 0.028, 0.2, 14); nac.rotateX(Math.PI / 2); nac.translate(0.26, -0.055, 0.12);
+    // Slender jet: long rounded fuselage, modestly-spanned swept wings (narrower than
+    // before), under-wing nacelles, swept tailplanes and a swept fin.
+    const fus = new THREE.CapsuleGeometry(0.05, 0.78, 8, 20); fus.rotateX(Math.PI / 2); fus.translate(0, 0, 0.04);
+    const nose = new THREE.ConeGeometry(0.05, 0.22, 20); nose.rotateX(-Math.PI / 2); nose.translate(0, 0, -0.5);
+    // Wing root near the fuselage, tip swept aft; half-span ~0.34 (was 0.66) => much narrower.
+    const wing = slab([[0.045, 0.0], [0.34, 0.2], [0.34, 0.26], [0.045, 0.14]], -0.008, 0.012);
+    const stab = slab([[0.03, 0.42], [0.17, 0.52], [0.17, 0.56], [0.03, 0.5]], 0.02, 0.008);
+    const fin = vfin([[0.4, 0], [0.56, 0], [0.57, 0.2], [0.46, 0.2]], 0, 0.01);
+    const nac = new THREE.CylinderGeometry(0.028, 0.024, 0.17, 14); nac.rotateX(Math.PI / 2); nac.translate(0.2, -0.05, 0.14);
     return mergeGeometries([fus, nose, wing, mirrorX(wing), stab, mirrorX(stab), fin, nac, mirrorX(nac)]);
   }
   function buildHeliGeo() {
@@ -262,7 +263,7 @@ export function createTactical3d({ container, deps }) {
     return mergeGeometries([hull, top]);
   }
   const GEO = { plane: buildPlaneGeo(), helicopter: buildHeliGeo(), ground: buildGroundGeo() };
-  const GEO_LEN = { plane: 1.1, helicopter: 1.1, ground: 0.56 }; // nose-to-tail units, for screen scaling
+  const GEO_LEN = { plane: 1.05, helicopter: 1.1, ground: 0.56 }; // nose-to-tail units, for screen scaling
   const aircraftMatBase = new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0.1, side: THREE.DoubleSide });
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
@@ -649,11 +650,13 @@ export function createTactical3d({ container, deps }) {
     const mat = t.mat;
     let color = t.baseColor.clone();
     let emis = t.baseColor.clone().multiplyScalar(0.55);
-    let scaleMul = t.ground ? 0.75 : 1;
-    if (t.ghost) { emis = t.baseColor.clone().multiplyScalar(0.3); scaleMul *= 0.9; }
+    // Size stays constant — selection/hover only recolour, never rescale (rescaling on
+    // click looked wrong). Ground vehicles are a touch smaller.
+    const scaleMul = t.ground ? 0.78 : 1;
+    if (t.ghost) emis = t.baseColor.clone().multiplyScalar(0.3);
     if (t.emergency) emis = RED.clone().multiplyScalar(0.7);
-    if (t.selected) { color = t.baseColor.clone().lerp(WHITE, 0.12); emis = t.baseColor.clone().lerp(WHITE, 0.25).multiplyScalar(0.95); scaleMul *= 1.6; }
-    if (t.hovered) { color = t.baseColor.clone().lerp(WHITE, 0.45); emis = emis.clone().lerp(WHITE, 0.4); scaleMul = Math.max(scaleMul, t.ground ? 1 : 1.28); }
+    if (t.selected) { color = t.baseColor.clone().lerp(WHITE, 0.15); emis = t.baseColor.clone().lerp(WHITE, 0.3).multiplyScalar(1.05); }
+    if (t.hovered) { color = t.baseColor.clone().lerp(WHITE, 0.5); emis = emis.clone().lerp(WHITE, 0.45); }
     mat.color.copy(color);
     mat.emissive.copy(emis);
     mat.opacity = t.coasting ? 0.5 : (t.ghost ? 0.65 : 1);
@@ -677,8 +680,6 @@ export function createTactical3d({ container, deps }) {
     color: 0xe8edf2, transparent: true, opacity: 0.92, side: THREE.DoubleSide, depthWrite: false,
     polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5,
   });
-  // Dashed centreline as a single dashed line.
-  const runwayCLMat = new THREE.LineDashedMaterial({ color: 0xe8edf2, transparent: true, opacity: 0.85, dashSize: 120, gapSize: 120 });
   function quad(arr, y, ax, az, bx, bz, cx2, cz2, dx2, dz2) {
     const base = arr.length / 3;
     arr.push(ax, y, az, bx, y, bz, cx2, y, cz2, dx2, y, dz2);
@@ -692,7 +693,6 @@ export function createTactical3d({ container, deps }) {
     const paveIdx = [];
     const mark = [];
     const markIdx = [];
-    const clPos = [];
     for (const rwy of RUNWAYS) {
       const ax = toLocalX(rwy.le[0]);
       const az = toLocalZ(rwy.le[1]);
@@ -724,7 +724,6 @@ export function createTactical3d({ container, deps }) {
         const sz = end ? -dz : dz;
         markIdx.push(...quad(mark, y, ex + px * hw, ez + pz * hw, ex - px * hw, ez - pz * hw, ex - px * hw + sx * bar, ez - pz * hw + sz * bar, ex + px * hw + sx * bar, ez + pz * hw + sz * bar));
       }
-      clPos.push(ax + dx * bar, y + 0.5, az + dz * bar, bx - dx * bar, y + 0.5, bz - dz * bar);
     }
     if (paveIdx.length) {
       const g = new THREE.BufferGeometry();
@@ -737,11 +736,6 @@ export function createTactical3d({ container, deps }) {
       g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mark), 3));
       g.setIndex(markIdx);
       const m = new THREE.Mesh(g, runwayMarkMat); m.frustumCulled = false; group.add(m);
-    }
-    for (let i = 0; i < clPos.length; i += 6) {
-      const g = new THREE.BufferGeometry();
-      g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(clPos.slice(i, i + 6)), 3));
-      const line = new THREE.Line(g, runwayCLMat); line.computeLineDistances(); line.frustumCulled = false; group.add(line);
     }
     runwayGroup = group;
     scene.add(group);
@@ -944,58 +938,93 @@ export function createTactical3d({ container, deps }) {
     scene.add(conflictLine);
   }
 
-  // --- Coverage VOLUME: the reception envelope as a closed 3D dome. Each altitude band's
-  // polygon is resampled to a fixed set of azimuths (rays cast from the receiver), giving a
-  // radius profile r(azimuth, altitude); adjacent altitude levels are joined by a skinned
-  // surface so the reachable airspace is a solid translucent volume, not flat layers.
-  // Rebuilt only on coverage/exaggeration change via the exported drawCoverage().
+  // --- Coverage VOLUME: computed here from scratch out of the raw reception history
+  // (every position report the server returns as coverage.points, each with an altitude),
+  // NOT from the server's 2D altitude bands. For each (azimuth, altitude) cell we take the
+  // farthest range ever received; that radius grid is skinned into a solid 3D reception
+  // dome. Rebuilt on coverage/exaggeration change via the exported drawCoverage().
   let coverageGroup = null;
-  const COV_AZ = 96;
-  function bandMidFeet(band) {
-    const max = band.maxAltitude ?? band.minAltitude + 10000;
-    return (band.minAltitude + max) / 2;
-  }
-  // Farthest intersection of the ray (cx,cz)+t*(dx,dz) with the polygon boundary.
-  function rayRadius(ringXZ, cx, cz, dx, dz) {
-    let best = 0;
-    for (let i = 0; i < ringXZ.length; i += 1) {
-      const [ax, az] = ringXZ[i];
-      const [bx, bz] = ringXZ[(i + 1) % ringXZ.length];
-      const ex = bx - ax;
-      const ez = bz - az;
-      const det = ex * dz - dx * ez;
-      if (Math.abs(det) < 1e-9) continue;
-      const t = (-(ax - cx) * ez + ex * (az - cz)) / det;
-      const s = (dx * (az - cz) - dz * (ax - cx)) / det;
-      if (t >= 0 && s >= -1e-6 && s <= 1 + 1e-6 && t > best) best = t;
+  const COV_AZ = 96; // azimuth sectors
+  const COV_STEP_FT = 2500; // altitude layer thickness
+  function drawCoverage() {
+    disposeGroup(coverageGroup);
+    coverageGroup = null;
+    if (!deps.getSettings().coverage) return;
+    const points = deps.getCoverage()?.points || [];
+    if (points.length < 20) return;
+
+    // Bin the raw hits: radius[layer][az] = farthest horizontal range seen at that
+    // altitude layer and bearing (from the receiver = scene origin).
+    let maxAlt = 0;
+    const hits = [];
+    for (const p of points) {
+      if (p.lat == null || p.lon == null) continue;
+      const alt = p.maxAltitude;
+      if (alt == null || alt < 0) continue;
+      const x = toLocalX(p.lon);
+      const z = toLocalZ(p.lat);
+      const range = Math.hypot(x, z);
+      if (range < 500) continue;
+      const az = (Math.atan2(x, -z) + Math.PI * 2) % (Math.PI * 2); // 0 = north, cw
+      hits.push({ range, az, alt });
+      if (alt > maxAlt) maxAlt = alt;
     }
-    return best;
-  }
-  function buildDome(group, levels, cx, cz) {
-    // levels: [{feet, ring:[[x,z]...]}] sorted by altitude ascending.
+    if (hits.length < 20) return;
+    const nLayer = Math.max(1, Math.ceil(maxAlt / COV_STEP_FT));
+    const radius = Array.from({ length: nLayer }, () => new Float32Array(COV_AZ));
+    for (const h of hits) {
+      const layer = Math.min(nLayer - 1, Math.floor(h.alt / COV_STEP_FT));
+      const a = Math.min(COV_AZ - 1, Math.floor((h.az / (Math.PI * 2)) * COV_AZ));
+      if (h.range > radius[layer][a]) radius[layer][a] = h.range;
+    }
+    // Fill azimuth gaps per layer by nearest non-empty sector (circular), then make each
+    // column non-decreasing with altitude so the envelope is a closed, hole-free dome.
+    for (let l = 0; l < nLayer; l += 1) {
+      const row = radius[l];
+      if (row.every((v) => v === 0)) continue;
+      for (let a = 0; a < COV_AZ; a += 1) {
+        if (row[a] > 0) continue;
+        for (let d = 1; d <= COV_AZ / 2; d += 1) {
+          const lft = row[(a - d + COV_AZ) % COV_AZ];
+          const rgt = row[(a + d) % COV_AZ];
+          if (lft > 0 || rgt > 0) { row[a] = Math.max(lft, rgt); break; }
+        }
+      }
+    }
+    for (let l = 1; l < nLayer; l += 1) {
+      for (let a = 0; a < COV_AZ; a += 1) radius[l][a] = Math.max(radius[l][a], radius[l - 1][a]);
+    }
+    // Light circular smoothing so the sampled envelope reads as a clean surface, not noise.
+    for (let l = 0; l < nLayer; l += 1) {
+      const row = radius[l];
+      for (let pass = 0; pass < 2; pass += 1) {
+        const src = row.slice();
+        for (let a = 0; a < COV_AZ; a += 1) {
+          row[a] = (src[(a - 1 + COV_AZ) % COV_AZ] + 2 * src[a] + src[(a + 1) % COV_AZ]) / 4;
+        }
+      }
+    }
+
+    // Levels: a ground ring (feet 0) plus each layer at its top altitude.
+    const group = new THREE.Group();
+    const levels = [{ feet: 0, r: radius[0] }];
+    for (let l = 0; l < nLayer; l += 1) levels.push({ feet: (l + 1) * COV_STEP_FT, r: radius[l] });
     const L = levels.length;
     const verts = new Float32Array(L * COV_AZ * 3);
     const cols = new Float32Array(L * COV_AZ * 3);
-    const radius = []; // [level][az]
     for (let l = 0; l < L; l += 1) {
-      radius[l] = new Float32Array(COV_AZ);
-      const color = parseCssColor(deps.altitudeColorFeet(levels[l].feet));
       const y = levels[l].feet * FT_TO_M * exagg;
+      const color = parseCssColor(deps.altitudeColorFeet(levels[l].feet));
       for (let a = 0; a < COV_AZ; a += 1) {
         const ang = (a / COV_AZ) * Math.PI * 2;
-        const dx = Math.cos(ang);
-        const dz = Math.sin(ang);
-        let r = rayRadius(levels[l].ring, cx, cz, dx, dz);
-        if (r <= 0) r = l > 0 ? radius[l - 1][a] : 0; // fall back to the level below on a miss
-        radius[l][a] = r;
-        const idx = (l * COV_AZ + a) * 3;
-        verts[idx] = cx + dx * r;
-        verts[idx + 1] = y;
-        verts[idx + 2] = cz + dz * r;
-        cols[idx] = color.r; cols[idx + 1] = color.g; cols[idx + 2] = color.b;
+        const r = levels[l].r[a];
+        const i = (l * COV_AZ + a) * 3;
+        verts[i] = Math.sin(ang) * r;
+        verts[i + 1] = y;
+        verts[i + 2] = -Math.cos(ang) * r;
+        cols[i] = color.r; cols[i + 1] = color.g; cols[i + 2] = color.b;
       }
     }
-    // Skin between consecutive levels (quads -> 2 tris), doubled so both faces show.
     const idx = [];
     for (let l = 0; l < L - 1; l += 1) {
       for (let a = 0; a < COV_AZ; a += 1) {
@@ -1012,48 +1041,27 @@ export function createTactical3d({ container, deps }) {
     geo.setAttribute("color", new THREE.BufferAttribute(cols, 3));
     geo.setIndex(idx);
     const skin = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false,
+      vertexColors: true, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false,
     }));
     skin.frustumCulled = false;
     group.add(skin);
-    // Cap the top ring and draw each level's outline for definition.
+    // Faint altitude-coloured outline every ~10k ft (plus the top) for definition — not
+    // every layer, which would clutter the dome with concentric rings.
     for (let l = 0; l < L; l += 1) {
-      const color = parseCssColor(deps.altitudeColorFeet(levels[l].feet));
+      if (l !== L - 1 && Math.round(levels[l].feet) % 10000 !== 0) continue;
       const y = levels[l].feet * FT_TO_M * exagg;
+      const color = parseCssColor(deps.altitudeColorFeet(levels[l].feet));
       const loop = [];
       for (let a = 0; a <= COV_AZ; a += 1) {
         const ai = a % COV_AZ;
-        loop.push(cx + Math.cos((ai / COV_AZ) * Math.PI * 2) * radius[l][ai], y, cz + Math.sin((ai / COV_AZ) * Math.PI * 2) * radius[l][ai]);
+        const ang = (ai / COV_AZ) * Math.PI * 2;
+        loop.push(Math.sin(ang) * levels[l].r[ai], y, -Math.cos(ang) * levels[l].r[ai]);
       }
       const lgeo = new THREE.BufferGeometry();
       lgeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(loop), 3));
-      const line = new THREE.Line(lgeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5 }));
+      const line = new THREE.Line(lgeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.4 }));
       line.frustumCulled = false;
       group.add(line);
-    }
-  }
-  function drawCoverage() {
-    disposeGroup(coverageGroup);
-    coverageGroup = null;
-    if (!deps.getSettings().coverage) return;
-    const areas = deps.getCoverage()?.areas || [];
-    if (!areas.length) return;
-    const group = new THREE.Group();
-    for (const area of areas) {
-      const bands = (area.bands || [])
-        .filter((b) => b.polygon?.coordinates?.[0]?.length >= 3)
-        .sort((x, y) => bandMidFeet(x) - bandMidFeet(y));
-      if (!bands.length) continue;
-      // Each band becomes a horizontal ring at its mid altitude; a ground copy of the
-      // lowest band closes the base. Rays are cast from the RECEIVER (scene origin), which
-      // every reception envelope is star-shaped about, so consecutive rings sample the same
-      // azimuths about the same centre and the skin between them stays smooth (no twist).
-      const levels = bands.map((b) => ({
-        feet: bandMidFeet(b),
-        ring: b.polygon.coordinates[0].map(([lon, lat]) => [toLocalX(lon), toLocalZ(lat)]),
-      }));
-      levels.unshift({ feet: 0, ring: levels[0].ring });
-      buildDome(group, levels, 0, 0);
     }
     coverageGroup = group;
     scene.add(group);
@@ -1339,7 +1347,6 @@ export function createTactical3d({ container, deps }) {
     aircraftMatBase.dispose();
     runwayMat.dispose();
     runwayMarkMat.dispose();
-    runwayCLMat.dispose();
     trailMat.dispose();
     trailCasingMat.dispose();
     satTexture?.dispose();

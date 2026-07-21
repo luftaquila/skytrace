@@ -814,6 +814,33 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
+.airfield-tt .af-tt-rwys {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgb(238 245 244 / 0.12);
+}
+
+.airfield-tt .af-tt-rw {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font: 600 11px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: #9fe8df;
+}
+
+.airfield-tt .af-tt-rw b {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.airfield-tt .af-tt-rw span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .history-panel {
   display: flex;
   flex-direction: column;
