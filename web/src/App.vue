@@ -42,7 +42,7 @@ const DEFAULT_SETTINGS = {
   flightLevels: false,
   coastDrop: true,
   proximity: true,
-  view3d: false,
+  view3d: true,
   terrainExaggeration: 2,
   terrainSatellite: true,
 };
@@ -799,6 +799,17 @@ function datablockHtml(item) {
     + `<span>${targetLine(item, true)}</span></span>`;
 }
 
+// Plain-text label for the 3D view's deck.gl TextLayer (no HTML): callsign over
+// "trend+altitude · speed · age".
+function labelText(item) {
+  const altFt = item.altBaro ?? item.altGeom;
+  const alt = item.onGround ? "GND" : altFt == null ? "-" : altText(Math.round(altFt / 100) * 100);
+  const parts = [`${verticalArrowSymbol(item)}${alt}`];
+  if (item.gs != null) parts.push(formatSpeed(item));
+  parts.push(formatAge(item.observedAt));
+  return `${formatFlight(item)}\n${parts.join(" · ")}`;
+}
+
 function applyMarkerHover(marker, hex) {
   marker.getElement()?.classList.toggle("hovered", hoveredHex.value === hex);
 }
@@ -1537,15 +1548,15 @@ function onGlobalKeydown(event) {
   if (selectedHex.value) clearSelection();
 }
 
-// Toolbar recenter: jump to the selected aircraft, or home to the Yuseong IC center when
-// nothing is selected. (Both views.)
+// Toolbar recenter: smoothly fly to the selected aircraft, or home to the Yuseong IC center
+// when nothing is selected. (Both views.)
 const HOME = { lat: 36.36599, lon: 127.33113 };
 function recenterView() {
   const sel = selectedAircraft.value;
   const hasSel = sel && sel.lat != null && sel.lon != null;
   if (view3dActive.value) {
-    if (hasSel) tac3d?.setCameraFromMap({ lat: sel.lat, lng: sel.lon }, 9);
-    else tac3d?.setCameraFromMap({ lat: HOME.lat, lng: HOME.lon }, 6);
+    if (hasSel) tac3d?.flyToView(sel.lon, sel.lat, 9);
+    else tac3d?.flyToView(HOME.lon, HOME.lat, 6);
   } else if (hasSel) {
     map.setView([sel.lat, sel.lon], Math.max(map.getZoom(), 9), { animate: true });
   } else {
@@ -1606,9 +1617,8 @@ async function ensureTactical3d() {
         getPinned: () => pinned.value,
         getPinnedTracks: () => [...pinnedTracks.value].map(([hex, points]) => ({ hex, points })),
         togglePin,
-        datablockHtml,
+        labelText,
         airfieldTooltip,
-        aircraftKind,
         passesFilters,
         isDropped,
         isCoasting,
@@ -1629,9 +1639,9 @@ async function setView3d(on) {
   settings.value.view3d = on;
   if (on) {
     if (measureMode.value) toggleMeasure(); // measure is 2D-only
+    view3dActive.value = true; // hide the 2D map immediately so there's no 2D→3D flash
     await ensureTactical3d();
     if (settings.value.view3d !== true) return; // toggled back off while loading
-    view3dActive.value = true;
     await nextTick();
     tac3d.setActive(true);
     tac3d.setCameraFromMap(map.getCenter(), map.getZoom());
@@ -1686,6 +1696,9 @@ watch(playbackIndex, () => {
 });
 
 onMounted(async () => {
+  // When 3D is the default view, hide the 2D map from the very first paint so the app never
+  // flashes 2D before switching to 3D.
+  if (settings.value.view3d) view3dActive.value = true;
   // Centered on Yuseong IC, Daejeon (same reference point as the 3D scene origin / rings).
   map = L.map(mapEl.value, { zoomControl: false, attributionControl: false, preferCanvas: true }).setView([36.36599, 127.33113], 7);
   // Airfield reference markers sit above coverage but below live aircraft.

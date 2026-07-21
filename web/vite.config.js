@@ -8,7 +8,7 @@ export default defineConfig({
     // streams responses, so /api/events (EventSource) works through this unbuffered.
     proxy: {
       "/api": {
-        target: "https://public.luftaquila.io",
+        target: "https://sky.luftaquila.io",
         changeOrigin: true,
       },
     },
