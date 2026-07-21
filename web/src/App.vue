@@ -14,6 +14,7 @@ import {
   Play,
   RadioTower,
   RefreshCw,
+  Ruler,
   Search,
   Settings,
   SlidersHorizontal,
@@ -37,6 +38,9 @@ const DEFAULT_SETTINGS = {
   source: "all",
   altMin: "",
   altMax: "",
+  flightLevels: false,
+  coastDrop: true,
+  proximity: true,
 };
 
 const baseLayers = {
@@ -94,6 +98,10 @@ const playbackSpeed = ref(0);
 const playbackIndex = ref(0);
 const chartEl = ref(null);
 const selectedHistoryMetrics = ref(["altBaro", "gs"]);
+// Range/bearing measure tool: click two map points to read distance + bearing.
+const measureMode = ref(false);
+const measurePoints = ref([]);
+const measureCursor = ref(null);
 
 // Resizable panel: sidebar width (desktop) / panel height in vh (mobile), persisted.
 const LAYOUT_KEY = "skytrace.layout.v1";
@@ -137,6 +145,8 @@ let trackLayer;
 let playbackMarker;
 let coverageLayer;
 let airfieldLayer;
+let conflictLayer;
+let measureLayer;
 let historyChart;
 let chartResizeObserver;
 let refreshTimer;
@@ -153,6 +163,7 @@ watch(settings, (value) => {
   upsertMarkers();
   drawCoverage();
   drawAirfields();
+  drawConflicts();
   queueHistoryChartRender();
 }, { deep: true });
 
@@ -341,10 +352,24 @@ function formatNumberUnit(entry, digits = 0) {
   return `${numberFormatter(digits).format(entry.value)} ${entry.unit}`;
 }
 
+// ATC flight-level notation: hundreds of feet, zero-padded (35000 ft -> FL350). FL is a
+// feet-based standard, so it overrides the metric/imperial altitude display when enabled.
+function formatFlightLevel(feet) {
+  return `FL${String(Math.max(0, Math.round(feet / 100))).padStart(3, "0")}`;
+}
+
+// Single altitude renderer honouring both the FL toggle and the unit setting, reused by the
+// detail panel, tooltip, list and track log so the display stays consistent everywhere.
+function altText(feet) {
+  if (feet == null) return "-";
+  if (settings.value.flightLevels) return formatFlightLevel(feet);
+  return formatNumberUnit(altitudeValue(feet));
+}
+
 function formatAltitude(item, field = "best") {
   if (item.onGround && field === "best") return "ground";
   const feet = field === "geom" ? item.altGeom : field === "baro" ? item.altBaro : item.altBaro ?? item.altGeom;
-  return formatNumberUnit(altitudeValue(feet));
+  return altText(feet);
 }
 
 function formatSpeed(item, field = "ground") {
@@ -397,7 +422,7 @@ function aircraftAlert(item) {
 
 function pointAltitude(point) {
   if (point.onGround) return "GND";
-  return formatNumberUnit(altitudeValue(point.altBaro ?? point.altGeom));
+  return altText(point.altBaro ?? point.altGeom);
 }
 
 function pointSpeed(point) {
@@ -408,6 +433,81 @@ function focusTrackPoint(index) {
   playbackSpeed.value = 0;
   playbackIndex.value = index;
 }
+
+// --- Great-circle helpers (nautical miles + true bearing) for the measure tool and the
+// proximity check. Points are {lat, lng} to match Leaflet's LatLng. ---
+const EARTH_RADIUS_NM = 3440.065;
+function toRadians(deg) { return (deg * Math.PI) / 180; }
+function distanceNm(a, b) {
+  const dLat = toRadians(b.lat - a.lat);
+  const dLon = toRadians(b.lng - a.lng);
+  const lat1 = toRadians(a.lat);
+  const lat2 = toRadians(b.lat);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * EARTH_RADIUS_NM * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+function bearingDeg(a, b) {
+  const lat1 = toRadians(a.lat);
+  const lat2 = toRadians(b.lat);
+  const dLon = toRadians(b.lng - a.lng);
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+// Coast/drop: a target stops updating (out of range, landed, feed hiccup). Grey it as
+// "coasting" past COAST_AGE, then stop drawing it past DROP_AGE. DROP_AGE sits just above
+// the server's 90 s current-window, so it is only a safety net for a stalled feed.
+const COAST_AGE_SEC = 30;
+const DROP_AGE_SEC = 100;
+function targetAgeSec(item) {
+  const t = Date.parse(item.observedAt);
+  return Number.isFinite(t) ? (now.value - t) / 1000 : 0;
+}
+function isCoasting(item) {
+  return settings.value.coastDrop && targetAgeSec(item) >= COAST_AGE_SEC;
+}
+function isDropped(item) {
+  return settings.value.coastDrop && targetAgeSec(item) >= DROP_AGE_SEC;
+}
+
+// Proximity (STCA-style): airborne pairs closer than PROXIMITY_NM laterally AND within
+// PROXIMITY_FT vertically. Recomputed only when the aircraft set changes (not per second),
+// so the O(n^2) scan runs at the refresh cadence, not every clock tick.
+// Tighter than the 5 NM en-route minimum so it flags genuinely close pairs rather than
+// normal minimum separation.
+const PROXIMITY_NM = 3;
+const PROXIMITY_FT = 1000;
+const conflicts = computed(() => {
+  if (!settings.value.proximity) return [];
+  const rows = [];
+  for (const item of aircraft.value) {
+    if (item.lat == null || item.lon == null || item.onGround) continue;
+    // Skip stale "ghost" targets: their frozen last position produces phantom conflicts
+    // against live traffic passing nearby. A conflict must be between two fresh tracks.
+    // (Independent of the coast/drop display toggle.)
+    if (targetAgeSec(item) >= COAST_AGE_SEC) continue;
+    const alt = item.altBaro ?? item.altGeom;
+    if (alt == null) continue;
+    rows.push({ item, alt, pos: { lat: item.lat, lng: item.lon } });
+  }
+  const pairs = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    for (let j = i + 1; j < rows.length; j += 1) {
+      const vertFt = Math.abs(rows[i].alt - rows[j].alt);
+      if (vertFt > PROXIMITY_FT) continue;
+      const distNm = distanceNm(rows[i].pos, rows[j].pos);
+      if (distNm > PROXIMITY_NM) continue;
+      pairs.push({ a: rows[i].item, b: rows[j].item, distNm, vertFt });
+    }
+  }
+  return pairs;
+});
+const conflictHexes = computed(() => {
+  const set = new Set();
+  for (const pair of conflicts.value) { set.add(pair.a.hex); set.add(pair.b.hex); }
+  return set;
+});
 
 const HISTORY_METRICS = [
   { key: "altBaro", label: "Baro Alt", color: "#48e0d1", kind: "alt", get: (point) => point.altBaro },
@@ -517,15 +617,17 @@ const altitudeLegend = computed(() => {
     const pct = Math.round((i / steps) * 100);
     stops.push(`${altitudeColorFeet((i / steps) * ALT_COLOR_MAX_FT)} ${pct}%`);
   }
-  const metric = settings.value.units === "metric";
+  const fl = settings.value.flightLevels;
+  const metric = settings.value.units === "metric" && !fl;
   const ticks = [1, 0.75, 0.5, 0.25, 0].map((frac) => {
+    if (fl) return { label: `${Math.round((frac * ALT_COLOR_MAX_FT) / 100)}` };
     const value = frac * ALT_COLOR_MAX_FT * (metric ? 0.3048 : 1);
     return { label: value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}` };
   });
   return {
     gradient: `linear-gradient(to top, ${stops.join(", ")})`,
     ticks,
-    unit: metric ? "m" : "ft",
+    unit: fl ? "FL" : metric ? "m" : "ft",
     groundColor: ALT_COLOR_GROUND,
   };
 });
@@ -576,6 +678,9 @@ function markerHtml(item) {
   const label = showLabel ? `<span class="aircraft-label">${escapeHtml(formatFlight(item))}</span>` : "";
   const classes = [
     item.emergency && item.emergency !== "none" ? "is-emergency" : "",
+    item.spi ? "is-ident" : "",
+    conflictHexes.value.has(item.hex) ? "is-conflict" : "",
+    isCoasting(item) ? "is-coasting" : "",
   ].filter(Boolean).join(" ");
   const kind = aircraftKind(item);
   const sizeScale = kind === "plane" ? planeSizeScale(item.category) : 1;
@@ -613,7 +718,10 @@ function markerSignature(item) {
   const showLabel = settings.value.labels || selected;
   const label = showLabel ? formatFlight(item) : "";
   const emergency = item.emergency && item.emergency !== "none" ? 1 : 0;
-  return `${aircraftKind(item)}|${altitudeColor(item)}|${markerVisualScale()}|${markerSizeScale(item)}|${selected}|${emergency}|${label}`;
+  const ident = item.spi ? 1 : 0;
+  const conflict = conflictHexes.value.has(item.hex) ? 1 : 0;
+  const coasting = isCoasting(item) ? 1 : 0;
+  return `${aircraftKind(item)}|${altitudeColor(item)}|${markerVisualScale()}|${markerSizeScale(item)}|${selected}|${emergency}|${ident}|${conflict}|${coasting}|${label}`;
 }
 
 function applyMarkerRotation(marker, rot, item) {
@@ -638,12 +746,25 @@ function tooltipHtml(item) {
   const arrow = verticalArrowSymbol(item);
   const alt = item.onGround ? "GND" : escapeHtml(formatAltitude(item));
   const spd = escapeHtml(formatSpeed(item));
-  return `<span class="tt-l1">${escapeHtml(formatFlight(item))}</span>`
+  // Age is baked in at build time; upsertMarkers() re-derives the tooltip on every live
+  // refresh, so the age stays fresh without a per-second rebuild.
+  const age = escapeHtml(formatAge(item.observedAt));
+  return `<span class="tt-l1">${escapeHtml(formatFlight(item))}<span class="tt-age">${age}</span></span>`
     + `<span class="tt-l2">${arrow ? `<b class="tt-arrow">${arrow}</b>` : ""}${alt} · ${spd}</span>`;
 }
 
 function applyMarkerHover(marker, hex) {
   marker.getElement()?.classList.toggle("hovered", hoveredHex.value === hex);
+}
+
+// The tooltip HTML is built once per upsert, so its baked-in age would freeze while the
+// pointer rests on a marker. Patch just the age node of the open tooltip in place so it
+// ticks every second (driven by the clock timer) without rebuilding the whole tooltip.
+function patchTooltipAge(marker, hex) {
+  const ageEl = marker?.getTooltip()?.getElement()?.querySelector(".tt-age");
+  if (!ageEl) return;
+  const item = aircraft.value.find((row) => row.hex === hex);
+  if (item) ageEl.textContent = formatAge(item.observedAt);
 }
 
 // Slightly beyond the visible bounds so markers don't pop in right at the edge on a pan.
@@ -662,6 +783,7 @@ function upsertMarkers() {
   for (const item of aircraft.value) {
     if (item.lat == null || item.lon == null) continue;
     if (!passesFilters(item)) continue;
+    if (isDropped(item)) continue;
     const selected = selectedHex.value === item.hex;
     // Cull anything off-screen, but always keep the selected aircraft so its highlight
     // and track survive a pan away. Real position updates still land the instant the
@@ -705,6 +827,7 @@ function upsertMarkers() {
       marker._rot = rot;
       marker._tip = tip;
       marker.bindTooltip(tip, { direction: "top", offset: [0, -14], className: "aircraft-tt" });
+      marker.on("tooltipopen", () => patchTooltipAge(marker, item.hex));
       marker.on("click", () => toggleAircraft(item.hex));
       marker.on("mouseover", () => { hoveredHex.value = item.hex; });
       marker.on("mouseout", () => { if (hoveredHex.value === item.hex) hoveredHex.value = null; });
@@ -820,6 +943,88 @@ function drawAirfields() {
     }
   }
   airfieldLayer.addTo(map);
+}
+
+// Proximity links: a dashed red line between each close pair, labelled with the lateral and
+// vertical separation. The markers themselves are reddened by the is-conflict class.
+function drawConflicts() {
+  if (!map) return;
+  if (conflictLayer) conflictLayer.remove();
+  conflictLayer = L.layerGroup();
+  if (settings.value.proximity) {
+    for (const pair of conflicts.value) {
+      const a = [pair.a.lat, pair.a.lon];
+      const b = [pair.b.lat, pair.b.lon];
+      L.polyline([a, b], {
+        color: "#fb7185", weight: 2, opacity: 0.9, dashArray: "5 4", interactive: false, lineCap: "round",
+      }).addTo(conflictLayer);
+      const mid = [(pair.a.lat + pair.b.lat) / 2, (pair.a.lon + pair.b.lon) / 2];
+      L.marker(mid, {
+        icon: L.divIcon({
+          className: "conflict-label",
+          html: `${pair.distNm.toFixed(1)} NM · ${Math.round(pair.vertFt)} ft`,
+          iconSize: [1, 1],
+        }),
+        interactive: false,
+        keyboard: false,
+        zIndexOffset: 1000,
+      }).addTo(conflictLayer);
+    }
+  }
+  conflictLayer.addTo(map);
+}
+
+// Range/bearing measure tool. Two clicks fix the endpoints (a live segment follows the
+// cursor between them); a further click starts a fresh measurement.
+function drawMeasure() {
+  if (!map) return;
+  if (measureLayer) measureLayer.remove();
+  measureLayer = L.layerGroup();
+  const pts = measurePoints.value;
+  const endpoints = pts.length === 1 && measureCursor.value ? [pts[0], measureCursor.value] : pts.slice(0, 2);
+  for (const p of pts) {
+    L.circleMarker([p.lat, p.lng], {
+      radius: 4, color: "#48e0d1", weight: 2, fillColor: "#0d1011", fillOpacity: 1, interactive: false,
+    }).addTo(measureLayer);
+  }
+  if (endpoints.length === 2) {
+    const [p0, p1] = endpoints;
+    L.polyline([[p0.lat, p0.lng], [p1.lat, p1.lng]], {
+      color: "#48e0d1", weight: 2, opacity: 0.95, dashArray: "6 5", interactive: false, lineCap: "round",
+    }).addTo(measureLayer);
+    const dist = distanceNm(p0, p1);
+    const brg = bearingDeg(p0, p1);
+    const km = dist * 1.852;
+    L.marker([p1.lat, p1.lng], {
+      icon: L.divIcon({
+        className: "measure-label",
+        html: `${dist.toFixed(1)} NM (${km.toFixed(1)} km) · ${Math.round(brg)}°`,
+        iconSize: [1, 1],
+      }),
+      interactive: false,
+      keyboard: false,
+      zIndexOffset: 1100,
+    }).addTo(measureLayer);
+  }
+  measureLayer.addTo(map);
+}
+
+function toggleMeasure() {
+  measureMode.value = !measureMode.value;
+  measurePoints.value = [];
+  measureCursor.value = null;
+  map?.getContainer().classList.toggle("measuring", measureMode.value);
+  drawMeasure();
+}
+
+function onMeasureClick(latlng) {
+  const point = { lat: latlng.lat, lng: latlng.lng };
+  // 0 or 2 existing points => start over with a single new point; 1 => complete the pair.
+  measurePoints.value = measurePoints.value.length === 1
+    ? [measurePoints.value[0], point]
+    : [point];
+  measureCursor.value = null;
+  drawMeasure();
 }
 
 function selectedTrackSeconds() {
@@ -1184,7 +1389,9 @@ function toggleAircraft(hex) {
 }
 
 function onGlobalKeydown(event) {
-  if (event.key === "Escape" && selectedHex.value) clearSelection();
+  if (event.key !== "Escape") return;
+  if (measureMode.value) { toggleMeasure(); return; }
+  if (selectedHex.value) clearSelection();
 }
 
 function fitVisibleAircraft() {
@@ -1213,7 +1420,7 @@ function resetFilters() {
   });
 }
 
-watch(aircraft, () => upsertMarkers());
+watch(aircraft, () => { upsertMarkers(); drawConflicts(); });
 watch(searchQuery, () => upsertMarkers());
 watch(hoveredHex, (next, prev) => {
   if (prev && markers.has(prev)) applyMarkerHover(markers.get(prev), prev);
@@ -1233,18 +1440,32 @@ onMounted(async () => {
   L.control.zoom({ position: "bottomright" }).addTo(map);
   // Re-cull markers to the viewport after a pan or zoom (moveend also fires on zoom).
   map.on("moveend", upsertMarkers);
-  // Clicking empty map (coverage is non-interactive, markers stop propagation) deselects.
-  map.on("click", () => { if (selectedHex.value) clearSelection(); });
+  // Clicking empty map (coverage is non-interactive, markers stop propagation) deselects,
+  // unless the measure tool is active — then clicks drop range/bearing endpoints.
+  map.on("click", (event) => {
+    if (measureMode.value) { onMeasureClick(event.latlng); return; }
+    if (selectedHex.value) clearSelection();
+  });
+  map.on("mousemove", (event) => {
+    if (measureMode.value && measurePoints.value.length === 1) {
+      measureCursor.value = { lat: event.latlng.lat, lng: event.latlng.lng };
+      drawMeasure();
+    }
+  });
   window.addEventListener("keydown", onGlobalKeydown);
   applyBaseLayer();
   drawAirfields();
   await refreshLive();
   await refreshCoverage();
+  drawConflicts();
   // Fallback polls in case the SSE stream drops; otherwise live updates are driven by
   // ingest events, and coverage only when a batch actually recorded new track points.
   refreshTimer = setInterval(() => liveRefresher.schedule(0), 10000);
   coverageTimer = setInterval(() => coverageRefresher.schedule(0), 60000);
-  clockTimer = setInterval(() => { now.value = Date.now(); }, 1000);
+  clockTimer = setInterval(() => {
+    now.value = Date.now();
+    if (hoveredHex.value) patchTooltipAge(markers.get(hoveredHex.value), hoveredHex.value);
+  }, 1000);
   connectEvents();
 });
 
@@ -1302,9 +1523,14 @@ onUnmounted(() => {
           </div>
         </div>
         <div class="toolbar">
+          <button class="icon-button" :class="{ active: measureMode }" title="Measure range/bearing (Esc to exit)" @click="toggleMeasure"><Ruler :size="18" /></button>
           <button class="icon-button" title="Fit aircraft" @click="fitVisibleAircraft"><LocateFixed :size="18" /></button>
           <button class="icon-button" title="Refresh" @click="refreshAll"><RefreshCw :size="18" /></button>
         </div>
+      </div>
+      <div v-if="measureMode" class="measure-hint">
+        <Ruler :size="15" />
+        <span>Click two points for range &amp; bearing · Esc to exit</span>
       </div>
       <div class="map-legend" aria-hidden="true">
         <div class="legend-title">Altitude ({{ altitudeLegend.unit }})</div>
@@ -1344,7 +1570,10 @@ onUnmounted(() => {
           </div>
           <div class="detail-head">
             <div>
-              <h2>{{ formatFlight(selectedAircraft) }}</h2>
+              <div class="detail-title">
+                <h2>{{ formatFlight(selectedAircraft) }}</h2>
+                <span class="detail-age" title="Last update">{{ formatAge(selectedAircraft.observedAt) }}</span>
+              </div>
               <p>{{ selectedAircraft.hex.toUpperCase() }} · {{ sourceLabel(selectedAircraft) }}</p>
             </div>
             <button class="icon-button small" title="Close" @click="clearSelection"><X :size="16" /></button>
@@ -1363,9 +1592,9 @@ onUnmounted(() => {
             <div class="detail-metric" :class="detailMetricClass('rssi')" @click="toggleHistoryMetrics('rssi')"><dt>RSSI</dt><dd>{{ selectedAircraft.rssi == null ? "-" : `${selectedAircraft.rssi.toFixed(1)} dBFS` }}</dd></div>
             <div class="detail-metric" :class="detailMetricClass('messages')" @click="toggleHistoryMetrics('messages')"><dt>Messages</dt><dd>{{ selectedAircraft.messages ?? "-" }}</dd></div>
             <div><dt>Receivers</dt><dd>{{ selectedAircraft.receiverCount }}</dd></div>
-            <div class="detail-metric" :class="detailMetricClass('windSpeed')" @click="toggleHistoryMetrics('windSpeed')"><dt>Wind</dt><dd>{{ selectedAircraft.windSpeed == null ? "-" : `${formatSpeed({ gs: selectedAircraft.windSpeed })} from ${formatDegrees(selectedAircraft.windDirection)}` }}</dd></div>
+            <div class="detail-metric" :class="detailMetricClass('windSpeed')" @click="toggleHistoryMetrics('windSpeed')"><dt>Wind</dt><dd>{{ selectedAircraft.windSpeed == null ? "-" : `${formatSpeed({ gs: selectedAircraft.windSpeed })} @ ${formatDegrees(selectedAircraft.windDirection)}` }}</dd></div>
             <div class="detail-metric" :class="detailMetricClass(['oat', 'tat'])" @click="toggleHistoryMetrics(['oat', 'tat'])"><dt>Temp</dt><dd>{{ formatTemp(selectedAircraft.oat) }} / {{ formatTemp(selectedAircraft.tat) }}</dd></div>
-            <div><dt>Selected Alt</dt><dd>{{ formatNumberUnit(altitudeValue(selectedAircraft.navAltitudeMcp ?? selectedAircraft.navAltitudeFms)) }}</dd></div>
+            <div><dt>Selected Alt</dt><dd>{{ altText(selectedAircraft.navAltitudeMcp ?? selectedAircraft.navAltitudeFms) }}</dd></div>
             <div><dt>Accuracy</dt><dd>NACp {{ selectedAircraft.nacP ?? "-" }} · SIL {{ selectedAircraft.sil ?? "-" }} · RC {{ selectedAircraft.rc ?? "-" }}</dd></div>
           </dl>
 
@@ -1468,7 +1697,7 @@ onUnmounted(() => {
           <button
             v-for="item in filteredAircraft"
             :key="item.hex"
-            :class="['aircraft-row', { active: selectedHex === item.hex, hovered: hoveredHex === item.hex, 'is-alert': !!aircraftAlert(item) }]"
+            :class="['aircraft-row', { active: selectedHex === item.hex, hovered: hoveredHex === item.hex, 'is-alert': !!aircraftAlert(item), coasting: isCoasting(item) }]"
             @click="selectAircraft(item.hex, true)"
             @mouseenter="setHover(item.hex)"
             @mouseleave="clearHover(item.hex)"
@@ -1523,6 +1752,8 @@ onUnmounted(() => {
               <label><input v-model="settings.coverageBands" type="checkbox" :disabled="!settings.coverage" /> By altitude</label>
               <label><input v-model="settings.airfields" type="checkbox" /> Airfields</label>
               <label><input v-model="settings.airfieldsMinor" type="checkbox" :disabled="!settings.airfields" /> Minor fields</label>
+              <label><input v-model="settings.proximity" type="checkbox" /> Proximity alerts</label>
+              <label><input v-model="settings.coastDrop" type="checkbox" /> Coast / drop</label>
             </div>
           </section>
 
@@ -1535,6 +1766,7 @@ onUnmounted(() => {
             </div>
             <div class="toggle-row">
               <label><input v-model="settings.labels" type="checkbox" /> All labels</label>
+              <label><input v-model="settings.flightLevels" type="checkbox" /> Flight levels</label>
             </div>
           </section>
         </div>

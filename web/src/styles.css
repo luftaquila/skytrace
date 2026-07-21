@@ -147,6 +147,12 @@ select {
   height: 32px;
 }
 
+.icon-button.active {
+  border-color: var(--accent);
+  background: rgb(72 224 209 / 0.18);
+  color: var(--accent);
+}
+
 .panel {
   position: relative;
   display: flex;
@@ -306,10 +312,25 @@ select {
   gap: 10px;
 }
 
+.detail-title {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
 .detail h2 {
   margin: 0;
   font-size: 20px;
   color: var(--text);
+}
+
+.detail-age {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .detail p {
@@ -463,6 +484,11 @@ select {
   box-shadow: inset 3px 0 0 var(--danger);
 }
 
+/* Coasting (stale) list rows dim to read as "not currently updating". */
+.aircraft-row.coasting {
+  opacity: 0.68;
+}
+
 .alt-dot {
   align-self: center;
   width: 12px;
@@ -520,13 +546,22 @@ select {
   box-shadow: none;
 }
 
+/* The Leaflet marker box is 112x46 to leave room for the callsign label, but that box
+   extends well to the right of the actual glyph. If it stays interactive, hovering the
+   empty label area (or right of the aircraft) spuriously triggers the tooltip. Kill hit
+   testing on the box and re-enable it only on the glyph, so hover tracks the symbol.
+   The .leaflet-marker-icon qualifier outranks Leaflet's .leaflet-interactive rule. */
+.leaflet-marker-icon.aircraft-icon {
+  pointer-events: none;
+}
+
 .aircraft-wrap {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   transform: scale(var(--aircraft-scale));
   transform-origin: 18px 18px;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .aircraft-symbol {
@@ -535,6 +570,7 @@ select {
   place-items: center;
   width: 36px;
   height: 36px;
+  pointer-events: auto;
 }
 
 .aircraft-svg {
@@ -594,6 +630,94 @@ select {
 .aircraft-icon.selected .aircraft-body {
   stroke: var(--accent);
   stroke-width: 2.2;
+}
+
+/* IDENT (SPI): flash the glyph's outline amber, the way a target flares on an ATC scope
+   when the pilot squawks ident. Just a blinking border — no ring, no glow. */
+.aircraft-wrap.is-ident .aircraft-body {
+  stroke: var(--warning);
+  stroke-width: 2.4;
+  animation: ident-blink 1s step-end infinite;
+}
+
+@keyframes ident-blink {
+  0% { stroke: var(--warning); }
+  50% { stroke: #071012; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aircraft-wrap.is-ident .aircraft-body {
+    animation: none;
+  }
+}
+
+/* Proximity (STCA): the conflicting targets flash a red outline; the linking line and its
+   separation label are drawn separately as map layers. */
+.aircraft-wrap.is-conflict .aircraft-body {
+  stroke: var(--danger);
+  stroke-width: 2.6;
+  animation: conflict-blink 0.7s step-end infinite;
+}
+
+@keyframes conflict-blink {
+  0% { stroke: var(--danger); }
+  50% { stroke: #ffffff; }
+}
+
+/* Coasting (stale) targets desaturate to grey and fade, so a lost track reads at a glance
+   without vanishing outright. */
+/* Coasting (stale) targets keep their altitude colour but fade, so a lost track reads as
+   "not currently updating" without losing its altitude cue. */
+.aircraft-wrap.is-coasting {
+  opacity: 0.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aircraft-wrap.is-conflict .aircraft-body {
+    animation: none;
+  }
+}
+
+.conflict-label {
+  font: 700 10.5px/1.1 system-ui, -apple-system, sans-serif;
+  color: #fecdd3;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px #000, 0 0 3px #000;
+  transform: translate(8px, -50%);
+  pointer-events: none;
+}
+
+.measure-label {
+  font: 700 11px/1.1 system-ui, -apple-system, sans-serif;
+  color: var(--accent);
+  white-space: nowrap;
+  text-shadow: 0 1px 2px #000, 0 0 3px #000;
+  transform: translate(10px, -50%);
+  pointer-events: none;
+}
+
+.measure-hint {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid rgb(72 224 209 / 0.4);
+  border-radius: 999px;
+  background: rgb(13 16 17 / 0.9);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+
+.leaflet-container.measuring {
+  cursor: crosshair;
 }
 
 .airfield-icon {
@@ -1022,8 +1146,19 @@ select {
 }
 
 .aircraft-tt .tt-l1 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
   font-weight: 700;
   letter-spacing: 0.01em;
+}
+
+.aircraft-tt .tt-age {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .aircraft-tt .tt-l2 {
