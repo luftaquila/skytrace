@@ -62,7 +62,7 @@ export function createTactical3d({ container, deps }) {
   const map = new maplibregl.Map({
     container,
     attributionControl: false,
-    maxPitch: 85,
+    maxPitch: 72,
     pitch: 55,
     zoom: 6,
     center: [HOME.lon, HOME.lat],
@@ -100,13 +100,16 @@ export function createTactical3d({ container, deps }) {
   map.touchZoomRotate.enableRotation();
   const cv = map.getCanvas();
   let drag = null;
+  let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
   const onCtx = (e) => e.preventDefault();
   const onDown = (e) => {
-    if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
-    else if (e.button === 2) drag = { mode: "pan", x: e.clientX, y: e.clientY };
+    dragMoved = false;
+    if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
+    else if (e.button === 2) drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
   };
   const onMove = (e) => {
     if (!drag) return;
+    if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 3) dragMoved = true;
     if (drag.mode === "rotate") {
       map.setBearing(drag.bearing + (e.clientX - drag.x) * 0.35);
       map.setPitch(Math.max(0, Math.min(map.getMaxPitch(), drag.pitch - (e.clientY - drag.y) * 0.25)));
@@ -234,16 +237,17 @@ export function createTactical3d({ container, deps }) {
     const layers = [
       covMesh && new SimpleMeshLayer({
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 66], sizeScale: 1,
+        getColor: [255, 255, 255, 38], sizeScale: 1,
         material: { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] },
         // deck 9 / luma v9 pipeline params (WebGPU-style keys). The dome must not WRITE depth,
         // or it occludes every target drawn after it; it is still depth-tested against terrain.
         pickable: false, parameters: { depthWriteEnabled: false },
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
-      // Trail = a dark casing under a colour (altitude-gradient) line, exactly like the old view.
-      new PathLayer({ id: "trails-casing", data: trails, getPath: (d) => d.path, getColor: [2, 9, 11, 190], widthUnits: "pixels", getWidth: 4, widthMinPixels: 3.4, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
-      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.3, widthMinPixels: 2, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
+      // Tactical trail: a soft same-colour glow under a crisp bright altitude-gradient line
+      // (a radar-track look) — no dark outline.
+      new PathLayer({ id: "trails-glow", data: trails, getPath: (d) => d.path, getColor: (d) => [d.color[0], d.color[1], d.color[2], 55], widthUnits: "pixels", getWidth: 6, widthMinPixels: 5, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
+      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2, widthMinPixels: 1.6, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
       new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
       new ScenegraphLayer({
         id: "aircraft", data: list, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
@@ -359,7 +363,7 @@ export function createTactical3d({ container, deps }) {
     if (field && field !== hoverAf?.field) { hoverAf = { field }; afTooltipEl.innerHTML = deps.airfieldTooltip(field); afTooltipEl.style.display = ""; positionAfTooltip(); map.getCanvas().style.cursor = "pointer"; }
   });
   map.on("mouseleave", "airfield-dot", () => { hoverAf = null; afTooltipEl.style.display = "none"; if (!hoverHex) map.getCanvas().style.cursor = ""; });
-  map.on("click", () => { if (clickedObject) { clickedObject = false; return; } deps.onMapClick(); });
+  map.on("click", () => { if (dragMoved) { dragMoved = false; return; } if (clickedObject) { clickedObject = false; return; } deps.onMapClick(); });
 
   // --- Native GeoJSON sources -------------------------------------------------------------
   function airfieldsFC() {
@@ -435,7 +439,20 @@ export function createTactical3d({ container, deps }) {
   function resize() { map.resize(); }
   function setCameraFromMap(center, zoom) { map.jumpTo({ center: [center.lng ?? center.lon, center.lat], zoom: zoom - 1, pitch: 55 }); }
   function getCameraForMap() { const c = map.getCenter(); return { center: [c.lat, c.lng], zoom: Math.min(18, Math.max(3, Math.round(map.getZoom() + 1))) }; }
-  function panTo(lon, lat) { map.easeTo({ center: [lon, lat], duration: 700 }); }
+  // Centre the AIRCRAFT (at its altitude) on screen, not its ground point: project the target's
+  // elevated point and its ground point and pass the screen delta as the easeTo offset. Zoom/
+  // pitch are unchanged here so the delta stays valid through the move.
+  function panTo(lon, lat, altFt) {
+    let offset = [0, 0];
+    const z = (altFt != null ? altFt * FT_TO_M : 0) * exagg;
+    const vp = overlay._deck?.getViewports?.()[0];
+    if (vp && z > 0) {
+      const air = vp.project([lon, lat, z]);
+      const gnd = vp.project([lon, lat, 0]);
+      if (air && gnd) offset = [gnd[0] - air[0], gnd[1] - air[1]];
+    }
+    map.easeTo({ center: [lon, lat], offset, duration: 700 });
+  }
   function flyToView(lon, lat, zoom) { map.flyTo({ center: [lon, lat], zoom: zoom - 1, pitch: 55, duration: 900 }); }
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {

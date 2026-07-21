@@ -1518,7 +1518,7 @@ async function selectAircraft(hex, pan = false) {
   await nextTick();
   const item = selectedAircraft.value;
   if (pan && item?.lat != null && item?.lon != null) {
-    if (view3dActive.value) tac3d?.panTo(item.lon, item.lat);
+    if (view3dActive.value) tac3d?.panTo(item.lon, item.lat, item.altBaro ?? item.altGeom);
     else map.setView([item.lat, item.lon], Math.max(map.getZoom(), 8), { animate: true });
   }
 }
