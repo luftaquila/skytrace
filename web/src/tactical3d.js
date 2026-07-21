@@ -65,6 +65,7 @@ export function createTactical3d({ container, deps }) {
   const map = new maplibregl.Map({
     container,
     attributionControl: false,
+    bearingSnap: 0, // never auto-snap the bearing to north (camera moves were rotating it unbidden)
     maxPitch: 80,
     pitch: 55,
     zoom: 6,
@@ -246,22 +247,22 @@ export function createTactical3d({ container, deps }) {
     const layers = [
       covMesh && new SimpleMeshLayer({
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 38], sizeScale: 1,
+        getColor: [255, 255, 255, 30], sizeScale: 1,
         material: { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] },
         // deck 9 / luma v9 pipeline params (WebGPU-style keys). The dome must not WRITE depth,
         // or it occludes every target drawn after it; it is still depth-tested against terrain.
         pickable: false, parameters: { depthWriteEnabled: false },
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
-      // Tactical trail: a soft same-colour glow under a crisp bright altitude-gradient line
-      // (a radar-track look). billboard:true keeps the ribbon facing the camera, so it has the
-      // same thickness from the side as from above (a flat PathLayer ribbon vanishes edge-on).
-      new PathLayer({ id: "trails-glow", data: trails, getPath: (d) => d.path, getColor: (d) => [d.color[0], d.color[1], d.color[2], 55], widthUnits: "pixels", getWidth: 7, widthMinPixels: 6, billboard: true, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
-      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.4, widthMinPixels: 2, billboard: true, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
+      // Trail: a single crisp altitude-gradient line (no glow/casing). billboard:true keeps the
+      // ribbon facing the camera, so it has the same thickness from the side as from above.
+      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.8, widthMinPixels: 2.2, billboard: true, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
       new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
+      // Small dot at each stick's ground foot (the old view had these).
+      new ScatterplotLayer({ id: "ground-dots", data: sticks, getPosition: (d) => d.target, radiusUnits: "pixels", getRadius: 3, radiusMinPixels: 2.5, radiusMaxPixels: 4, filled: true, stroked: false, getFillColor: (d) => d.color, parameters: { depthCompare: "always" } }),
       new ScenegraphLayer({
         id: "aircraft", data: list, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255], sizeScale: 170, sizeMinPixels: 44, sizeMaxPixels: 62, _lighting: "pbr",
+        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255], sizeScale: 185, sizeMinPixels: 48, sizeMaxPixels: 68, _lighting: "pbr",
         pickable: false, parameters: { depthCompare: "always" },
       }),
       ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 150, sizeMinPixels: 38, sizeMaxPixels: 54, parameters: { depthCompare: "always" } }),
@@ -365,15 +366,25 @@ export function createTactical3d({ container, deps }) {
     if (hex !== hoverHex) { hoverHex = hex; deps.onHover(hex); map.getCanvas().style.cursor = hex ? "pointer" : ""; scheduleActive(hex); }
   }
   const airfieldByKey = new Map();
-  function positionAfTooltip() { if (!hoverAf) return; const p = map.project([hoverAf.field.lon, hoverAf.field.lat]); afTooltipEl.style.transform = `translate3d(${p.x.toFixed(1)}px, ${(p.y - 12).toFixed(1)}px, 0) translate(-50%, -100%)`; }
+  let afPinned = null; // airfield popover pinned by a click; stays until a click elsewhere
+  const AF_LAYERS = ["airfield-ring", "airfield-code"]; // hover/click on the icon OR its label
+  const activeAf = () => afPinned || hoverAf?.field || null;
+  function showAf(field) { afTooltipEl.innerHTML = deps.airfieldTooltip(field); afTooltipEl.style.display = ""; positionAfTooltip(); }
+  function positionAfTooltip() { const f = activeAf(); if (!f) return; const p = map.project([f.lon, f.lat]); afTooltipEl.style.transform = `translate3d(${p.x.toFixed(1)}px, ${(p.y - 12).toFixed(1)}px, 0) translate(-50%, -100%)`; }
   map.on("render", () => { positionAfTooltip(); syncBlocks(); });
-  map.on("mousemove", "airfield-ring", (e) => {
-    const key = e.features?.[0]?.properties?.key;
-    const field = key && airfieldByKey.get(key);
-    if (field && field !== hoverAf?.field) { hoverAf = { field }; afTooltipEl.innerHTML = deps.airfieldTooltip(field); afTooltipEl.style.display = ""; positionAfTooltip(); map.getCanvas().style.cursor = "pointer"; }
+  map.on("mousemove", AF_LAYERS, (e) => {
+    const field = airfieldByKey.get(e.features?.[0]?.properties?.key);
+    if (field && field !== hoverAf?.field) { hoverAf = { field }; map.getCanvas().style.cursor = "pointer"; if (!afPinned) showAf(field); }
   });
-  map.on("mouseleave", "airfield-ring", () => { hoverAf = null; afTooltipEl.style.display = "none"; if (!hoverHex) map.getCanvas().style.cursor = ""; });
-  map.on("click", () => { if (dragMoved) { dragMoved = false; return; } if (clickedObject) { clickedObject = false; return; } deps.onMapClick(); });
+  map.on("mouseleave", AF_LAYERS, () => { hoverAf = null; if (!hoverHex) map.getCanvas().style.cursor = ""; if (!afPinned) afTooltipEl.style.display = "none"; });
+  map.on("click", (e) => {
+    if (dragMoved) { dragMoved = false; return; }
+    if (clickedObject) { clickedObject = false; return; } // an aircraft (deck) handled this click
+    const field = airfieldByKey.get(map.queryRenderedFeatures(e.point, { layers: AF_LAYERS })[0]?.properties?.key);
+    if (field) { afPinned = field; showAf(field); return; } // clicking an airfield pins its popover
+    if (afPinned) { afPinned = null; afTooltipEl.style.display = "none"; } // click elsewhere clears it
+    deps.onMapClick();
+  });
 
   // --- Native GeoJSON sources -------------------------------------------------------------
   function airfieldsFC() {
@@ -469,15 +480,29 @@ export function createTactical3d({ container, deps }) {
   }
   // Called on select: snap quickly to the target and start auto-tracking it.
   function panTo(lon, lat, altFt) { followActive = true; centerOn(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * exagg, 350); }
-  // Keep the selected aircraft centred each data pass until the user drags the map.
+  // Keep the selected aircraft centred each data pass until the user drags the map. Uses an
+  // instant panBy (no easeTo) so overlapping animations can't make the view oscillate; skipped
+  // while a select/locate animation is still running.
   function followSelected() {
-    if (!followActive) return;
+    if (!followActive || map.isEasing()) return;
     const selHex = deps.getSelectedHex();
     if (!selHex) { followActive = false; return; }
     const d = lastList.find((x) => x.hex === selHex);
-    if (d) centerOn(d.lon, d.lat, d.z, 850);
+    const vp = overlay._deck?.getViewports?.()[0];
+    if (!d || !vp) return;
+    const air = vp.project([d.lon, d.lat, d.z]);
+    if (!air || !Number.isFinite(air[0])) return;
+    const cx = map.getCanvas().clientWidth / 2;
+    const cy = map.getCanvas().clientHeight / 2;
+    const dx = air[0] - cx, dy = air[1] - cy;
+    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) map.panBy([dx, dy], { animate: false });
   }
-  function flyToView(lon, lat, zoom) { map.flyTo({ center: [lon, lat], zoom: zoom + 1, pitch: 55, duration: 900 }); }
+  // Locate button: fly to the aircraft's ground point at the target zoom, then let follow re-centre
+  // it at altitude (offset depends on the target zoom, so hand off rather than compute it here).
+  function flyToView(lon, lat, zoom, altFt) {
+    map.flyTo({ center: [lon, lat], zoom: zoom + 1, pitch: 55, duration: 900 });
+    if (altFt != null) followActive = true;
+  }
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {
     disposed = true;

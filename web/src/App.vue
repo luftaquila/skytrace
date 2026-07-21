@@ -1556,7 +1556,7 @@ function recenterView() {
   const sel = selectedAircraft.value;
   const hasSel = sel && sel.lat != null && sel.lon != null;
   if (view3dActive.value) {
-    if (hasSel) tac3d?.flyToView(sel.lon, sel.lat, 9);
+    if (hasSel) tac3d?.flyToView(sel.lon, sel.lat, 9, sel.altBaro ?? sel.altGeom);
     else tac3d?.flyToView(HOME.lon, HOME.lat, 6);
   } else if (hasSel) {
     map.setView([sel.lat, sel.lon], Math.max(map.getZoom(), 9), { animate: true });
