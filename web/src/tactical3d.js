@@ -195,8 +195,8 @@ export function createTactical3d({ container, deps }) {
 
   // --- Lights (aircraft meshes are lit so their 3D form conveys attitude; the terrain
   // shader is unlit and ignores these) ---------------------------------------------------
-  scene.add(new THREE.HemisphereLight(0x9fd8ff, 0x0a1512, 1.0));
-  const keyLight = new THREE.DirectionalLight(0xffffff, 1.25);
+  scene.add(new THREE.HemisphereLight(0x9fd8ff, 0x0a1512, 0.62));
+  const keyLight = new THREE.DirectionalLight(0xffffff, 0.85);
   keyLight.position.set(-0.45, 1, 0.3);
   scene.add(keyLight);
 
@@ -205,49 +205,68 @@ export function createTactical3d({ container, deps }) {
   const AMBER = new THREE.Color(0xf59e0b);
   const RED = new THREE.Color(0xfb7185);
 
-  // A thin swept surface from four corners, used for wings/stabs/fin so the planform reads
-  // as a real jet. Indexed (like the primitive geometries) so mergeGeometries accepts it.
-  function panel(a, b, c, d) {
+  // A solid thin airfoil slab from four XZ corners (given a mid-plane y and half-thickness),
+  // so wings/stabs catch the light and read as real surfaces (not paper). Indexed, with a
+  // uv attribute, so mergeGeometries accepts it alongside the primitive geometries.
+  function slab(corners, y, t) {
+    const pos = [];
+    for (const [x, z] of corners) pos.push(x, y + t, z);
+    for (const [x, z] of corners) pos.push(x, y - t, z);
     const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array([...a, ...b, ...c, ...d]), 3));
-    g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(8), 2));
-    g.setIndex([0, 1, 2, 0, 2, 3]);
+    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pos), 3));
+    g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(16), 2));
+    g.setIndex([
+      0, 1, 2, 0, 2, 3, // top
+      4, 6, 5, 4, 7, 6, // bottom
+      0, 4, 1, 1, 4, 5, 1, 5, 2, 2, 5, 6, 2, 6, 3, 3, 6, 7, 3, 7, 0, 0, 7, 4, // edges
+    ]);
     g.computeVertexNormals();
     return g;
   }
-  const mirrorX = (g) => { const c = g.clone(); c.scale(-1, 1, 1); return c; };
+  function vfin(corners, x, t) {
+    // Same as slab but in a vertical (x=const) plane: corners are [z, y].
+    const pos = [];
+    for (const [z, yy] of corners) pos.push(x + t, yy, z);
+    for (const [z, yy] of corners) pos.push(x - t, yy, z);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pos), 3));
+    g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(16), 2));
+    g.setIndex([0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 1, 1, 4, 5, 1, 5, 2, 2, 5, 6, 2, 6, 3, 3, 6, 7, 3, 7, 0, 0, 7, 4]);
+    g.computeVertexNormals();
+    return g;
+  }
+  const mirrorX = (g) => { const c = g.clone(); c.scale(-1, 1, 1); c.computeVertexNormals(); return c; };
 
   function buildPlaneGeo() {
-    const fus = new THREE.CylinderGeometry(0.05, 0.055, 0.62, 18); fus.rotateX(Math.PI / 2); fus.translate(0, 0, 0.02);
-    const nose = new THREE.ConeGeometry(0.05, 0.32, 18); nose.rotateX(-Math.PI / 2); nose.translate(0, 0, -0.45);
-    const tail = new THREE.ConeGeometry(0.05, 0.16, 18); tail.rotateX(Math.PI / 2); tail.translate(0, 0, 0.41);
-    // Swept main wings (root near fuselage, tip aft + outboard).
-    const wing = panel([0.045, 0, -0.04], [0.045, 0, 0.15], [0.62, 0, 0.25], [0.62, 0, 0.18]);
-    // Swept tailplanes near the tail.
-    const stab = panel([0.03, 0, 0.28], [0.03, 0, 0.40], [0.24, 0, 0.42], [0.24, 0, 0.35]);
-    // Vertical fin (in the x=0 plane, sweeping up and aft).
-    const fin = panel([0, 0, 0.28], [0, 0, 0.44], [0, 0.22, 0.44], [0, 0.20, 0.36]);
-    return mergeGeometries([fus, nose, tail, wing, mirrorX(wing), stab, mirrorX(stab), fin]);
+    // Smooth rounded fuselage (capsule) with a slight nose taper, swept solid wings, engine
+    // nacelles under the wings, swept tailplanes and a swept vertical fin.
+    const fus = new THREE.CapsuleGeometry(0.052, 0.62, 8, 20); fus.rotateX(Math.PI / 2); fus.translate(0, 0, 0.03);
+    const nose = new THREE.ConeGeometry(0.052, 0.2, 20); nose.rotateX(-Math.PI / 2); nose.translate(0, 0, -0.42);
+    const wing = slab([[0.05, -0.05], [0.66, 0.2], [0.66, 0.27], [0.05, 0.12]], -0.01, 0.012);
+    const stab = slab([[0.03, 0.3], [0.26, 0.42], [0.26, 0.47], [0.03, 0.4]], 0.02, 0.009);
+    const fin = vfin([[0.3, 0], [0.46, 0], [0.47, 0.22], [0.36, 0.22]], 0, 0.01);
+    const nac = new THREE.CylinderGeometry(0.032, 0.028, 0.2, 14); nac.rotateX(Math.PI / 2); nac.translate(0.26, -0.055, 0.12);
+    return mergeGeometries([fus, nose, wing, mirrorX(wing), stab, mirrorX(stab), fin, nac, mirrorX(nac)]);
   }
   function buildHeliGeo() {
-    const body = new THREE.SphereGeometry(0.19, 16, 12); body.scale(1, 0.92, 1.7);
-    const boom = new THREE.CylinderGeometry(0.03, 0.02, 0.5, 10); boom.rotateX(Math.PI / 2); boom.translate(0, 0.04, 0.5);
-    const fin = panel([0, 0.02, 0.68], [0, 0.02, 0.78], [0, 0.18, 0.78], [0, 0.16, 0.7]);
-    const rotor = new THREE.CylinderGeometry(0.66, 0.66, 0.01, 28); rotor.translate(0, 0.19, -0.02);
-    const hub = new THREE.CylinderGeometry(0.03, 0.03, 0.08, 8); hub.translate(0, 0.16, -0.02);
-    return mergeGeometries([body, boom, fin, rotor, hub]);
+    const body = new THREE.CapsuleGeometry(0.11, 0.28, 8, 16); body.rotateX(Math.PI / 2); body.scale(1, 0.95, 1);
+    const boom = new THREE.CylinderGeometry(0.028, 0.018, 0.5, 12); boom.rotateX(Math.PI / 2); boom.translate(0, 0.05, 0.52);
+    const fin = vfin([[0.66, 0.02], [0.78, 0.02], [0.78, 0.2], [0.7, 0.16]], 0, 0.01);
+    const mast = new THREE.CylinderGeometry(0.014, 0.014, 0.08, 8); mast.translate(0, 0.16, -0.02);
+    const rotor = new THREE.CylinderGeometry(0.62, 0.62, 0.008, 32); rotor.translate(0, 0.2, -0.02);
+    return mergeGeometries([body, boom, fin, mast, rotor]);
   }
   function buildGroundGeo() {
-    const hull = new THREE.BoxGeometry(0.34, 0.14, 0.58); hull.translate(0, 0, 0);
-    const top = new THREE.BoxGeometry(0.26, 0.13, 0.28); top.translate(0, 0.13, 0.02);
+    const hull = new THREE.BoxGeometry(0.32, 0.13, 0.56);
+    const top = new THREE.BoxGeometry(0.24, 0.12, 0.26); top.translate(0, 0.12, 0.03);
     return mergeGeometries([hull, top]);
   }
   const GEO = { plane: buildPlaneGeo(), helicopter: buildHeliGeo(), ground: buildGroundGeo() };
-  const GEO_LEN = { plane: 1.2, helicopter: 1.25, ground: 0.58 }; // nose-to-tail units, for screen scaling
-  const aircraftMatBase = new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.16, side: THREE.DoubleSide });
+  const GEO_LEN = { plane: 1.1, helicopter: 1.1, ground: 0.56 }; // nose-to-tail units, for screen scaling
+  const aircraftMatBase = new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0.1, side: THREE.DoubleSide });
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
-  const TARGET_PX = 34; // apparent aircraft length in screen px, held constant across zoom
+  const TARGET_PX = 42; // apparent aircraft length in screen px, held constant across zoom
 
   // --- Terrain / elevation state ---------------------------------------------------------
   let terrainMesh = null;
@@ -497,8 +516,8 @@ export function createTactical3d({ container, deps }) {
   let trailGroup = null;
   let conflictLine = null;
   const conflictLabels = []; // {x, y, z, el}
-  const trailMat = new LineMaterial({ vertexColors: true, worldUnits: false, linewidth: 3.6, transparent: true, depthWrite: false });
-  const trailCasingMat = new LineMaterial({ color: 0x02090b, worldUnits: false, linewidth: 6.5, transparent: true, opacity: 0.75, depthWrite: false });
+  const trailMat = new LineMaterial({ vertexColors: true, worldUnits: false, linewidth: 2.1, transparent: true, depthWrite: false });
+  const trailCasingMat = new LineMaterial({ color: 0x02090b, worldUnits: false, linewidth: 3.6, transparent: true, opacity: 0.7, depthWrite: false });
   function disposeGroup(group) {
     if (!group) return;
     group.traverse((o) => { o.geometry?.dispose?.(); if (o.material && o.material !== trailMat && o.material !== trailCasingMat) o.material.dispose?.(); });
@@ -601,8 +620,10 @@ export function createTactical3d({ container, deps }) {
     if (airborne) {
       const vs = item.baroRate ?? item.geomRate; // ft/min
       const gsMps = (item.gs ?? 0) * 0.514444;
-      if (vs != null && gsMps > 5) phi = Math.atan2(vs * 0.00508, gsMps);
-      phi = Math.max(-0.5, Math.min(0.5, phi)); // clamp to ±~29° so steep VS stays readable
+      // Real climb angles are shallow (~3-6°); exaggerate so the nose-up/down attitude is
+      // actually visible on a small icon, then clamp so steep rates stay readable.
+      if (vs != null && gsMps > 5) phi = Math.atan2(vs * 0.00508, gsMps) * 2.4;
+      phi = Math.max(-0.6, Math.min(0.6, phi));
     }
     const bank = airborne && Number.isFinite(item.roll) ? Math.max(-1.1, Math.min(1.1, (item.roll * Math.PI) / 180)) : 0;
     target.mesh.rotation.set(phi, -th, -bank, "YXZ");
@@ -649,14 +670,29 @@ export function createTactical3d({ container, deps }) {
   // length, width and heading (OurAirports). Only visible when zoomed toward an airport. --
   let runwayGroup = null;
   const runwayMat = new THREE.MeshBasicMaterial({
-    color: 0x9aa6b2, transparent: true, opacity: 0.92, side: THREE.DoubleSide, depthWrite: false,
-    polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
+    color: 0x262b31, transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
   });
-  const runwayLineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
+  const runwayMarkMat = new THREE.MeshBasicMaterial({
+    color: 0xe8edf2, transparent: true, opacity: 0.92, side: THREE.DoubleSide, depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5,
+  });
+  // Dashed centreline as a single dashed line.
+  const runwayCLMat = new THREE.LineDashedMaterial({ color: 0xe8edf2, transparent: true, opacity: 0.85, dashSize: 120, gapSize: 120 });
+  function quad(arr, y, ax, az, bx, bz, cx2, cz2, dx2, dz2) {
+    const base = arr.length / 3;
+    arr.push(ax, y, az, bx, y, bz, cx2, y, cz2, dx2, y, dz2);
+    return [base, base + 1, base + 2, base, base + 2, base + 3];
+  }
   function buildRunways() {
     if (runwayGroup) { runwayGroup.traverse((o) => o.geometry?.dispose?.()); scene.remove(runwayGroup); runwayGroup = null; }
     if (!deps.getSettings().airfields) return;
     const group = new THREE.Group();
+    const pave = [];
+    const paveIdx = [];
+    const mark = [];
+    const markIdx = [];
+    const clPos = [];
     for (const rwy of RUNWAYS) {
       const ax = toLocalX(rwy.le[0]);
       const az = toLocalZ(rwy.le[1]);
@@ -671,23 +707,41 @@ export function createTactical3d({ container, deps }) {
       const pz = dx;
       const hw = (rwy.width * FT_TO_M) / 2;
       const y = sampleElevation((rwy.le[0] + rwy.he[0]) / 2, (rwy.le[1] + rwy.he[1]) / 2) * exagg + 3;
-      const pos = new Float32Array([
-        ax + px * hw, y, az + pz * hw,
-        ax - px * hw, y, az - pz * hw,
-        bx - px * hw, y, bz - pz * hw,
-        bx + px * hw, y, bz + pz * hw,
-      ]);
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-      geo.setIndex([0, 1, 2, 0, 2, 3]);
-      const mesh = new THREE.Mesh(geo, runwayMat);
-      mesh.frustumCulled = false;
-      group.add(mesh);
-      const cl = new THREE.BufferGeometry();
-      cl.setAttribute("position", new THREE.BufferAttribute(new Float32Array([ax, y + 0.5, az, bx, y + 0.5, bz]), 3));
-      const line = new THREE.Line(cl, runwayLineMat);
-      line.frustumCulled = false;
-      group.add(line);
+      // Asphalt.
+      paveIdx.push(...quad(pave, y, ax + px * hw, az + pz * hw, ax - px * hw, az - pz * hw, bx - px * hw, bz - pz * hw, bx + px * hw, bz + pz * hw));
+      // White edge stripes (thin quads down each long side) + threshold bars at both ends.
+      const ew = Math.max(2, hw * 0.09);
+      for (const s of [1, -1]) {
+        const ox = px * s * (hw - ew / 2);
+        const oz = pz * s * (hw - ew / 2);
+        markIdx.push(...quad(mark, y, ax + ox + px * ew / 2, az + oz + pz * ew / 2, ax + ox - px * ew / 2, az + oz - pz * ew / 2, bx + ox - px * ew / 2, bz + oz - pz * ew / 2, bx + ox + px * ew / 2, bz + oz + pz * ew / 2));
+      }
+      const bar = Math.min(len * 0.06, 180);
+      for (const end of [0, 1]) {
+        const ex = end ? bx : ax;
+        const ez = end ? bz : az;
+        const sx = end ? -dx : dx;
+        const sz = end ? -dz : dz;
+        markIdx.push(...quad(mark, y, ex + px * hw, ez + pz * hw, ex - px * hw, ez - pz * hw, ex - px * hw + sx * bar, ez - pz * hw + sz * bar, ex + px * hw + sx * bar, ez + pz * hw + sz * bar));
+      }
+      clPos.push(ax + dx * bar, y + 0.5, az + dz * bar, bx - dx * bar, y + 0.5, bz - dz * bar);
+    }
+    if (paveIdx.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pave), 3));
+      g.setIndex(paveIdx);
+      const m = new THREE.Mesh(g, runwayMat); m.frustumCulled = false; group.add(m);
+    }
+    if (markIdx.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mark), 3));
+      g.setIndex(markIdx);
+      const m = new THREE.Mesh(g, runwayMarkMat); m.frustumCulled = false; group.add(m);
+    }
+    for (let i = 0; i < clPos.length; i += 6) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(clPos.slice(i, i + 6)), 3));
+      const line = new THREE.Line(g, runwayCLMat); line.computeLineDistances(); line.frustumCulled = false; group.add(line);
     }
     runwayGroup = group;
     scene.add(group);
@@ -896,7 +950,7 @@ export function createTactical3d({ container, deps }) {
   // surface so the reachable airspace is a solid translucent volume, not flat layers.
   // Rebuilt only on coverage/exaggeration change via the exported drawCoverage().
   let coverageGroup = null;
-  const COV_AZ = 72;
+  const COV_AZ = 96;
   function bandMidFeet(band) {
     const max = band.maxAltitude ?? band.minAltitude + 10000;
     return (band.minAltitude + max) / 2;
@@ -986,20 +1040,20 @@ export function createTactical3d({ container, deps }) {
     if (!areas.length) return;
     const group = new THREE.Group();
     for (const area of areas) {
-      const bands = (area.bands || []).filter((b) => b.polygon?.coordinates?.[0]?.length >= 3);
-      const overall = area.polygon?.coordinates?.[0];
-      const levels = [];
-      if (overall?.length >= 3) levels.push({ feet: 0, ring: overall.map(([lon, lat]) => [toLocalX(lon), toLocalZ(lat)]) });
-      for (const b of bands.sort((x, y) => bandMidFeet(x) - bandMidFeet(y))) {
-        levels.push({ feet: b.maxAltitude ?? bandMidFeet(b), ring: b.polygon.coordinates[0].map(([lon, lat]) => [toLocalX(lon), toLocalZ(lat)]) });
-      }
-      if (levels.length < 2) continue;
-      let cx = 0;
-      let cz = 0;
-      const base = levels[0].ring;
-      for (const [x, z] of base) { cx += x; cz += z; }
-      cx /= base.length; cz /= base.length;
-      buildDome(group, levels, cx, cz);
+      const bands = (area.bands || [])
+        .filter((b) => b.polygon?.coordinates?.[0]?.length >= 3)
+        .sort((x, y) => bandMidFeet(x) - bandMidFeet(y));
+      if (!bands.length) continue;
+      // Each band becomes a horizontal ring at its mid altitude; a ground copy of the
+      // lowest band closes the base. Rays are cast from the RECEIVER (scene origin), which
+      // every reception envelope is star-shaped about, so consecutive rings sample the same
+      // azimuths about the same centre and the skin between them stays smooth (no twist).
+      const levels = bands.map((b) => ({
+        feet: bandMidFeet(b),
+        ring: b.polygon.coordinates[0].map(([lon, lat]) => [toLocalX(lon), toLocalZ(lat)]),
+      }));
+      levels.unshift({ feet: 0, ring: levels[0].ring });
+      buildDome(group, levels, 0, 0);
     }
     coverageGroup = group;
     scene.add(group);
@@ -1284,7 +1338,8 @@ export function createTactical3d({ container, deps }) {
     for (const geo of Object.values(GEO)) geo.dispose();
     aircraftMatBase.dispose();
     runwayMat.dispose();
-    runwayLineMat.dispose();
+    runwayMarkMat.dispose();
+    runwayCLMat.dispose();
     trailMat.dispose();
     trailCasingMat.dispose();
     satTexture?.dispose();

@@ -45,7 +45,7 @@ const DEFAULT_SETTINGS = {
   proximity: true,
   view3d: false,
   terrainExaggeration: 2,
-  terrainSatellite: false,
+  terrainSatellite: true,
 };
 
 const baseLayers = {
@@ -1013,12 +1013,14 @@ function drawAirfields() {
   if (settings.value.airfields) {
     // Real runways to scale (position/length/heading/width) — visible when zoomed in.
     for (const rwy of RUNWAYS) {
-      L.polygon(runwayCorners(rwy), {
-        color: "#c8d0d8", weight: 1, opacity: 0.7, fillColor: "#9aa6b2", fillOpacity: 0.5,
-        interactive: false, lineJoin: "round",
+      const c = runwayCorners(rwy);
+      // Asphalt with a crisp white edge, plus a dashed centreline — reads as a real runway.
+      L.polygon(c, {
+        color: "#e8edf2", weight: 1, opacity: 0.85, fillColor: "#262b31", fillOpacity: 0.92,
+        interactive: false, lineJoin: "miter",
       }).addTo(airfieldLayer);
       L.polyline([[rwy.le[1], rwy.le[0]], [rwy.he[1], rwy.he[0]]], {
-        color: "#ffffff", weight: 1, opacity: 0.7, dashArray: "5 5", interactive: false,
+        color: "#e8edf2", weight: 1, opacity: 0.8, dashArray: "6 6", interactive: false,
       }).addTo(airfieldLayer);
     }
     for (const field of AIRFIELDS) {
@@ -1267,7 +1269,7 @@ function drawTrackInto(rawPts) {
   for (const segPts of segments) {
     if (segPts.length < 2) continue;
     L.polyline(segPts.map((point) => [point.lat, point.lon]), {
-      color: "#071012", opacity: 0.6, weight: 8, interactive: false, lineCap: "round", lineJoin: "round",
+      color: "#071012", opacity: 0.55, weight: 5, interactive: false, lineCap: "round", lineJoin: "round",
     }).addTo(trackLayer);
 
     let run = [[segPts[0].lat, segPts[0].lon]];
@@ -1275,7 +1277,7 @@ function drawTrackInto(rawPts) {
     const flush = () => {
       if (run.length >= 2) {
         L.polyline(run, {
-          color: runColor, opacity: 0.98, weight: 4.5, interactive: false, lineCap: "round", lineJoin: "round",
+          color: runColor, opacity: 0.95, weight: 3, interactive: false, lineCap: "round", lineJoin: "round",
         }).addTo(trackLayer);
       }
     };
