@@ -215,7 +215,7 @@ export function createTactical3d({ container, deps }) {
     const layers = [
       covMesh && new SimpleMeshLayer({
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 92], sizeScale: 1,
+        getColor: [255, 255, 255, 66], sizeScale: 1,
         material: { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] },
         pickable: false, parameters: { depthTest: true, depthMask: false },
       }),
@@ -224,9 +224,9 @@ export function createTactical3d({ container, deps }) {
       new ScenegraphLayer({
         id: "aircraft", data: list, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
         getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 140 : 255], sizeScale: 220, sizeMinPixels: 26, sizeMaxPixels: 90, _lighting: "pbr",
-        pickable: true, onClick: onAircraftClick, onHover: onAircraftHover, parameters: { depthTest: true },
+        pickable: true, onClick: onAircraftClick, onHover: onAircraftHover, parameters: { depthTest: false },
       }),
-      ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 200, sizeMinPixels: 22, sizeMaxPixels: 80, parameters: { depthTest: true } }),
+      ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 200, sizeMinPixels: 22, sizeMaxPixels: 80, parameters: { depthTest: false } }),
     ].filter(Boolean);
     overlay.setProps({ layers });
     syncBlocks();
