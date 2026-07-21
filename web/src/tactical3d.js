@@ -10,7 +10,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { ScenegraphLayer } from "@deck.gl/mesh-layers";
-import { PathLayer, LineLayer, TextLayer, IconLayer, ScatterplotLayer } from "@deck.gl/layers";
+import { PathLayer, LineLayer, TextLayer, IconLayer } from "@deck.gl/layers";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 import { RUNWAYS } from "./runways.js";
 
@@ -53,7 +53,9 @@ export function createTactical3d({ container, deps }) {
   let running = false;
   let ready = false;
 
-  // --- MapLibre map: globe, satellite raster, raster-DEM terrain, sky --------------------
+  // --- MapLibre map: mercator (NOT globe — deck.gl overlay only aligns in mercator),
+  // satellite raster + raster-DEM terrain + sky, plus tactical range rings / compass /
+  // airfields as native layers so they drape on the terrain and match exactly ------------
   const map = new maplibregl.Map({
     container,
     attributionControl: false,
@@ -63,19 +65,23 @@ export function createTactical3d({ container, deps }) {
     center: [HOME.lon, HOME.lat],
     style: {
       version: 8,
-      projection: { type: "globe" },
+      glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
       sources: {
         satellite: { type: "raster", tiles: SAT_TILES, tileSize: 256, maxzoom: 19, attribution: "Esri, Maxar, Earthstar Geographics" },
         dem: { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 15 },
-        coverage: { type: "geojson", data: EMPTY_FC },
         runways: { type: "geojson", data: EMPTY_FC },
+        airfields: { type: "geojson", data: EMPTY_FC },
+        rings: { type: "geojson", data: EMPTY_FC },
       },
       layers: [
         { id: "bg", type: "background", paint: { "background-color": "#050a0c" } },
-        { id: "sat", type: "raster", source: "satellite" },
-        { id: "coverage-vol", type: "fill-extrusion", source: "coverage", paint: { "fill-extrusion-color": ["get", "color"], "fill-extrusion-base": ["get", "base"], "fill-extrusion-height": ["get", "height"], "fill-extrusion-opacity": 0.3 } },
+        { id: "sat", type: "raster", source: "satellite", paint: { "raster-saturation": -0.25, "raster-brightness-max": 0.92 } },
+        { id: "rings-line", type: "line", source: "rings", filter: ["==", ["get", "kind"], "ring"], paint: { "line-color": "#48e0d1", "line-opacity": 0.45, "line-width": 1.3, "line-blur": 1.2 } },
         { id: "runway-fill", type: "fill", source: "runways", paint: { "fill-color": "#262b31", "fill-opacity": 0.95 } },
         { id: "runway-line", type: "line", source: "runways", paint: { "line-color": "#e8edf2", "line-width": 1, "line-opacity": 0.85 } },
+        { id: "airfield-dot", type: "circle", source: "airfields", paint: { "circle-radius": ["get", "r"], "circle-color": ["get", "color"], "circle-stroke-color": "#071012", "circle-stroke-width": 1, "circle-opacity": 0.95 } },
+        { id: "airfield-code", type: "symbol", source: "airfields", filter: ["==", ["get", "minor"], false], layout: { "text-field": ["get", "code"], "text-font": ["Open Sans Regular"], "text-size": 11, "text-offset": [0.9, 0], "text-anchor": "left", "text-allow-overlap": false }, paint: { "text-color": "#cfe9e4", "text-halo-color": "#071012", "text-halo-width": 1.4 } },
+        { id: "ring-label", type: "symbol", source: "rings", filter: ["in", ["get", "kind"], ["literal", ["ringlabel", "compass"]]], layout: { "text-field": ["get", "label"], "text-font": ["Open Sans Regular"], "text-size": ["case", ["==", ["get", "kind"], "compass"], 15, 11], "text-allow-overlap": true }, paint: { "text-color": "#7fe6da", "text-opacity": ["case", ["==", ["get", "kind"], "compass"], 0.85, 0.5], "text-halo-color": "#050a0c", "text-halo-width": 1.2 } },
       ],
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0d1618", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6 },
     },
@@ -199,13 +205,24 @@ export function createTactical3d({ container, deps }) {
       orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0],
     }] : [];
 
-    // Airfields.
-    const settings = deps.getSettings();
-    const afs = settings.airfields
-      ? AIRFIELDS.filter((f) => !isMinorAirfield(f) || settings.airfieldsMinor)
-      : [];
+    // Coverage as a clean altitude-coloured wireframe dome (ring per layer), not a
+    // translucent extrusion (which stacked into an ugly patchwork up close).
+    const covPaths = [];
+    if (deps.getSettings().coverage) {
+      for (const area of deps.getCoverage()?.areas || []) {
+        for (const layer of area.volume?.layers || []) {
+          if (!layer.ring || layer.ring.length < 4) continue;
+          const c = parseRgb(deps.altitudeColorFeet(layer.midAltitude));
+          covPaths.push({ path: layer.ring.map(([lon, lat]) => [lon, lat, layer.midAltitude * FT_TO_M * exagg]), color: [c.r, c.g, c.b, 150] });
+        }
+      }
+    }
 
     const layers = [
+      covPaths.length && new PathLayer({
+        id: "coverage", data: covPaths, getPath: (d) => d.path, getColor: (d) => d.color,
+        widthUnits: "pixels", getWidth: 1.4, widthMinPixels: 1, jointRounded: true, parameters: { depthTest: false },
+      }),
       new PathLayer({
         id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color,
         widthUnits: "pixels", getWidth: 3, widthMinPixels: 2, jointRounded: true, capRounded: true, parameters: { depthTest: false },
@@ -213,19 +230,6 @@ export function createTactical3d({ container, deps }) {
       new LineLayer({
         id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target,
         getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1,
-      }),
-      afs.length && new ScatterplotLayer({
-        id: "airfields", data: afs, getPosition: (f) => [f.lon, f.lat, 0],
-        getRadius: (f) => (isMinorAirfield(f) ? 4 : f.kind === "large" ? 8 : 6), radiusUnits: "pixels", radiusMinPixels: 3,
-        getFillColor: (f) => { const c = parseRgb(isMinorAirfield(f) ? "#8b98a5" : f.kind === "large" ? "#ffd23f" : f.kind === "medium" ? "#ff9f45" : "#c3ccd6"); return [c.r, c.g, c.b, 235]; },
-        stroked: true, getLineColor: [7, 16, 18, 255], lineWidthMinPixels: 1,
-        pickable: true, onHover: onAfHover, parameters: { depthTest: false },
-      }),
-      afs.length && new TextLayer({
-        id: "airfield-codes", data: afs.filter((f) => !isMinorAirfield(f)), getPosition: (f) => [f.lon, f.lat, 0],
-        getText: (f) => f.code, getSize: 11, getColor: [207, 233, 228, 255], getPixelOffset: [10, 0],
-        getTextAnchor: "start", fontFamily: "ui-monospace, monospace", fontWeight: 700,
-        background: true, getBackgroundColor: [13, 16, 17, 190], backgroundPadding: [3, 2], parameters: { depthTest: false },
       }),
       new ScenegraphLayer({
         id: "aircraft", data: list, scenegraph: MODEL_URI,
@@ -266,40 +270,29 @@ export function createTactical3d({ container, deps }) {
     const hex = info.object?.hex || null;
     if (hex !== hoverHex) { hoverHex = hex; deps.onHover(hex); map.getCanvas().style.cursor = hex ? "pointer" : ""; buildLayers(); }
   }
-  function onAfHover(info) {
-    const f = info.object || null;
-    if (f !== hoverAf?.field) {
-      hoverAf = f ? { field: f } : null;
-      if (f) { afTooltipEl.innerHTML = deps.airfieldTooltip(f); afTooltipEl.style.display = ""; positionAfTooltip(); }
-      else afTooltipEl.style.display = "none";
-      map.getCanvas().style.cursor = f ? "pointer" : (hoverHex ? "pointer" : "");
-    }
-  }
+  // Airfield hover: query the native circle layer (terrain-aligned) and show the popover.
+  const airfieldByKey = new Map();
   function positionAfTooltip() {
     if (!hoverAf) return;
     const p = map.project([hoverAf.field.lon, hoverAf.field.lat]);
     afTooltipEl.style.transform = `translate3d(${p.x.toFixed(1)}px, ${(p.y - 12).toFixed(1)}px, 0) translate(-50%, -100%)`;
   }
   map.on("render", positionAfTooltip);
+  map.on("mousemove", "airfield-dot", (e) => {
+    const key = e.features?.[0]?.properties?.key;
+    const field = key && airfieldByKey.get(key);
+    if (field && field !== hoverAf?.field) {
+      hoverAf = { field };
+      afTooltipEl.innerHTML = deps.airfieldTooltip(field);
+      afTooltipEl.style.display = "";
+      positionAfTooltip();
+      map.getCanvas().style.cursor = "pointer";
+    }
+  });
+  map.on("mouseleave", "airfield-dot", () => { hoverAf = null; afTooltipEl.style.display = "none"; if (!hoverHex) map.getCanvas().style.cursor = ""; });
   map.on("click", () => { if (clickedObject) { clickedObject = false; return; } deps.onMapClick(); });
 
   // --- MapLibre native sources (terrain-aware) --------------------------------------------
-  function coverageFC() {
-    const features = [];
-    for (const area of deps.getCoverage()?.areas || []) {
-      for (const layer of area.volume?.layers || []) {
-        const ring = layer.ring;
-        if (!ring || ring.length < 4) continue;
-        const mid = layer.midAltitude;
-        features.push({
-          type: "Feature",
-          properties: { base: Math.max(0, (mid - (area.volume.stepFt || 3000) / 2)) * FT_TO_M * exagg, height: (mid + (area.volume.stepFt || 3000) / 2) * FT_TO_M * exagg, color: rgbHex(parseRgb(deps.altitudeColorFeet(mid))) },
-          geometry: { type: "Polygon", coordinates: [ring] },
-        });
-      }
-    }
-    return { type: "FeatureCollection", features };
-  }
   function runwayFC() {
     if (!deps.getSettings().airfields) return EMPTY_FC;
     const features = RUNWAYS.map((rwy) => {
@@ -322,14 +315,49 @@ export function createTactical3d({ container, deps }) {
     });
     return { type: "FeatureCollection", features };
   }
+  function airfieldsFC() {
+    airfieldByKey.clear();
+    const settings = deps.getSettings();
+    if (!settings.airfields) return EMPTY_FC;
+    const features = [];
+    for (const f of AIRFIELDS) {
+      const minor = isMinorAirfield(f);
+      if (minor && !settings.airfieldsMinor) continue;
+      const key = f.icao || f.code;
+      airfieldByKey.set(key, f);
+      const color = minor ? "#8b98a5" : f.kind === "large" ? "#ffd23f" : f.kind === "medium" ? "#ff9f45" : "#c3ccd6";
+      features.push({ type: "Feature", properties: { key, code: f.code, minor, r: minor ? 4 : f.kind === "large" ? 6 : 5, color }, geometry: { type: "Point", coordinates: [f.lon, f.lat] } });
+    }
+    return { type: "FeatureCollection", features };
+  }
+  // Tactical range rings (100/200/300 km) + km labels + N/E/S/W compass, around the receiver.
+  function ringsFC() {
+    const cosLat = Math.cos((HOME.lat * Math.PI) / 180) || 1;
+    const feats = [];
+    for (const km of [100, 200, 300]) {
+      const coords = [];
+      for (let i = 0; i <= 72; i += 1) {
+        const a = (i / 72) * Math.PI * 2;
+        coords.push([HOME.lon + (km / 111.32 / cosLat) * Math.sin(a), HOME.lat + (km / 111.32) * Math.cos(a)]);
+      }
+      feats.push({ type: "Feature", properties: { kind: "ring" }, geometry: { type: "LineString", coordinates: coords } });
+      feats.push({ type: "Feature", properties: { kind: "ringlabel", label: `${km} km` }, geometry: { type: "Point", coordinates: [HOME.lon + (km / 111.32 / cosLat) * Math.SQRT1_2, HOME.lat + (km / 111.32) * Math.SQRT1_2] } });
+    }
+    const cr = 340;
+    for (const [label, dx, dy] of [["N", 0, 1], ["E", 1, 0], ["S", 0, -1], ["W", -1, 0]]) {
+      feats.push({ type: "Feature", properties: { kind: "compass", label }, geometry: { type: "Point", coordinates: [HOME.lon + (cr / 111.32 / cosLat) * dx, HOME.lat + (cr / 111.32) * dy] } });
+    }
+    return { type: "FeatureCollection", features: feats };
+  }
   function refreshSources() {
-    map.getSource("coverage")?.setData(deps.getSettings().coverage ? coverageFC() : EMPTY_FC);
     map.getSource("runways")?.setData(runwayFC());
+    map.getSource("airfields")?.setData(airfieldsFC());
+    map.getSource("rings")?.setData(ringsFC());
   }
 
   // --- Public API -------------------------------------------------------------------------
   function dataPass() { buildLayers(); }
-  function drawCoverage() { if (ready) map.getSource("coverage")?.setData(deps.getSettings().coverage ? coverageFC() : EMPTY_FC); }
+  function drawCoverage() { buildLayers(); } // coverage is a deck layer now
   function applySettings() {
     exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
     if (ready) { map.setTerrain(deps.getSettings().terrainSatellite === false ? null : { source: "dem", exaggeration: exagg }); refreshSources(); buildLayers(); }
