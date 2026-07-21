@@ -116,7 +116,7 @@ export function createTactical3d({ container, deps }) {
   const onMove = (e) => {
     if (!drag) return;
     if (drag.mode === "rotate") {
-      map.setBearing(drag.bearing - (e.clientX - drag.x) * 0.35);
+      map.setBearing(drag.bearing + (e.clientX - drag.x) * 0.35);
       map.setPitch(Math.max(0, Math.min(map.getMaxPitch(), drag.pitch - (e.clientY - drag.y) * 0.25)));
     } else {
       map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0 });
@@ -244,18 +244,19 @@ export function createTactical3d({ container, deps }) {
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
         getColor: [255, 255, 255, 66], sizeScale: 1,
         material: { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] },
-        // No depth test => no depth write => the translucent dome never occludes the aircraft,
-        // sticks or trails drawn after it (was chopping them into segments from the side).
-        pickable: false, parameters: { depthTest: false },
+        // deck 9 / luma v9 pipeline params (WebGPU-style keys). The dome must not WRITE depth,
+        // or it occludes every target drawn after it; it is still depth-tested against terrain.
+        pickable: false, parameters: { depthWriteEnabled: false },
       }),
-      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 3.5, widthMinPixels: 2.5, jointRounded: true, capRounded: true, parameters: { depthTest: false } }),
-      new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.2, widthMinPixels: 1.5, parameters: { depthTest: false } }),
+      // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
+      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 3.5, widthMinPixels: 2.5, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
+      new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.2, widthMinPixels: 1.5, parameters: { depthCompare: "always" } }),
       new ScenegraphLayer({
         id: "aircraft", data: list, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
         getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 140 : 255], sizeScale: 220, sizeMinPixels: 26, sizeMaxPixels: 90, _lighting: "pbr",
-        pickable: true, onClick: onAircraftClick, onHover: onAircraftHover, parameters: { depthTest: false },
+        pickable: true, onClick: onAircraftClick, onHover: onAircraftHover, parameters: { depthCompare: "always" },
       }),
-      ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 200, sizeMinPixels: 22, sizeMaxPixels: 80, parameters: { depthTest: false } }),
+      ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 200, sizeMinPixels: 22, sizeMaxPixels: 80, parameters: { depthCompare: "always" } }),
     ].filter(Boolean);
     overlay.setProps({ layers });
     syncBlocks();
