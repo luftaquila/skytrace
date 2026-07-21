@@ -62,7 +62,7 @@ export function createTactical3d({ container, deps }) {
   const map = new maplibregl.Map({
     container,
     attributionControl: false,
-    maxPitch: 72,
+    maxPitch: 80,
     pitch: 55,
     zoom: 6,
     center: [HOME.lon, HOME.lat],
@@ -81,7 +81,7 @@ export function createTactical3d({ container, deps }) {
       layers: [
         { id: "bg", type: "background", paint: { "background-color": "#050a0c" } },
         { id: "hillshade", type: "hillshade", source: "demShade", paint: { "hillshade-shadow-color": "#020a0c", "hillshade-highlight-color": "#1d6f66", "hillshade-accent-color": "#0b3a38", "hillshade-exaggeration": 0.75 } },
-        { id: "sat", type: "raster", source: "satellite", layout: { visibility: "none" }, paint: { "raster-saturation": -0.15 } },
+        { id: "sat", type: "raster", source: "satellite", layout: { visibility: "none" }, paint: { "raster-saturation": -0.45, "raster-brightness-max": 0.78, "raster-contrast": 0.08, "raster-hue-rotate": 8 } },
         { id: "grid-line", type: "line", source: "grid", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "major"], 1, 0.28, 0.12], "line-width": ["match", ["get", "major"], 1, 1, 0.6] } },
         { id: "contour-line", type: "line", source: "contours", "source-layer": "contours", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "level"], 1, 0.4, 0.16], "line-width": ["match", ["get", "level"], 1, 1.1, 0.6], "line-blur": 0.6 } },
         { id: "rings-line", type: "line", source: "rings", filter: ["==", ["get", "kind"], "ring"], paint: { "line-color": "#48e0d1", "line-opacity": 0.5, "line-width": 1.3, "line-blur": 1.2 } },
@@ -245,20 +245,26 @@ export function createTactical3d({ container, deps }) {
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
       // Tactical trail: a soft same-colour glow under a crisp bright altitude-gradient line
-      // (a radar-track look) — no dark outline.
-      new PathLayer({ id: "trails-glow", data: trails, getPath: (d) => d.path, getColor: (d) => [d.color[0], d.color[1], d.color[2], 55], widthUnits: "pixels", getWidth: 6, widthMinPixels: 5, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
-      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2, widthMinPixels: 1.6, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
+      // (a radar-track look). billboard:true keeps the ribbon facing the camera, so it has the
+      // same thickness from the side as from above (a flat PathLayer ribbon vanishes edge-on).
+      new PathLayer({ id: "trails-glow", data: trails, getPath: (d) => d.path, getColor: (d) => [d.color[0], d.color[1], d.color[2], 55], widthUnits: "pixels", getWidth: 7, widthMinPixels: 6, billboard: true, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
+      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.4, widthMinPixels: 2, billboard: true, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
       new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
+      // Glowing radar blip behind each aircraft (altitude colour) so targets pop on the imagery.
+      new ScatterplotLayer({
+        id: "blip", data: list, getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 15, radiusMinPixels: 10, radiusMaxPixels: 18,
+        filled: true, stroked: false, getFillColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 40 : 65], parameters: { depthCompare: "always" },
+      }),
       new ScenegraphLayer({
         id: "aircraft", data: list, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 140 : 255], sizeScale: 130, sizeMinPixels: 34, sizeMaxPixels: 46, _lighting: "pbr",
+        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255], sizeScale: 170, sizeMinPixels: 44, sizeMaxPixels: 62, _lighting: "pbr",
         pickable: false, parameters: { depthCompare: "always" },
       }),
-      ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 120, sizeMinPixels: 30, sizeMaxPixels: 42, parameters: { depthCompare: "always" } }),
-      // Invisible, generous click/hover target (like the old hit sphere): a constant ~44px disc
+      ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 150, sizeMinPixels: 38, sizeMaxPixels: 54, parameters: { depthCompare: "always" } }),
+      // Invisible, generous click/hover target (like the old hit sphere): a constant ~48px disc
       // per aircraft so selecting never needs pixel-perfect aim on the small model.
       new ScatterplotLayer({
-        id: "hit", data: list, getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 22, radiusMinPixels: 22, radiusMaxPixels: 22,
+        id: "hit", data: list, getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 24, radiusMinPixels: 24, radiusMaxPixels: 24,
         filled: true, stroked: false, getFillColor: [0, 0, 0, 0], pickable: true, onClick: onAircraftClick, onHover: onAircraftHover, parameters: { depthCompare: "always" },
       }),
     ].filter(Boolean);
@@ -437,8 +443,10 @@ export function createTactical3d({ container, deps }) {
     else { hoverHex = null; hoverAf = null; afTooltipEl.style.display = "none"; }
   }
   function resize() { map.resize(); }
-  function setCameraFromMap(center, zoom) { map.jumpTo({ center: [center.lng ?? center.lon, center.lat], zoom: zoom - 1, pitch: 55 }); }
-  function getCameraForMap() { const c = map.getCenter(); return { center: [c.lat, c.lng], zoom: Math.min(18, Math.max(3, Math.round(map.getZoom() + 1))) }; }
+  // 3D sits one zoom level CLOSER than the 2D map (pitch pulls the view back), so the default
+  // isn't too far out. getCameraForMap inverts this so a 2D<->3D round-trip is stable.
+  function setCameraFromMap(center, zoom) { map.jumpTo({ center: [center.lng ?? center.lon, center.lat], zoom: zoom + 1, pitch: 55 }); }
+  function getCameraForMap() { const c = map.getCenter(); return { center: [c.lat, c.lng], zoom: Math.min(18, Math.max(3, Math.round(map.getZoom() - 1))) }; }
   // Centre the AIRCRAFT (at its altitude) on screen, not its ground point: project the target's
   // elevated point and its ground point and pass the screen delta as the easeTo offset. Zoom/
   // pitch are unchanged here so the delta stays valid through the move.
@@ -453,7 +461,7 @@ export function createTactical3d({ container, deps }) {
     }
     map.easeTo({ center: [lon, lat], offset, duration: 700 });
   }
-  function flyToView(lon, lat, zoom) { map.flyTo({ center: [lon, lat], zoom: zoom - 1, pitch: 55, duration: 900 }); }
+  function flyToView(lon, lat, zoom) { map.flyTo({ center: [lon, lat], zoom: zoom + 1, pitch: 55, duration: 900 }); }
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {
     disposed = true;
@@ -464,11 +472,15 @@ export function createTactical3d({ container, deps }) {
     for (const el of [overlayEl, afTooltipEl, loadingEl, hintEl]) el.remove();
   }
 
-  map.on("load", () => {
-    if (disposed) return;
+  const hideLoading = () => { loadingEl.style.display = "none"; };
+  // Initialise on "style.load" (fires as soon as the style JSON is parsed) rather than "load"
+  // (which also waits on terrain/imagery tiles and can hang on a slow network — leaving the view
+  // stuck on "LOADING TERRAIN"). Sources are declared by style.load, so setTerrain works here.
+  map.on("style.load", () => {
+    if (disposed || ready) return;
     ready = true;
     map.setTerrain({ source: "dem", exaggeration: exagg });
-    loadingEl.style.display = "none";
+    hideLoading();
     refreshSources();
     buildLayers();
   });
