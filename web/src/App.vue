@@ -13,7 +13,6 @@ import {
   Pause,
   Play,
   RadioTower,
-  RefreshCw,
   Rotate3d,
   Ruler,
   Search,
@@ -1445,13 +1444,6 @@ function makeCoalescer(fn) {
 const liveRefresher = makeCoalescer(refreshLive);
 const coverageRefresher = makeCoalescer(refreshCoverage);
 
-// Manual refresh button: go through the guarded/coalesced paths so a click can't spawn a
-// second concurrent fetch.
-function refreshAll() {
-  liveRefresher.schedule(0);
-  coverageRefresher.schedule(0);
-}
-
 async function refreshTrack(resetPlayback = true) {
   if (!selectedHex.value) return;
   const to = new Date();
@@ -1545,14 +1537,20 @@ function onGlobalKeydown(event) {
   if (selectedHex.value) clearSelection();
 }
 
-function fitVisibleAircraft() {
-  const items = filteredAircraft.value.filter((item) => item.lat != null && item.lon != null);
-  if (!items.length) return;
+// Toolbar recenter: jump to the selected aircraft, or home to the Yuseong IC center when
+// nothing is selected. (Both views.)
+const HOME = { lat: 36.36599, lon: 127.33113 };
+function recenterView() {
+  const sel = selectedAircraft.value;
+  const hasSel = sel && sel.lat != null && sel.lon != null;
   if (view3dActive.value) {
-    tac3d?.fitAircraft(items.map((item) => ({ lat: item.lat, lon: item.lon })));
-    return;
+    if (hasSel) tac3d?.setCameraFromMap({ lat: sel.lat, lng: sel.lon }, 9);
+    else tac3d?.setCameraFromMap({ lat: HOME.lat, lng: HOME.lon }, 6);
+  } else if (hasSel) {
+    map.setView([sel.lat, sel.lon], Math.max(map.getZoom(), 9), { animate: true });
+  } else {
+    map.setView([HOME.lat, HOME.lon], 7, { animate: true });
   }
-  map.fitBounds(items.map((item) => [item.lat, item.lon]), { padding: [48, 48], maxZoom: 10 });
 }
 
 function applyBaseLayer() {
@@ -1799,8 +1797,7 @@ onUnmounted(() => {
         <div class="toolbar">
           <button class="icon-button" :class="{ active: view3dActive }" title="3D tactical view" @click="setView3d(!settings.view3d)"><Rotate3d :size="18" /></button>
           <button v-if="!view3dActive" class="icon-button" :class="{ active: measureMode }" title="Measure range/bearing (Esc to exit)" @click="toggleMeasure"><Ruler :size="18" /></button>
-          <button class="icon-button" title="Fit aircraft" @click="fitVisibleAircraft"><LocateFixed :size="18" /></button>
-          <button class="icon-button" title="Refresh" @click="refreshAll"><RefreshCw :size="18" /></button>
+          <button class="icon-button" :title="selectedAircraft ? 'Center on selected aircraft' : 'Recenter'" @click="recenterView"><LocateFixed :size="18" /></button>
         </div>
       </div>
       <div v-if="measureMode" class="measure-hint">

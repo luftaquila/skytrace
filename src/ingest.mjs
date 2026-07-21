@@ -201,6 +201,35 @@ function coverageBandsForReceiver(rows, receiverLat, receiverLon) {
   }).filter(Boolean);
 }
 
+// Fine-grained per-altitude outlines for the 3D reception volume. Same robust polar
+// max-range ring as the 2D bands, sliced every COVERAGE_VOLUME_STEP feet and computed on
+// the server (once per coverage refresh) so the browser just renders the stacked rings
+// instead of binning tens of thousands of raw points every frame.
+const COVERAGE_VOLUME_STEP = 3000;
+function coverageVolumeForReceiver(rows, receiverLat, receiverLon) {
+  const positioned = rows.filter((row) => finiteLatLon(row.lat, row.lon));
+  if (positioned.length < COVERAGE_MIN_POINTS) return null;
+  const origin = coverageOrigin(positioned, receiverLat, receiverLon);
+  let maxAlt = 0;
+  for (const row of positioned) {
+    const alt = row.alt_baro ?? row.alt_geom;
+    if (alt != null && alt > maxAlt) maxAlt = alt;
+  }
+  const nLayer = Math.max(1, Math.min(20, Math.ceil(maxAlt / COVERAGE_VOLUME_STEP)));
+  const layers = [];
+  for (let l = 0; l < nLayer; l += 1) {
+    const min = l * COVERAGE_VOLUME_STEP;
+    const max = (l + 1) * COVERAGE_VOLUME_STEP;
+    const inBand = positioned.filter((row) => {
+      const alt = row.alt_baro ?? row.alt_geom;
+      return alt != null && alt >= min && alt < max;
+    });
+    const ring = coverageRing(inBand, origin);
+    if (ring) layers.push({ minAltitude: min, midAltitude: (min + max) / 2, count: inBand.length, ring });
+  }
+  return layers.length >= 2 ? { stepFt: COVERAGE_VOLUME_STEP, layers } : null;
+}
+
 function cross(o, a, b) {
   return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
 }
@@ -800,14 +829,13 @@ export function getCoverage(db, options = {}) {
         lastSeenAt: group.lastSeenAt,
         polygon: ring ? { type: "Polygon", coordinates: [ring] } : null,
         bands: coverageBandsForReceiver(group.rows, group.receiverLat, group.receiverLon),
+        volume: coverageVolumeForReceiver(group.rows, group.receiverLat, group.receiverLon),
       };
     }).sort((a, b) => b.count - a.count),
-    points: rows.map((row) => ({
-      lat: roundCoord(row.lat),
-      lon: roundCoord(row.lon),
-      maxAltitude: row.alt_baro ?? row.alt_geom,
-      lastSeenAt: row.position_at,
-    })),
+    // Raw points are no longer sent: the 2D outline/bands and the 3D volume are all
+    // computed server-side above, so shipping tens of thousands of points would only add
+    // download/parse cost for nothing.
+    points: [],
   };
 }
 

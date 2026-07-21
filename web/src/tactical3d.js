@@ -13,6 +13,8 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { Line2 } from "three/addons/lines/Line2.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
+import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 import { RUNWAYS } from "./runways.js";
 
@@ -238,15 +240,14 @@ export function createTactical3d({ container, deps }) {
   const mirrorX = (g) => { const c = g.clone(); c.scale(-1, 1, 1); c.computeVertexNormals(); return c; };
 
   function buildPlaneGeo() {
-    // Slender jet: long rounded fuselage, modestly-spanned swept wings (narrower than
-    // before), under-wing nacelles, swept tailplanes and a swept fin.
-    const fus = new THREE.CapsuleGeometry(0.05, 0.78, 8, 20); fus.rotateX(Math.PI / 2); fus.translate(0, 0, 0.04);
-    const nose = new THREE.ConeGeometry(0.05, 0.22, 20); nose.rotateX(-Math.PI / 2); nose.translate(0, 0, -0.5);
-    // Wing root near the fuselage, tip swept aft; half-span ~0.34 (was 0.66) => much narrower.
-    const wing = slab([[0.045, 0.0], [0.34, 0.2], [0.34, 0.26], [0.045, 0.14]], -0.008, 0.012);
-    const stab = slab([[0.03, 0.42], [0.17, 0.52], [0.17, 0.56], [0.03, 0.5]], 0.02, 0.008);
-    const fin = vfin([[0.4, 0], [0.56, 0], [0.57, 0.2], [0.46, 0.2]], 0, 0.01);
-    const nac = new THREE.CylinderGeometry(0.028, 0.024, 0.17, 14); nac.rotateX(Math.PI / 2); nac.translate(0.2, -0.05, 0.14);
+    // Slender jet: rounded fuselage with just a short nose taper (a long cone looked silly),
+    // modestly-spanned swept wings, under-wing nacelles, swept tailplanes and a swept fin.
+    const fus = new THREE.CapsuleGeometry(0.05, 0.64, 8, 20); fus.rotateX(Math.PI / 2); fus.translate(0, 0, 0.05);
+    const nose = new THREE.ConeGeometry(0.05, 0.11, 20); nose.rotateX(-Math.PI / 2); nose.translate(0, 0, -0.34);
+    const wing = slab([[0.045, 0.0], [0.32, 0.2], [0.32, 0.26], [0.045, 0.14]], -0.008, 0.012);
+    const stab = slab([[0.03, 0.32], [0.16, 0.42], [0.16, 0.46], [0.03, 0.42]], 0.02, 0.008);
+    const fin = vfin([[0.32, 0], [0.46, 0], [0.47, 0.19], [0.37, 0.19]], 0, 0.01);
+    const nac = new THREE.CylinderGeometry(0.028, 0.024, 0.16, 14); nac.rotateX(Math.PI / 2); nac.translate(0.19, -0.05, 0.13);
     return mergeGeometries([fus, nose, wing, mirrorX(wing), stab, mirrorX(stab), fin, nac, mirrorX(nac)]);
   }
   function buildHeliGeo() {
@@ -263,11 +264,15 @@ export function createTactical3d({ container, deps }) {
     return mergeGeometries([hull, top]);
   }
   const GEO = { plane: buildPlaneGeo(), helicopter: buildHeliGeo(), ground: buildGroundGeo() };
-  const GEO_LEN = { plane: 1.05, helicopter: 1.1, ground: 0.56 }; // nose-to-tail units, for screen scaling
+  const GEO_LEN = { plane: 0.85, helicopter: 1.1, ground: 0.56 }; // nose-to-tail units, for screen scaling
   const aircraftMatBase = new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0.1, side: THREE.DoubleSide });
+  // Invisible enlarged sphere per aircraft so clicks/hovers don't need pixel-perfect aim.
+  const hitGeo = new THREE.SphereGeometry(0.5, 10, 8);
+  const hitMat = new THREE.MeshBasicMaterial({ visible: false });
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
   const TARGET_PX = 42; // apparent aircraft length in screen px, held constant across zoom
+  const HIT_PX = 34; // click/hover target radius in screen px (larger than the icon)
 
   // --- Terrain / elevation state ---------------------------------------------------------
   let terrainMesh = null;
@@ -504,12 +509,13 @@ export function createTactical3d({ container, deps }) {
     scene.add(object);
     return { geometry, positions, colors };
   }
-  const sticks = makeDynamicBuffer(2, (g) => new THREE.LineSegments(
-    g, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9 }),
-  ));
   const dots = makeDynamicBuffer(1, (g) => new THREE.Points(
     g, new THREE.PointsMaterial({ vertexColors: true, size: 3, sizeAttenuation: false, transparent: true, opacity: 0.9 }),
   ));
+  // Altitude sticks: fat lines, a bit thinner than the trail (2.1px) but chunkier than 1px
+  // so they read clearly. Rebuilt per dataPass as one LineSegments2.
+  const stickMat = new LineMaterial({ vertexColors: true, worldUnits: false, linewidth: 1.5, transparent: true, opacity: 0.85, depthWrite: false });
+  let stickLine = null;
 
   // Trail + conflict lines are rebuilt per dataPass (small geometries). Trails use fat
   // (Line2) lines so they're actually visible; a shared material is width-in-pixels and
@@ -565,6 +571,15 @@ export function createTactical3d({ container, deps }) {
     const hex = pin?.closest(".t3d-block")?.dataset.hex;
     if (hex) { e.stopPropagation(); deps.togglePin(hex); dataPass(); }
   });
+  // A wheel over an interactive label / airfield dot would otherwise be swallowed and the
+  // map wouldn't zoom there (e.g. zooming toward ICN). Forward it to the canvas so
+  // OrbitControls' zoom-to-cursor still works over any overlay element.
+  overlayEl.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    renderer.domElement.dispatchEvent(new WheelEvent("wheel", {
+      deltaY: e.deltaY, deltaX: e.deltaX, clientX: e.clientX, clientY: e.clientY, cancelable: true,
+    }));
+  }, { passive: false });
 
   function makeTarget(hex, interactive) {
     const el = document.createElement("div");
@@ -573,9 +588,17 @@ export function createTactical3d({ container, deps }) {
     blockEl.className = "t3d-block";
     if (interactive) blockEl.dataset.hex = hex;
     el.appendChild(blockEl);
-    if (!interactive) el.classList.add("t3d-ghost");
+    let hit = null;
+    if (interactive) {
+      hit = new THREE.Mesh(hitGeo, hitMat);
+      hit.userData.hex = hex;
+      hit.frustumCulled = false;
+      scene.add(hit);
+    } else {
+      el.classList.add("t3d-ghost");
+    }
     overlayEl.appendChild(el);
-    return { hex, interactive, el, blockEl, mesh: null, mat: null, geoKind: null, sigBlock: "", visible: true };
+    return { hex, interactive, el, blockEl, hit, mesh: null, mat: null, geoKind: null, sigBlock: "", visible: true };
   }
 
   function setTargetMesh(target, kind) {
@@ -593,6 +616,7 @@ export function createTactical3d({ container, deps }) {
 
   function removeTarget(target) {
     if (target.mesh) { scene.remove(target.mesh); target.mat.dispose(); }
+    if (target.hit) scene.remove(target.hit);
     target.el.remove();
   }
 
@@ -610,6 +634,7 @@ export function createTactical3d({ container, deps }) {
     target.groundY = groundY * exagg;
     target.stick = airborne;
     target.mesh.position.set(target.x, target.y, target.z);
+    if (target.hit) target.hit.position.set(target.x, target.y, target.z);
 
     // Orient as a real aircraft: yaw = track, pitch = climb angle, roll = actual bank from
     // ADS-B (roll field) if present else wings level. Euler order 'YXZ' applies yaw about
@@ -783,8 +808,9 @@ export function createTactical3d({ container, deps }) {
     for (const pair of deps.getConflicts()) { conflictSet.add(pair.a.hex); conflictSet.add(pair.b.hex); }
 
     const seen = new Set();
-    let stickCount = 0;
     let dotCount = 0;
+    const stickPos = [];
+    const stickCol = [];
     for (const item of deps.getAircraft()) {
       if (item.lat == null || item.lon == null) continue;
       if (!deps.passesFilters(item)) continue;
@@ -800,10 +826,8 @@ export function createTactical3d({ container, deps }) {
 
       const c = target.baseColor;
       if (target.stick) {
-        const p = stickCount * 6;
-        sticks.positions.array.set([target.x, target.y, target.z, target.x, target.groundY, target.z], p);
-        sticks.colors.array.set([c.r, c.g, c.b, c.r * 0.15, c.g * 0.15, c.b * 0.15], p);
-        stickCount += 1;
+        stickPos.push(target.x, target.y, target.z, target.x, target.groundY, target.z);
+        stickCol.push(c.r, c.g, c.b, c.r * 0.2, c.g * 0.2, c.b * 0.2);
       }
       const d = dotCount * 3;
       dots.positions.array.set([target.x, target.groundY + 20, target.z], d);
@@ -818,10 +842,17 @@ export function createTactical3d({ container, deps }) {
       }
     }
     raycastMeshes = [];
-    for (const t of targets.values()) if (t.mesh) raycastMeshes.push(t.mesh);
-    sticks.geometry.setDrawRange(0, stickCount * 2);
-    sticks.positions.needsUpdate = true;
-    sticks.colors.needsUpdate = true;
+    for (const t of targets.values()) if (t.hit) raycastMeshes.push(t.hit);
+    // Rebuild the fat-line sticks (one LineSegments2 for all).
+    if (stickLine) { stickLine.geometry.dispose(); scene.remove(stickLine); stickLine = null; }
+    if (stickPos.length) {
+      const sgeo = new LineSegmentsGeometry();
+      sgeo.setPositions(stickPos);
+      sgeo.setColors(stickCol);
+      stickLine = new LineSegments2(sgeo, stickMat);
+      stickLine.frustumCulled = false;
+      scene.add(stickLine);
+    }
     dots.geometry.setDrawRange(0, dotCount);
     dots.positions.needsUpdate = true;
     dots.colors.needsUpdate = true;
@@ -938,133 +969,78 @@ export function createTactical3d({ container, deps }) {
     scene.add(conflictLine);
   }
 
-  // --- Coverage VOLUME: computed here from scratch out of the raw reception history
-  // (every position report the server returns as coverage.points, each with an altitude),
-  // NOT from the server's 2D altitude bands. For each (azimuth, altitude) cell we take the
-  // farthest range ever received; that radius grid is skinned into a solid 3D reception
-  // dome. Rebuilt on coverage/exaggeration change via the exported drawCoverage().
+  // --- Coverage VOLUME: the server computes a stack of per-altitude reception rings from
+  // the raw history (area.volume.layers); here we just place each ring at its altitude and
+  // skin the stack into a solid 3D dome. No per-point work in the browser.
   let coverageGroup = null;
-  const COV_AZ = 96; // azimuth sectors
-  const COV_STEP_FT = 2500; // altitude layer thickness
   function drawCoverage() {
     disposeGroup(coverageGroup);
     coverageGroup = null;
     if (!deps.getSettings().coverage) return;
-    const points = deps.getCoverage()?.points || [];
-    if (points.length < 20) return;
-
-    // Bin the raw hits: radius[layer][az] = farthest horizontal range seen at that
-    // altitude layer and bearing (from the receiver = scene origin).
-    let maxAlt = 0;
-    const hits = [];
-    for (const p of points) {
-      if (p.lat == null || p.lon == null) continue;
-      const alt = p.maxAltitude;
-      if (alt == null || alt < 0) continue;
-      const x = toLocalX(p.lon);
-      const z = toLocalZ(p.lat);
-      const range = Math.hypot(x, z);
-      if (range < 500) continue;
-      const az = (Math.atan2(x, -z) + Math.PI * 2) % (Math.PI * 2); // 0 = north, cw
-      hits.push({ range, az, alt });
-      if (alt > maxAlt) maxAlt = alt;
-    }
-    if (hits.length < 20) return;
-    const nLayer = Math.max(1, Math.ceil(maxAlt / COV_STEP_FT));
-    const radius = Array.from({ length: nLayer }, () => new Float32Array(COV_AZ));
-    for (const h of hits) {
-      const layer = Math.min(nLayer - 1, Math.floor(h.alt / COV_STEP_FT));
-      const a = Math.min(COV_AZ - 1, Math.floor((h.az / (Math.PI * 2)) * COV_AZ));
-      if (h.range > radius[layer][a]) radius[layer][a] = h.range;
-    }
-    // Fill azimuth gaps per layer by nearest non-empty sector (circular), then make each
-    // column non-decreasing with altitude so the envelope is a closed, hole-free dome.
-    for (let l = 0; l < nLayer; l += 1) {
-      const row = radius[l];
-      if (row.every((v) => v === 0)) continue;
-      for (let a = 0; a < COV_AZ; a += 1) {
-        if (row[a] > 0) continue;
-        for (let d = 1; d <= COV_AZ / 2; d += 1) {
-          const lft = row[(a - d + COV_AZ) % COV_AZ];
-          const rgt = row[(a + d) % COV_AZ];
-          if (lft > 0 || rgt > 0) { row[a] = Math.max(lft, rgt); break; }
-        }
-      }
-    }
-    for (let l = 1; l < nLayer; l += 1) {
-      for (let a = 0; a < COV_AZ; a += 1) radius[l][a] = Math.max(radius[l][a], radius[l - 1][a]);
-    }
-    // Light circular smoothing so the sampled envelope reads as a clean surface, not noise.
-    for (let l = 0; l < nLayer; l += 1) {
-      const row = radius[l];
-      for (let pass = 0; pass < 2; pass += 1) {
-        const src = row.slice();
-        for (let a = 0; a < COV_AZ; a += 1) {
-          row[a] = (src[(a - 1 + COV_AZ) % COV_AZ] + 2 * src[a] + src[(a + 1) % COV_AZ]) / 4;
-        }
-      }
-    }
-
-    // Levels: a ground ring (feet 0) plus each layer at its top altitude.
+    const areas = deps.getCoverage()?.areas || [];
     const group = new THREE.Group();
-    const levels = [{ feet: 0, r: radius[0] }];
-    for (let l = 0; l < nLayer; l += 1) levels.push({ feet: (l + 1) * COV_STEP_FT, r: radius[l] });
-    const L = levels.length;
-    const verts = new Float32Array(L * COV_AZ * 3);
-    const cols = new Float32Array(L * COV_AZ * 3);
-    for (let l = 0; l < L; l += 1) {
-      const y = levels[l].feet * FT_TO_M * exagg;
-      const color = parseCssColor(deps.altitudeColorFeet(levels[l].feet));
-      for (let a = 0; a < COV_AZ; a += 1) {
-        const ang = (a / COV_AZ) * Math.PI * 2;
-        const r = levels[l].r[a];
-        const i = (l * COV_AZ + a) * 3;
-        verts[i] = Math.sin(ang) * r;
-        verts[i + 1] = y;
-        verts[i + 2] = -Math.cos(ang) * r;
-        cols[i] = color.r; cols[i + 1] = color.g; cols[i + 2] = color.b;
+    for (const area of areas) {
+      const vol = area.volume;
+      if (!vol?.layers?.length) continue;
+      // Server-computed layers (each a robust polar max-range ring at its altitude); a
+      // ground copy of the lowest ring closes the base. We only stack + skin here.
+      const levels = [{ feet: 0, ring: vol.layers[0].ring }];
+      for (const layer of vol.layers) levels.push({ feet: layer.midAltitude, ring: layer.ring });
+      const N = Math.min(...levels.map((lv) => lv.ring.length)) - 1; // shared sector count
+      if (N < 3) continue;
+      const L = levels.length;
+      const verts = new Float32Array(L * N * 3);
+      const cols = new Float32Array(L * N * 3);
+      for (let l = 0; l < L; l += 1) {
+        const y = levels[l].feet * FT_TO_M * exagg;
+        const color = parseCssColor(deps.altitudeColorFeet(levels[l].feet));
+        for (let a = 0; a < N; a += 1) {
+          const [lon, lat] = levels[l].ring[a];
+          const i = (l * N + a) * 3;
+          verts[i] = toLocalX(lon);
+          verts[i + 1] = y;
+          verts[i + 2] = toLocalZ(lat);
+          cols[i] = color.r; cols[i + 1] = color.g; cols[i + 2] = color.b;
+        }
+      }
+      const idx = [];
+      for (let l = 0; l < L - 1; l += 1) {
+        for (let a = 0; a < N; a += 1) {
+          const a2 = (a + 1) % N;
+          const p0 = l * N + a;
+          const p1 = l * N + a2;
+          const p2 = (l + 1) * N + a;
+          const p3 = (l + 1) * N + a2;
+          idx.push(p0, p2, p1, p1, p2, p3);
+        }
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+      geo.setAttribute("color", new THREE.BufferAttribute(cols, 3));
+      geo.setIndex(idx);
+      const skin = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+        vertexColors: true, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false,
+      }));
+      skin.frustumCulled = false;
+      group.add(skin);
+      // Faint altitude-coloured outline on every other layer (plus the top) for definition.
+      for (let l = 0; l < L; l += 1) {
+        if (l % 2 !== 0 && l !== L - 1) continue;
+        const y = levels[l].feet * FT_TO_M * exagg;
+        const color = parseCssColor(deps.altitudeColorFeet(levels[l].feet));
+        const loop = [];
+        for (let a = 0; a <= N; a += 1) {
+          const [lon, lat] = levels[l].ring[a % N];
+          loop.push(toLocalX(lon), y, toLocalZ(lat));
+        }
+        const lgeo = new THREE.BufferGeometry();
+        lgeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(loop), 3));
+        const line = new THREE.Line(lgeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.4 }));
+        line.frustumCulled = false;
+        group.add(line);
       }
     }
-    const idx = [];
-    for (let l = 0; l < L - 1; l += 1) {
-      for (let a = 0; a < COV_AZ; a += 1) {
-        const a2 = (a + 1) % COV_AZ;
-        const p0 = l * COV_AZ + a;
-        const p1 = l * COV_AZ + a2;
-        const p2 = (l + 1) * COV_AZ + a;
-        const p3 = (l + 1) * COV_AZ + a2;
-        idx.push(p0, p2, p1, p1, p2, p3);
-      }
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
-    geo.setAttribute("color", new THREE.BufferAttribute(cols, 3));
-    geo.setIndex(idx);
-    const skin = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false,
-    }));
-    skin.frustumCulled = false;
-    group.add(skin);
-    // Faint altitude-coloured outline every ~10k ft (plus the top) for definition — not
-    // every layer, which would clutter the dome with concentric rings.
-    for (let l = 0; l < L; l += 1) {
-      if (l !== L - 1 && Math.round(levels[l].feet) % 10000 !== 0) continue;
-      const y = levels[l].feet * FT_TO_M * exagg;
-      const color = parseCssColor(deps.altitudeColorFeet(levels[l].feet));
-      const loop = [];
-      for (let a = 0; a <= COV_AZ; a += 1) {
-        const ai = a % COV_AZ;
-        const ang = (ai / COV_AZ) * Math.PI * 2;
-        loop.push(Math.sin(ang) * levels[l].r[ai], y, -Math.cos(ang) * levels[l].r[ai]);
-      }
-      const lgeo = new THREE.BufferGeometry();
-      lgeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(loop), 3));
-      const line = new THREE.Line(lgeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.4 }));
-      line.frustumCulled = false;
-      group.add(line);
-    }
-    coverageGroup = group;
-    scene.add(group);
+    if (group.children.length) { coverageGroup = group; scene.add(group); }
     needsRender = true;
   }
 
@@ -1232,6 +1208,7 @@ export function createTactical3d({ container, deps }) {
     renderer.setSize(w, h);
     trailMat.resolution.set(w, h); // fat lines need the viewport size for pixel widths
     trailCasingMat.resolution.set(w, h);
+    stickMat.resolution.set(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     needsRender = true;
@@ -1254,6 +1231,8 @@ export function createTactical3d({ container, deps }) {
       // Meshes are added straight to the scene, so mesh.position is already world space.
       const dist = camera.position.distanceTo(t.mesh.position) || 1;
       t.mesh.scale.setScalar((TARGET_PX * pxFactor * dist * t.scaleMul) / GEO_LEN[t.geoKind]);
+      // Hit sphere held at a constant, generous screen radius so clicks are easy.
+      if (t.hit) t.hit.scale.setScalar(HIT_PX * pxFactor * dist);
       if (t.blink) {
         blinkers = true;
         const on = t.blink === "conflict" ? conflictOn : identOn;
@@ -1345,6 +1324,10 @@ export function createTactical3d({ container, deps }) {
     });
     for (const geo of Object.values(GEO)) geo.dispose();
     aircraftMatBase.dispose();
+    hitGeo.dispose();
+    hitMat.dispose();
+    stickLine?.geometry.dispose();
+    stickMat.dispose();
     runwayMat.dispose();
     runwayMarkMat.dispose();
     trailMat.dispose();
