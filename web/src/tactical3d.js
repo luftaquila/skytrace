@@ -17,6 +17,9 @@ import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 const FT_TO_M = 0.3048;
 const HOME = { lon: 127.33113, lat: 36.36599 }; // Yuseong IC
 const SAT_TILES = ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"];
+// Terrain relief comes from Mapterhorn (higher-quality open DEM, terrarium-encoded webp, CORS *,
+// maxzoom 12 over Korea). AWS Terrarium is kept only for the maplibre-contour source.
+const MAPTERHORN_TILES = ["https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"];
 const DEM_TILES = ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"];
 const MODEL_URI = `${import.meta.env.BASE_URL}aircraft.glb`;
 const EMPTY_FC = { type: "FeatureCollection", features: [] };
@@ -71,8 +74,7 @@ export function createTactical3d({ container, deps }) {
       glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
       sources: {
         satellite: { type: "raster", tiles: SAT_TILES, tileSize: 256, maxzoom: 19, attribution: "Esri, Maxar, Earthstar Geographics" },
-        dem: { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 15 },
-        demShade: { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 15 },
+        dem: { type: "raster-dem", tiles: MAPTERHORN_TILES, encoding: "terrarium", tileSize: 512, maxzoom: 12, attribution: "Terrain © Mapterhorn" },
         contours: { type: "vector", tiles: [contour.contourProtocolUrl({ multiplier: 1, thresholds: { 8: [500, 2000], 10: [200, 1000], 12: [100, 500], 14: [50, 250] }, elevationKey: "ele", levelKey: "level", contourLayer: "contours" })], maxzoom: 15 },
         grid: { type: "geojson", data: EMPTY_FC },
         airfields: { type: "geojson", data: EMPTY_FC },
@@ -80,13 +82,16 @@ export function createTactical3d({ container, deps }) {
       },
       layers: [
         { id: "bg", type: "background", paint: { "background-color": "#050a0c" } },
-        { id: "hillshade", type: "hillshade", source: "demShade", paint: { "hillshade-shadow-color": "#020a0c", "hillshade-highlight-color": "#1d6f66", "hillshade-accent-color": "#0b3a38", "hillshade-exaggeration": 0.75 } },
+        { id: "hillshade", type: "hillshade", source: "dem", paint: { "hillshade-shadow-color": "#020a0c", "hillshade-highlight-color": "#1d6f66", "hillshade-accent-color": "#0b3a38", "hillshade-exaggeration": 0.75 } },
         { id: "sat", type: "raster", source: "satellite", layout: { visibility: "none" }, paint: { "raster-saturation": -0.45, "raster-brightness-max": 0.78, "raster-contrast": 0.08, "raster-hue-rotate": 8 } },
         { id: "grid-line", type: "line", source: "grid", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "major"], 1, 0.28, 0.12], "line-width": ["match", ["get", "major"], 1, 1, 0.6] } },
         { id: "contour-line", type: "line", source: "contours", "source-layer": "contours", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "level"], 1, 0.4, 0.16], "line-width": ["match", ["get", "level"], 1, 1.1, 0.6], "line-blur": 0.6 } },
         { id: "rings-line", type: "line", source: "rings", filter: ["==", ["get", "kind"], "ring"], paint: { "line-color": "#48e0d1", "line-opacity": 0.5, "line-width": 1.3, "line-blur": 1.2 } },
-        { id: "airfield-dot", type: "circle", source: "airfields", paint: { "circle-radius": ["get", "r"], "circle-color": ["get", "color"], "circle-stroke-color": "#071012", "circle-stroke-width": 1, "circle-opacity": 0.95 } },
-        { id: "airfield-code", type: "symbol", source: "airfields", filter: ["==", ["get", "minor"], false], layout: { "text-field": ["get", "code"], "text-font": ["Open Sans Regular"], "text-size": 11, "text-offset": [0.9, 0], "text-anchor": "left" }, paint: { "text-color": "#cfe9e4", "text-halo-color": "#071012", "text-halo-width": 1.4 } },
+        // Tactical airfield glyph: a glowing hollow ring (radius + colour by class) with a bright
+        // core, and a teal glowing code — sized so the airport hierarchy reads at a glance.
+        { id: "airfield-ring", type: "circle", source: "airfields", paint: { "circle-radius": ["get", "r"], "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": ["get", "color"], "circle-stroke-width": ["case", ["get", "minor"], 1, 1.7], "circle-blur": 0.22, "circle-opacity": 0.9 } },
+        { id: "airfield-core", type: "circle", source: "airfields", paint: { "circle-radius": ["get", "cr"], "circle-color": ["get", "color"], "circle-opacity": 0.95, "circle-blur": 0.4 } },
+        { id: "airfield-code", type: "symbol", source: "airfields", filter: ["==", ["get", "minor"], false], layout: { "text-field": ["get", "code"], "text-font": ["Open Sans Regular"], "text-size": ["match", ["get", "kind"], "large", 12, 11], "text-letter-spacing": 0.08, "text-offset": [1, 0], "text-anchor": "left" }, paint: { "text-color": "#8ff0e4", "text-halo-color": "#04211f", "text-halo-width": 1.7, "text-halo-blur": 0.6 } },
         { id: "ring-label", type: "symbol", source: "rings", filter: ["in", ["get", "kind"], ["literal", ["ringlabel", "compass"]]], layout: { "text-field": ["get", "label"], "text-font": ["Open Sans Regular"], "text-size": ["case", ["==", ["get", "kind"], "compass"], 15, 11], "text-allow-overlap": true }, paint: { "text-color": "#7fe6da", "text-opacity": ["case", ["==", ["get", "kind"], "compass"], 0.85, 0.55], "text-halo-color": "#050a0c", "text-halo-width": 1.2 } },
       ],
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6 },
@@ -101,9 +106,11 @@ export function createTactical3d({ container, deps }) {
   const cv = map.getCanvas();
   let drag = null;
   let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
+  let followActive = false; // camera tracks the selected aircraft until the user drags the map
   const onCtx = (e) => e.preventDefault();
   const onDown = (e) => {
     dragMoved = false;
+    followActive = false; // any manual drag stops auto-tracking
     if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
     else if (e.button === 2) drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
   };
@@ -124,7 +131,9 @@ export function createTactical3d({ container, deps }) {
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
 
-  const overlay = new MapboxOverlay({ interleaved: true, layers: [] });
+  // pickingRadius widens the click/hover search around the pointer so selecting an aircraft is
+  // forgiving (on top of the invisible hit disc) — no pixel-perfect aim on the small model.
+  const overlay = new MapboxOverlay({ interleaved: true, pickingRadius: 16, layers: [] });
   map.addControl(overlay);
   if (typeof window !== "undefined" && window.__T3D_DEBUG) { window.__t3dMap = map; window.__t3dOverlay = overlay; }
 
@@ -250,21 +259,16 @@ export function createTactical3d({ container, deps }) {
       new PathLayer({ id: "trails-glow", data: trails, getPath: (d) => d.path, getColor: (d) => [d.color[0], d.color[1], d.color[2], 55], widthUnits: "pixels", getWidth: 7, widthMinPixels: 6, billboard: true, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
       new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.4, widthMinPixels: 2, billboard: true, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
       new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
-      // Glowing radar blip behind each aircraft (altitude colour) so targets pop on the imagery.
-      new ScatterplotLayer({
-        id: "blip", data: list, getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 15, radiusMinPixels: 10, radiusMaxPixels: 18,
-        filled: true, stroked: false, getFillColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 40 : 65], parameters: { depthCompare: "always" },
-      }),
       new ScenegraphLayer({
         id: "aircraft", data: list, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
         getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255], sizeScale: 170, sizeMinPixels: 44, sizeMaxPixels: 62, _lighting: "pbr",
         pickable: false, parameters: { depthCompare: "always" },
       }),
       ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 150, sizeMinPixels: 38, sizeMaxPixels: 54, parameters: { depthCompare: "always" } }),
-      // Invisible, generous click/hover target (like the old hit sphere): a constant ~48px disc
-      // per aircraft so selecting never needs pixel-perfect aim on the small model.
+      // Invisible, generous click/hover target (like the old hit sphere): a constant ~80px disc
+      // per aircraft — bigger than the model — so selecting never needs pixel-perfect aim.
       new ScatterplotLayer({
-        id: "hit", data: list, getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 24, radiusMinPixels: 24, radiusMaxPixels: 24,
+        id: "hit", data: list, getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 40, radiusMinPixels: 40, radiusMaxPixels: 40,
         filled: true, stroked: false, getFillColor: [0, 0, 0, 0], pickable: true, onClick: onAircraftClick, onHover: onAircraftHover, parameters: { depthCompare: "always" },
       }),
     ].filter(Boolean);
@@ -363,12 +367,12 @@ export function createTactical3d({ container, deps }) {
   const airfieldByKey = new Map();
   function positionAfTooltip() { if (!hoverAf) return; const p = map.project([hoverAf.field.lon, hoverAf.field.lat]); afTooltipEl.style.transform = `translate3d(${p.x.toFixed(1)}px, ${(p.y - 12).toFixed(1)}px, 0) translate(-50%, -100%)`; }
   map.on("render", () => { positionAfTooltip(); syncBlocks(); });
-  map.on("mousemove", "airfield-dot", (e) => {
+  map.on("mousemove", "airfield-ring", (e) => {
     const key = e.features?.[0]?.properties?.key;
     const field = key && airfieldByKey.get(key);
     if (field && field !== hoverAf?.field) { hoverAf = { field }; afTooltipEl.innerHTML = deps.airfieldTooltip(field); afTooltipEl.style.display = ""; positionAfTooltip(); map.getCanvas().style.cursor = "pointer"; }
   });
-  map.on("mouseleave", "airfield-dot", () => { hoverAf = null; afTooltipEl.style.display = "none"; if (!hoverHex) map.getCanvas().style.cursor = ""; });
+  map.on("mouseleave", "airfield-ring", () => { hoverAf = null; afTooltipEl.style.display = "none"; if (!hoverHex) map.getCanvas().style.cursor = ""; });
   map.on("click", () => { if (dragMoved) { dragMoved = false; return; } if (clickedObject) { clickedObject = false; return; } deps.onMapClick(); });
 
   // --- Native GeoJSON sources -------------------------------------------------------------
@@ -383,7 +387,10 @@ export function createTactical3d({ container, deps }) {
       const key = f.icao || f.code;
       airfieldByKey.set(key, f);
       const color = minor ? "#8b98a5" : f.kind === "large" ? "#ffd23f" : f.kind === "medium" ? "#ff9f45" : "#c3ccd6";
-      features.push({ type: "Feature", properties: { key, code: f.code, minor, r: minor ? 4 : f.kind === "large" ? 6 : 5, color }, geometry: { type: "Point", coordinates: [f.lon, f.lat] } });
+      // Ring radius r + core radius cr scale with airport class (large > medium > small > minor).
+      const r = minor ? 4 : f.kind === "large" ? 9 : f.kind === "medium" ? 7 : 5.5;
+      const cr = minor ? 1.2 : f.kind === "large" ? 2.2 : f.kind === "medium" ? 1.8 : 1.5;
+      features.push({ type: "Feature", properties: { key, code: f.code, minor, kind: f.kind, r, cr, color }, geometry: { type: "Point", coordinates: [f.lon, f.lat] } });
     }
     return { type: "FeatureCollection", features };
   }
@@ -430,7 +437,7 @@ export function createTactical3d({ container, deps }) {
   }
 
   // --- Public API -------------------------------------------------------------------------
-  function dataPass() { buildLayers(); }
+  function dataPass() { buildLayers(); followSelected(); }
   function drawCoverage() { buildLayers(); }
   function applySettings() {
     exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
@@ -450,16 +457,25 @@ export function createTactical3d({ container, deps }) {
   // Centre the AIRCRAFT (at its altitude) on screen, not its ground point: project the target's
   // elevated point and its ground point and pass the screen delta as the easeTo offset. Zoom/
   // pitch are unchanged here so the delta stays valid through the move.
-  function panTo(lon, lat, altFt) {
+  function centerOn(lon, lat, z, duration) {
     let offset = [0, 0];
-    const z = (altFt != null ? altFt * FT_TO_M : 0) * exagg;
     const vp = overlay._deck?.getViewports?.()[0];
     if (vp && z > 0) {
       const air = vp.project([lon, lat, z]);
       const gnd = vp.project([lon, lat, 0]);
       if (air && gnd) offset = [gnd[0] - air[0], gnd[1] - air[1]];
     }
-    map.easeTo({ center: [lon, lat], offset, duration: 700 });
+    map.easeTo({ center: [lon, lat], offset, duration });
+  }
+  // Called on select: snap quickly to the target and start auto-tracking it.
+  function panTo(lon, lat, altFt) { followActive = true; centerOn(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * exagg, 350); }
+  // Keep the selected aircraft centred each data pass until the user drags the map.
+  function followSelected() {
+    if (!followActive) return;
+    const selHex = deps.getSelectedHex();
+    if (!selHex) { followActive = false; return; }
+    const d = lastList.find((x) => x.hex === selHex);
+    if (d) centerOn(d.lon, d.lat, d.z, 850);
   }
   function flyToView(lon, lat, zoom) { map.flyTo({ center: [lon, lat], zoom: zoom + 1, pitch: 55, duration: 900 }); }
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }

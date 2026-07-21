@@ -1512,15 +1512,16 @@ async function togglePin(hex) {
 
 async function selectAircraft(hex, pan = false) {
   selectedHex.value = hex;
-  if (view3dActive.value) tac3d?.dataPass();
-  else upsertMarkers();
-  await refreshTrack();
-  await nextTick();
+  // Move the camera immediately (before the track fetch) so selecting feels instant.
   const item = selectedAircraft.value;
   if (pan && item?.lat != null && item?.lon != null) {
     if (view3dActive.value) tac3d?.panTo(item.lon, item.lat, item.altBaro ?? item.altGeom);
     else map.setView([item.lat, item.lon], Math.max(map.getZoom(), 8), { animate: true });
   }
+  if (view3dActive.value) tac3d?.dataPass();
+  else upsertMarkers();
+  await refreshTrack();
+  await nextTick();
 }
 
 function clearSelection() {
