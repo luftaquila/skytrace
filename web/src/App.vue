@@ -44,7 +44,7 @@ const DEFAULT_SETTINGS = {
   proximity: true,
   view3d: true,
   terrainExaggeration: 2,
-  terrainSatellite: true,
+  terrainSatellite: false,
 };
 
 const baseLayers = {
@@ -1617,7 +1617,7 @@ async function ensureTactical3d() {
         getPinned: () => pinned.value,
         getPinnedTracks: () => [...pinnedTracks.value].map(([hex, points]) => ({ hex, points })),
         togglePin,
-        labelText,
+        datablockHtml,
         airfieldTooltip,
         passesFilters,
         isDropped,
