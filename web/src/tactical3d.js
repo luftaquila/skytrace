@@ -11,15 +11,10 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import mlcontour from "maplibre-contour";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { ScenegraphLayer, SimpleMeshLayer } from "@deck.gl/mesh-layers";
-import { PathLayer, LineLayer } from "@deck.gl/layers";
+import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
-import { RUNWAYS } from "./runways.js";
 
 const FT_TO_M = 0.3048;
-// Altitude gets a vertical boost on top of the terrain exaggeration so aircraft float at a
-// readable height and the coverage volume reads as a real dome (12 km over a 300 km radius is
-// otherwise a nearly-flat cap). Terrain relief keeps the plain terrain exaggeration.
-const VERT_BOOST = 4;
 const HOME = { lon: 127.33113, lat: 36.36599 }; // Yuseong IC
 const SAT_TILES = ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"];
 const DEM_TILES = ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"];
@@ -80,7 +75,6 @@ export function createTactical3d({ container, deps }) {
         demShade: { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 15 },
         contours: { type: "vector", tiles: [contour.contourProtocolUrl({ multiplier: 1, thresholds: { 8: [500, 2000], 10: [200, 1000], 12: [100, 500], 14: [50, 250] }, elevationKey: "ele", levelKey: "level", contourLayer: "contours" })], maxzoom: 15 },
         grid: { type: "geojson", data: EMPTY_FC },
-        runways: { type: "geojson", data: EMPTY_FC },
         airfields: { type: "geojson", data: EMPTY_FC },
         rings: { type: "geojson", data: EMPTY_FC },
       },
@@ -91,8 +85,6 @@ export function createTactical3d({ container, deps }) {
         { id: "grid-line", type: "line", source: "grid", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "major"], 1, 0.28, 0.12], "line-width": ["match", ["get", "major"], 1, 1, 0.6] } },
         { id: "contour-line", type: "line", source: "contours", "source-layer": "contours", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "level"], 1, 0.4, 0.16], "line-width": ["match", ["get", "level"], 1, 1.1, 0.6], "line-blur": 0.6 } },
         { id: "rings-line", type: "line", source: "rings", filter: ["==", ["get", "kind"], "ring"], paint: { "line-color": "#48e0d1", "line-opacity": 0.5, "line-width": 1.3, "line-blur": 1.2 } },
-        { id: "runway-fill", type: "fill", source: "runways", paint: { "fill-color": "#2b3138", "fill-opacity": 0.9 } },
-        { id: "runway-line", type: "line", source: "runways", paint: { "line-color": "#e8edf2", "line-width": 1, "line-opacity": 0.8 } },
         { id: "airfield-dot", type: "circle", source: "airfields", paint: { "circle-radius": ["get", "r"], "circle-color": ["get", "color"], "circle-stroke-color": "#071012", "circle-stroke-width": 1, "circle-opacity": 0.95 } },
         { id: "airfield-code", type: "symbol", source: "airfields", filter: ["==", ["get", "minor"], false], layout: { "text-field": ["get", "code"], "text-font": ["Open Sans Regular"], "text-size": 11, "text-offset": [0.9, 0], "text-anchor": "left" }, paint: { "text-color": "#cfe9e4", "text-halo-color": "#071012", "text-halo-width": 1.4 } },
         { id: "ring-label", type: "symbol", source: "rings", filter: ["in", ["get", "kind"], ["literal", ["ringlabel", "compass"]]], layout: { "text-field": ["get", "label"], "text-font": ["Open Sans Regular"], "text-size": ["case", ["==", ["get", "kind"], "compass"], 15, 11], "text-allow-overlap": true }, paint: { "text-color": "#7fe6da", "text-opacity": ["case", ["==", ["get", "kind"], "compass"], 0.85, 0.55], "text-halo-color": "#050a0c", "text-halo-width": 1.2 } },
@@ -188,7 +180,7 @@ export function createTactical3d({ container, deps }) {
       }
       const bank = airborne && Number.isFinite(item.roll) ? Math.max(-45, Math.min(45, item.roll)) : 0;
       const track = Number.isFinite(item.track) ? item.track : 0;
-      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * exagg * VERT_BOOST, airborne, rgb, orientation: [phi, 90 - track, bank], coasting: deps.isCoasting(item), item });
+      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * exagg, airborne, rgb, orientation: [phi, 90 - track, bank], coasting: deps.isCoasting(item), item });
     }
     return out;
   }
@@ -219,7 +211,7 @@ export function createTactical3d({ container, deps }) {
         lastAlt = altM;
         const c = parseRgb(deps.trackSegmentColor(p));
         const col = [c.r, c.g, c.b];
-        const pt = [p.lon, p.lat, altM * exagg * VERT_BOOST];
+        const pt = [p.lon, p.lat, altM * exagg];
         if (!run || gap || (runColor && (col[0] !== runColor[0] || col[1] !== runColor[1] || col[2] !== runColor[2]))) {
           if (run && run.path.length >= 2) trails.push(run);
           const start = !gap && run && run.path.length ? [run.path[run.path.length - 1]] : [];
@@ -235,7 +227,7 @@ export function createTactical3d({ container, deps }) {
     for (const { hex, points } of deps.getPinnedTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(points); }
 
     const ghost = deps.getPlaybackGhost();
-    const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * exagg * VERT_BOOST, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
+    const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * exagg, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
 
     const covMesh = coverageMesh();
 
@@ -249,14 +241,22 @@ export function createTactical3d({ container, deps }) {
         pickable: false, parameters: { depthWriteEnabled: false },
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
-      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 3.5, widthMinPixels: 2.5, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
-      new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.2, widthMinPixels: 1.5, parameters: { depthCompare: "always" } }),
+      // Trail = a dark casing under a colour (altitude-gradient) line, exactly like the old view.
+      new PathLayer({ id: "trails-casing", data: trails, getPath: (d) => d.path, getColor: [2, 9, 11, 190], widthUnits: "pixels", getWidth: 4, widthMinPixels: 3.4, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
+      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.3, widthMinPixels: 2, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
+      new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
       new ScenegraphLayer({
         id: "aircraft", data: list, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 140 : 255], sizeScale: 220, sizeMinPixels: 26, sizeMaxPixels: 90, _lighting: "pbr",
-        pickable: true, onClick: onAircraftClick, onHover: onAircraftHover, parameters: { depthCompare: "always" },
+        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 140 : 255], sizeScale: 130, sizeMinPixels: 34, sizeMaxPixels: 46, _lighting: "pbr",
+        pickable: false, parameters: { depthCompare: "always" },
       }),
-      ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 200, sizeMinPixels: 22, sizeMaxPixels: 80, parameters: { depthCompare: "always" } }),
+      ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 120, sizeMinPixels: 30, sizeMaxPixels: 42, parameters: { depthCompare: "always" } }),
+      // Invisible, generous click/hover target (like the old hit sphere): a constant ~44px disc
+      // per aircraft so selecting never needs pixel-perfect aim on the small model.
+      new ScatterplotLayer({
+        id: "hit", data: list, getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 22, radiusMinPixels: 22, radiusMaxPixels: 22,
+        filled: true, stroked: false, getFillColor: [0, 0, 0, 0], pickable: true, onClick: onAircraftClick, onHover: onAircraftHover, parameters: { depthCompare: "always" },
+      }),
     ].filter(Boolean);
     overlay.setProps({ layers });
     syncBlocks();
@@ -281,7 +281,7 @@ export function createTactical3d({ container, deps }) {
       for (const l of vol.layers) levels.push({ feet: l.midAltitude, ring: l.ring });
       const N = Math.min(...levels.map((lv) => lv.ring.length)) - 1; // azimuth samples (ring closes)
       if (N < 3) continue;
-      const zc = levels.map((lv) => lv.feet * FT_TO_M * exagg * VERT_BOOST);
+      const zc = levels.map((lv) => lv.feet * FT_TO_M * exagg);
       const cc = levels.map((lv) => parseRgb(deps.altitudeColorFeet(lv.feet)));
       // Skin each altitude band into two triangles per azimuth cell (non-indexed triangle list).
       for (let l = 0; l < levels.length - 1; l += 1) {
@@ -362,22 +362,6 @@ export function createTactical3d({ container, deps }) {
   map.on("click", () => { if (clickedObject) { clickedObject = false; return; } deps.onMapClick(); });
 
   // --- Native GeoJSON sources -------------------------------------------------------------
-  function runwayFC() {
-    if (!deps.getSettings().airfields) return EMPTY_FC;
-    return { type: "FeatureCollection", features: RUNWAYS.map((rwy) => {
-      const midLat = (rwy.le[1] + rwy.he[1]) / 2;
-      const mLon = M_PER_DEG_LAT * Math.cos((midLat * Math.PI) / 180);
-      let ex = (rwy.he[0] - rwy.le[0]) * mLon;
-      let ez = (rwy.he[1] - rwy.le[1]) * M_PER_DEG_LAT;
-      const len = Math.hypot(ex, ez) || 1;
-      ex /= len; ez /= len;
-      const hw = (rwy.width * FT_TO_M) / 2;
-      const dLon = (-ez * hw) / mLon;
-      const dLat = (ex * hw) / M_PER_DEG_LAT;
-      const ring = [[rwy.le[0] + dLon, rwy.le[1] + dLat], [rwy.le[0] - dLon, rwy.le[1] - dLat], [rwy.he[0] - dLon, rwy.he[1] - dLat], [rwy.he[0] + dLon, rwy.he[1] + dLat], [rwy.le[0] + dLon, rwy.le[1] + dLat]];
-      return { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [ring] } };
-    }) };
-  }
   function airfieldsFC() {
     airfieldByKey.clear();
     const s = deps.getSettings();
@@ -420,7 +404,6 @@ export function createTactical3d({ container, deps }) {
     return { type: "FeatureCollection", features: feats };
   }
   function refreshSources() {
-    map.getSource("runways")?.setData(runwayFC());
     map.getSource("airfields")?.setData(airfieldsFC());
     map.getSource("rings")?.setData(ringsFC());
     map.getSource("grid")?.setData(gridFC());

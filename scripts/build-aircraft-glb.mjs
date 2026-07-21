@@ -1,6 +1,11 @@
 #!/usr/bin/env node
-// Generate web/public/aircraft.glb — a small low-poly airliner used by the Cesium 3D view.
-// Nose points +X, up is +Z (Cesium tints the grey model per-altitude via Model.color).
+// Generate web/public/aircraft.glb — a slender low-poly jet used by the deck.gl ScenegraphLayer
+// in the 3D view. Proportions match the old three.js `buildPlaneGeo` (slender rounded fuselage,
+// SHORT nose taper, modestly-spanned swept wings, under-wing nacelles, swept tailplanes + fin)
+// so the 3D aircraft reads exactly like the previous version.
+//
+// Model frame: nose points +X, up is +Z, wings span ±Y (deck tints the grey model per-altitude
+// and orients it by [pitch, yaw, roll]).
 //
 //   node scripts/build-aircraft-glb.mjs
 import fs from "node:fs";
@@ -12,49 +17,66 @@ const tris = []; // each: [ [x,y,z], [x,y,z], [x,y,z] ]
 const tri = (a, b, c) => tris.push([a, b, c]);
 const quad = (a, b, c, d) => { tri(a, b, c); tri(a, c, d); };
 
-// --- Fuselage: hexagonal tube, nose taper to a point, tapered tail ---
-const SIDES = 6;
+// --- Fuselage: slender rounded tube (10-sided) along X, short nose taper to a point ---
+const SIDES = 10;
 function ring(x, r) {
   return Array.from({ length: SIDES }, (_, i) => {
     const a = (i / SIDES) * Math.PI * 2;
-    return [x, Math.cos(a) * r, Math.sin(a) * r];
+    return [x, Math.cos(a) * r, Math.sin(a) * r]; // radial in Y (span) / Z (up)
   });
 }
-const nose = [0.62, 0, 0];
-const tail = [-0.56, 0, 0];
-const r1 = ring(0.34, 0.055);
-const r2 = ring(-0.1, 0.062);
-const r3 = ring(-0.42, 0.045);
+const nose = [0.40, 0, 0];         // short nose tip
+const tail = [-0.37, 0, 0];
+const r1 = ring(0.28, 0.032);      // nose shoulder (short taper 0.28 -> 0.40)
+const r2 = ring(0.06, 0.050);      // forward barrel
+const r3 = ring(-0.18, 0.049);     // aft barrel
+const r4 = ring(-0.34, 0.024);     // tail cone base
 for (let i = 0; i < SIDES; i += 1) {
   const j = (i + 1) % SIDES;
-  tri(nose, r1[i], r1[j]);           // nose cone
-  quad(r1[i], r2[i], r2[j], r1[j]);  // mid barrel
-  quad(r2[i], r3[i], r3[j], r2[j]);  // aft barrel
-  tri(tail, r3[j], r3[i]);           // tail cone
+  tri(nose, r1[i], r1[j]);          // short nose cone
+  quad(r1[i], r2[i], r2[j], r1[j]); // forward barrel
+  quad(r2[i], r3[i], r3[j], r2[j]); // mid barrel
+  quad(r3[i], r4[i], r4[j], r3[j]); // aft barrel
+  tri(tail, r4[j], r4[i]);          // tail cone
 }
 
-// --- Wings (swept), thin slabs so they read from any angle ---
-function slab(corners, z, t) {
+// --- Thin swept slabs (read as real surfaces from any angle) ---
+function slab(corners, z, t) { // corners: [x(chord), y(span)]
   const top = corners.map(([x, y]) => [x, y, z + t]);
   const bot = corners.map(([x, y]) => [x, y, z - t]);
   quad(top[0], top[1], top[2], top[3]);
   quad(bot[3], bot[2], bot[1], bot[0]);
-  for (let i = 0; i < 4; i += 1) {
-    const j = (i + 1) % 4;
-    quad(top[i], bot[i], bot[j], top[j]);
+  for (let i = 0; i < 4; i += 1) { const j = (i + 1) % 4; quad(top[i], bot[i], bot[j], top[j]); }
+}
+// Wings: modest span (to y=±0.32), swept aft, tapered — matches the old three.js wing.
+slab([[0.0, 0.045], [-0.14, 0.045], [-0.26, 0.32], [-0.20, 0.32]], -0.01, 0.011);  // right (+Y)
+slab([[0.0, -0.045], [-0.20, -0.32], [-0.26, -0.32], [-0.14, -0.045]], -0.01, 0.011); // left (-Y)
+// Tailplanes (swept, small)
+slab([[-0.32, 0.03], [-0.42, 0.16], [-0.46, 0.16], [-0.42, 0.03]], 0.015, 0.007);   // right
+slab([[-0.32, -0.03], [-0.42, -0.16], [-0.46, -0.16], [-0.42, -0.03]], 0.015, 0.007); // left
+
+// --- Under-wing nacelles: short tapered tubes along X, below the wing ---
+function nacelle(ySign) {
+  const y = ySign * 0.185;
+  const zc = -0.055;
+  const nr = ring(0, 0.024).map(([, cy, cz]) => [cy, cz]); // unit-ish radial offsets
+  const front = 0.02, back = -0.14, rf = 0.026, rb = 0.020;
+  const fRing = nr.map(([cy, cz]) => [front, y + (cy / 0.024) * rf, zc + (cz / 0.024) * rf]);
+  const bRing = nr.map(([cy, cz]) => [back, y + (cy / 0.024) * rb, zc + (cz / 0.024) * rb]);
+  const fc = [front + 0.03, y, zc], bc = [back, y, zc];
+  for (let i = 0; i < SIDES; i += 1) {
+    const j = (i + 1) % SIDES;
+    tri(fc, fRing[j], fRing[i]);          // front cap (open-ish nose)
+    quad(fRing[i], bRing[i], bRing[j], fRing[j]);
+    tri(bc, bRing[i], bRing[j]);          // back cap
   }
 }
-// right wing (+Y), root near fuselage, tip swept aft
-slab([[0.05, 0.05], [-0.14, 0.05], [-0.26, 0.5], [-0.12, 0.5]], -0.008, 0.012);
-// left wing (-Y)
-slab([[0.05, -0.05], [-0.12, -0.5], [-0.26, -0.5], [-0.14, -0.05]], -0.008, 0.012);
-// tailplanes
-slab([[-0.4, 0.04], [-0.5, 0.04], [-0.56, 0.2], [-0.48, 0.2]], 0.01, 0.008);
-slab([[-0.4, -0.04], [-0.48, -0.2], [-0.56, -0.2], [-0.5, -0.04]], 0.01, 0.008);
-// vertical fin (in X-Z plane)
+nacelle(1); nacelle(-1);
+
+// --- Vertical fin (swept), in the X-Z plane at y=0 ---
 {
-  const c = [[-0.4, 0.02], [-0.52, 0.02], [-0.56, 0.22], [-0.46, 0.22]]; // [x, z]
-  const t = 0.01;
+  const c = [[-0.32, 0], [-0.46, 0], [-0.47, 0.19], [-0.37, 0.19]]; // [x, z(up)]
+  const t = 0.009;
   const top = c.map(([x, z]) => [x, t, z]);
   const bot = c.map(([x, z]) => [x, -t, z]);
   quad(top[0], top[1], top[2], top[3]);
@@ -98,7 +120,7 @@ const gltf = {
   nodes: [{ mesh: 0 }],
   meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, material: 0, mode: 4 }] }],
   materials: [{
-    pbrMetallicRoughness: { baseColorFactor: [0.82, 0.85, 0.9, 1], metallicFactor: 0.1, roughnessFactor: 0.6 },
+    pbrMetallicRoughness: { baseColorFactor: [0.82, 0.85, 0.9, 1], metallicFactor: 0.1, roughnessFactor: 0.5 },
     doubleSided: true,
   }],
   buffers: [{ byteLength: bin.byteLength }],
