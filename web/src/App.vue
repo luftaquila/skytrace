@@ -23,6 +23,7 @@ import {
   X,
 } from "@lucide/vue";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
+import { RUNWAYS } from "./runways.js";
 
 const SETTINGS_KEY = "skytrace.settings.v3";
 const DEFAULT_SETTINGS = {
@@ -44,6 +45,7 @@ const DEFAULT_SETTINGS = {
   proximity: true,
   view3d: false,
   terrainExaggeration: 2,
+  terrainSatellite: false,
 };
 
 const baseLayers = {
@@ -92,6 +94,10 @@ const coverage = ref({ areas: [], points: [] });
 const selectedHex = ref(null);
 const hoveredHex = ref(null);
 const selectedTrack = ref([]);
+// Pinned aircraft: their popover label AND their track stay shown regardless of hover /
+// selection. pinnedTracks caches each pinned hex's track points.
+const pinned = ref(new Set());
+const pinnedTracks = ref(new Map());
 const search = ref("");
 const sortKey = ref("callsign");
 const tracklogOpen = ref(false);
@@ -755,35 +761,57 @@ function verticalArrowSymbol(item) {
 }
 
 function tooltipHtml(item) {
-  // Same tactical data-block styling and layout as the 3D view: callsign over the shared
-  // status line (trend+altitude · speed · age). The .tt-age span is patched every second
-  // by patchTooltipAge() so the age stays live while the pointer rests on a marker.
-  return `<span class="tt-l1">${escapeHtml(formatFlight(item))}</span>`
+  // Same tactical data-block styling and layout as the 3D view: callsign + pin over the
+  // shared status line (trend+altitude · speed · age). The .tt-age span is patched every
+  // second by patchTooltipAge() so the age stays live while the pointer rests on a marker.
+  return `<span class="tt-l1"><b>${escapeHtml(formatFlight(item))}</b>${pinIcon(item.hex)}</span>`
     + `<span class="tt-l2">${targetLine(item, false)}</span>`;
 }
 
 // Second line shared by the 3D data block and the 2D hover popover: the vertical-trend
-// arrow immediately before the altitude, then speed, then the update age (#s), each field
-// separated by a middle dot. Altitude is quantised to 100 ft so the label text (and the
-// DOM rebuild it triggers) stays stable while an aircraft drifts a few feet.
+// arrow immediately before the altitude (green climb / red descent), then speed, then the
+// update age (#s), each field separated by a middle dot. Altitude is quantised to 100 ft so
+// the label text (and the DOM rebuild it triggers) stays stable while an aircraft drifts.
 function targetLine(item, altRound) {
   const altFt = item.altBaro ?? item.altGeom;
   const feet = altRound && altFt != null ? Math.round(altFt / 100) * 100 : altFt;
   const alt = item.onGround ? "GND" : feet == null ? "-" : altText(feet);
   const arrow = verticalArrowSymbol(item);
-  const parts = [`${escapeHtml(arrow)}${escapeHtml(alt)}`];
+  const trend = arrow === "↑" ? "up" : arrow === "↓" ? "down" : "level";
+  const arrowHtml = arrow ? `<span class="tt-trend ${trend}">${arrow}</span>` : "";
+  const parts = [`${arrowHtml}${escapeHtml(alt)}`];
   if (item.gs != null) parts.push(escapeHtml(formatSpeed(item)));
   parts.push(`<span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>`);
   return parts.join(" · ");
 }
 
-// Tactical data block beside each 3D target: callsign over the shared status line.
+// Small pin toggle rendered like text in the top-right of a popover; clicking it keeps the
+// aircraft's label (and track) shown always. Handled by delegated click listeners.
+function pinIcon(hex) {
+  const on = pinned.value.has(hex) ? " on" : "";
+  return `<span class="tt-pin${on}" data-hex="${hex}" title="Pin label & track">`
+    + `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">`
+    + `<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg></span>`;
+}
+
+// Tactical data block beside each 3D target: callsign + pin over the shared status line.
 function datablockHtml(item) {
-  return `<span class="t3d-datablock"><b>${escapeHtml(formatFlight(item))}</b><span>${targetLine(item, true)}</span></span>`;
+  return `<span class="t3d-datablock"><span class="db-top"><b>${escapeHtml(formatFlight(item))}</b>${pinIcon(item.hex)}</span>`
+    + `<span>${targetLine(item, true)}</span></span>`;
 }
 
 function applyMarkerHover(marker, hex) {
   marker.getElement()?.classList.toggle("hovered", hoveredHex.value === hex);
+}
+
+// Interactive so the pin icon is clickable and the tooltip stays while the pointer is on
+// it; permanent for pinned aircraft so their label stays up without hovering.
+function bindMarkerTooltip(marker, tip, isPinned) {
+  marker.unbindTooltip();
+  marker.bindTooltip(tip, {
+    direction: "top", offset: [0, -14], className: "aircraft-tt", interactive: true, permanent: isPinned,
+  });
+  marker._pinned = isPinned;
 }
 
 // The tooltip HTML is built once per upsert, so its baked-in age would freeze while the
@@ -814,11 +842,12 @@ function upsertMarkers() {
     if (!passesFilters(item)) continue;
     if (isDropped(item)) continue;
     const selected = selectedHex.value === item.hex;
-    // Cull anything off-screen, but always keep the selected aircraft so its highlight
-    // and track survive a pan away. Real position updates still land the instant the
-    // marker is in view — this only trims what the user cannot see.
-    if (!selected && !bounds.contains([item.lat, item.lon])) continue;
-    if (!selected && count >= MARKER_LIMIT) continue;
+    // Cull anything off-screen, but always keep the selected and pinned aircraft so their
+    // highlight, permanent label and track survive a pan away. Real position updates still
+    // land the instant the marker is in view — this only trims what the user cannot see.
+    const keep = selected || pinned.value.has(item.hex);
+    if (!keep && !bounds.contains([item.lat, item.lon])) continue;
+    if (!keep && count >= MARKER_LIMIT) continue;
     count += 1;
     visible.add(item.hex);
 
@@ -843,10 +872,14 @@ function upsertMarkers() {
         if (!applyMarkerRotation(existing, rot, item)) existing.setIcon(markerIcon(item));
         existing._rot = rot;
       }
-      if (existing._tip !== tip) {
+      const isPinned = pinned.value.has(item.hex);
+      if (existing._pinned !== isPinned) {
+        // Pin state changed: rebind so the tooltip becomes permanent (pinned) or hover-only.
+        bindMarkerTooltip(existing, tip, isPinned);
+      } else if (existing._tip !== tip) {
         existing.setTooltipContent(tip);
-        existing._tip = tip;
       }
+      existing._tip = tip;
       applyMarkerHover(existing, item.hex);
     } else {
       const marker = L.marker([item.lat, item.lon], { icon: markerIcon(item) });
@@ -855,7 +888,7 @@ function upsertMarkers() {
       marker._sig = sig;
       marker._rot = rot;
       marker._tip = tip;
-      marker.bindTooltip(tip, { direction: "top", offset: [0, -14], className: "aircraft-tt" });
+      bindMarkerTooltip(marker, tip, pinned.value.has(item.hex));
       marker.on("tooltipopen", () => patchTooltipAge(marker, item.hex));
       marker.on("click", () => toggleAircraft(item.hex));
       marker.on("mouseover", () => { hoveredHex.value = item.hex; });
@@ -952,11 +985,42 @@ function airfieldIcon(field, minor) {
   });
 }
 
+// Four [lat, lon] corners of a runway rectangle from its threshold coords + width, using a
+// local metres-per-degree approximation (fine at runway scale).
+function runwayCorners(rwy) {
+  const midLat = (rwy.le[1] + rwy.he[1]) / 2;
+  const mPerLat = 111320;
+  const mPerLon = 111320 * Math.cos((midLat * Math.PI) / 180);
+  let ex = (rwy.he[0] - rwy.le[0]) * mPerLon;
+  let ez = (rwy.he[1] - rwy.le[1]) * mPerLat;
+  const len = Math.hypot(ex, ez) || 1;
+  ex /= len; ez /= len;
+  const hw = (rwy.width * 0.3048) / 2;
+  const dLon = (-ez * hw) / mPerLon;
+  const dLat = (ex * hw) / mPerLat;
+  return [
+    [rwy.le[1] + dLat, rwy.le[0] + dLon],
+    [rwy.le[1] - dLat, rwy.le[0] - dLon],
+    [rwy.he[1] - dLat, rwy.he[0] - dLon],
+    [rwy.he[1] + dLat, rwy.he[0] + dLon],
+  ];
+}
+
 function drawAirfields() {
   if (!map) return;
   if (airfieldLayer) airfieldLayer.remove();
   airfieldLayer = L.layerGroup();
   if (settings.value.airfields) {
+    // Real runways to scale (position/length/heading/width) — visible when zoomed in.
+    for (const rwy of RUNWAYS) {
+      L.polygon(runwayCorners(rwy), {
+        color: "#c8d0d8", weight: 1, opacity: 0.7, fillColor: "#9aa6b2", fillOpacity: 0.5,
+        interactive: false, lineJoin: "round",
+      }).addTo(airfieldLayer);
+      L.polyline([[rwy.le[1], rwy.le[0]], [rwy.he[1], rwy.he[0]]], {
+        color: "#ffffff", weight: 1, opacity: 0.7, dashArray: "5 5", interactive: false,
+      }).addTo(airfieldLayer);
+    }
     for (const field of AIRFIELDS) {
       const minor = isMinorAirfield(field);
       // Uncoded minor strips (military helipads, emergency runways) are hidden
@@ -1182,13 +1246,10 @@ function trackSegmentColor(point) {
 // hours of missing data.
 const TRACK_GAP_MS = 10 * 60 * 1000;
 
-function drawTrack() {
-  if (!map) return;
-  if (trackLayer) trackLayer.remove();
-  trackLayer = L.layerGroup();
-  const pts = selectedTrack.value.filter((point) => point.lat != null && point.lon != null);
-
-  // Break the point list into contiguous segments at gaps longer than TRACK_GAP_MS.
+// Draw one aircraft's track into the current trackLayer: dark casing, then altitude-colored
+// runs on top, split across long tracking gaps. Weights are chunky so the trail reads.
+function drawTrackInto(rawPts) {
+  const pts = rawPts.filter((point) => point.lat != null && point.lon != null);
   const segments = [];
   let segment = [];
   let prevTime = null;
@@ -1205,9 +1266,8 @@ function drawTrack() {
 
   for (const segPts of segments) {
     if (segPts.length < 2) continue;
-    // Dark casing underneath for contrast, then altitude-colored segments on top.
     L.polyline(segPts.map((point) => [point.lat, point.lon]), {
-      color: "#071012", opacity: 0.55, weight: 5, interactive: false, lineCap: "round", lineJoin: "round",
+      color: "#071012", opacity: 0.6, weight: 8, interactive: false, lineCap: "round", lineJoin: "round",
     }).addTo(trackLayer);
 
     let run = [[segPts[0].lat, segPts[0].lon]];
@@ -1215,7 +1275,7 @@ function drawTrack() {
     const flush = () => {
       if (run.length >= 2) {
         L.polyline(run, {
-          color: runColor, opacity: 0.95, weight: 3, interactive: false, lineCap: "round", lineJoin: "round",
+          color: runColor, opacity: 0.98, weight: 4.5, interactive: false, lineCap: "round", lineJoin: "round",
         }).addTo(trackLayer);
       }
     };
@@ -1229,6 +1289,18 @@ function drawTrack() {
       }
     }
     flush();
+  }
+}
+
+function drawTrack() {
+  if (!map) return;
+  if (trackLayer) trackLayer.remove();
+  trackLayer = L.layerGroup();
+  const seen = new Set();
+  if (selectedHex.value) { drawTrackInto(selectedTrack.value); seen.add(selectedHex.value); }
+  // Pinned aircraft keep their tracks shown too.
+  for (const [hex, points] of pinnedTracks.value) {
+    if (!seen.has(hex)) drawTrackInto(points);
   }
   drawPlaybackMarker();
   trackLayer.addTo(map);
@@ -1313,6 +1385,7 @@ async function refreshLive() {
     lastUpdated.value = lastSeen ? new Date(lastSeen).toISOString() : null;
     status.value = "online";
     if (selectedHex.value) await refreshTrack(false);
+    await refreshPinnedTracks();
   } catch (err) {
     status.value = "offline";
     console.error(err);
@@ -1385,6 +1458,40 @@ async function refreshTrack(resetPlayback = true) {
   renderTrackView();
 }
 
+async function fetchTrackPoints(hex) {
+  const to = new Date();
+  const from = new Date(to.getTime() - trackHours.value * 60 * 60 * 1000);
+  const params = new URLSearchParams({ from: from.toISOString(), to: to.toISOString() });
+  const result = await fetchJson(`/api/aircraft/${hex}/track?${params}`);
+  return result.points || [];
+}
+
+// Re-fetch every pinned aircraft's track (their trails stay shown), then redraw.
+async function refreshPinnedTracks() {
+  if (!pinned.value.size) {
+    if (pinnedTracks.value.size) pinnedTracks.value = new Map();
+    return;
+  }
+  const next = new Map();
+  await Promise.all([...pinned.value].map(async (hex) => {
+    try { next.set(hex, await fetchTrackPoints(hex)); } catch (err) { console.error(err); }
+  }));
+  pinnedTracks.value = next;
+  if (view3dActive.value) tac3d?.dataPass();
+  else drawTrack();
+}
+
+async function togglePin(hex) {
+  const next = new Set(pinned.value);
+  if (next.has(hex)) next.delete(hex);
+  else next.add(hex);
+  pinned.value = next;
+  await refreshPinnedTracks();
+  // Refresh labels (pin state) and the permanent-tooltip / trail rendering.
+  if (view3dActive.value) tac3d?.dataPass();
+  else { upsertMarkers(); drawTrack(); }
+}
+
 async function selectAircraft(hex, pan = false) {
   selectedHex.value = hex;
   if (view3dActive.value) tac3d?.dataPass();
@@ -1403,16 +1510,12 @@ function clearSelection() {
   selectedTrack.value = [];
   playbackSpeed.value = 0;
   playbackIndex.value = 0;
-  if (trackLayer) {
-    trackLayer.remove();
-    trackLayer = null;
-  }
   if (playbackMarker) {
     playbackMarker.remove();
     playbackMarker = null;
   }
   if (view3dActive.value) tac3d?.dataPass();
-  else upsertMarkers();
+  else { upsertMarkers(); drawTrack(); } // drawTrack rebuilds the layer, keeping pinned trails
 }
 
 // Clicking a marker toggles selection; clicking a different one switches to it.
@@ -1487,6 +1590,9 @@ async function ensureTactical3d() {
         getCoverage: () => coverage.value,
         getPlaybackGhost,
         getSettings: () => settings.value,
+        getPinned: () => pinned.value,
+        getPinnedTracks: () => [...pinnedTracks.value].map(([hex, points]) => ({ hex, points })),
+        togglePin,
         datablockHtml,
         airfieldTooltip,
         aircraftKind,
@@ -1605,10 +1711,18 @@ onMounted(async () => {
       return;
     }
     if (hoveredHex.value) patchTooltipAge(markers.get(hoveredHex.value), hoveredHex.value);
+    for (const hex of pinned.value) patchTooltipAge(markers.get(hex), hex); // permanent labels
   }, 1000);
+  window.addEventListener("click", onPinClick);
   connectEvents();
   if (settings.value.view3d) setView3d(true);
 });
+
+// Delegated pin-toggle for the 2D Leaflet tooltip pins (the 3D overlay handles its own).
+function onPinClick(event) {
+  const pin = event.target.closest?.(".tt-pin");
+  if (pin?.dataset.hex && !view3dActive.value) togglePin(pin.dataset.hex);
+}
 
 function connectEvents() {
   eventSource?.close();
@@ -1645,6 +1759,7 @@ onUnmounted(() => {
   coverageRefresher.cancel();
   destroyHistoryChart();
   window.removeEventListener("keydown", onGlobalKeydown);
+  window.removeEventListener("click", onPinClick);
   clearTimeout(sseRetryTimer);
   eventSource?.close();
   tac3d?.destroy();
@@ -1913,6 +2028,7 @@ onUnmounted(() => {
             <div class="toggle-row">
               <label><input v-model="settings.labels" type="checkbox" /> All labels</label>
               <label><input v-model="settings.flightLevels" type="checkbox" /> Flight levels</label>
+              <label v-if="view3dActive"><input v-model="settings.terrainSatellite" type="checkbox" /> Satellite terrain</label>
             </div>
           </section>
         </div>

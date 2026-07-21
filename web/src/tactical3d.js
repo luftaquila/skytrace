@@ -10,7 +10,11 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { Line2 } from "three/addons/lines/Line2.js";
+import { LineGeometry } from "three/addons/lines/LineGeometry.js";
+import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
+import { RUNWAYS } from "./runways.js";
 
 // Fixed scene region: South Korea + surrounding seas, comfortably covering the
 // receiver's ADS-B horizon. DEM z8 keeps the initial download to ~60 tiles.
@@ -61,11 +65,15 @@ function parseCssColor(str) {
 const TERRAIN_VERT = /* glsl */ `
   uniform float uExagg;
   varying vec3 vWorld;
+  varying vec3 vPosEx;
   varying float vFog;
+  varying vec2 vUv;
   void main() {
     vec3 p = position;      // p.y carries RAW elevation meters; exaggeration applied here
     vWorld = p;
+    vUv = uv;
     p.y *= uExagg;
+    vPosEx = p;             // exaggerated surface position, for relief (hillshade) normals
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
     vFog = -mv.z;
     gl_Position = projectionMatrix * mv;
@@ -81,8 +89,12 @@ const TERRAIN_FRAG = /* glsl */ `
   uniform vec3 uFogColor;
   uniform float uFogNear;
   uniform float uFogFar;
+  uniform sampler2D uSat;
+  uniform float uSatMix;
   varying vec3 vWorld;
+  varying vec3 vPosEx;
   varying float vFog;
+  varying vec2 vUv;
 
   float gridLine(vec2 coord) {
     vec2 g = abs(fract(coord - 0.5) - 0.5) / fwidth(coord);
@@ -94,14 +106,28 @@ const TERRAIN_FRAG = /* glsl */ `
     bool sea = elev < 0.5;
     float t = pow(clamp(elev / 1900.0, 0.0, 1.0), 0.55);
     vec3 col = sea ? uSea : mix(uLandLow, uLandHigh, t);
+    if (uSatMix > 0.0 && !sea) {
+      // Old-Google-Earth look: drape the satellite photo over the exaggerated relief.
+      // Lift the photo a touch — the raw imagery over Korea is quite dark.
+      vec3 s = texture2D(uSat, vUv).rgb * 1.35 + 0.02;
+      col = mix(col, s, uSatMix);
+    }
+    // Hillshade from the exaggerated surface (flat per-triangle normal via derivatives),
+    // so the bumps read as real 3D relief on both the tactical fill and the satellite photo.
+    vec3 nrm = normalize(cross(dFdx(vPosEx), dFdy(vPosEx)));
+    float sun = clamp(dot(nrm, normalize(vec3(-0.4, 0.82, 0.32))), 0.0, 1.0);
+    float relief = mix(0.5, 0.85, uSatMix); // shading strength (a bit gentler under the photo)
+    float lo = mix(0.55, 0.78, uSatMix);
+    float hi = mix(1.25, 1.4, uSatMix);
+    col *= mix(1.0, mix(lo, hi, sun), relief * (sea ? 0.2 : 1.0));
+    float gridAmt = uSatMix > 0.0 ? 0.5 : 1.0; // fade the grid under the photo
     float g10 = gridLine(vWorld.xz / 10000.0);
     float g50 = gridLine(vWorld.xz / 50000.0);
-    col += uGrid * max(g10 * (sea ? 0.10 : 0.22), g50 * (sea ? 0.20 : 0.34));
+    col += uGrid * max(g10 * (sea ? 0.10 : 0.22), g50 * (sea ? 0.20 : 0.34)) * gridAmt;
     if (!sea) {
       float c = 1.0 - min(abs(fract(elev / 200.0 - 0.5) - 0.5) / fwidth(elev / 200.0), 1.0);
-      col += uContour * c * 0.30;
-      // Shoreline emphasis so flat coastal land reads against the sea at long range.
-      col += uGrid * (1.0 - smoothstep(1.0, 90.0, elev)) * 0.16;
+      col += uContour * c * (uSatMix > 0.0 ? 0.12 : 0.30);
+      if (uSatMix == 0.0) col += uGrid * (1.0 - smoothstep(1.0, 90.0, elev)) * 0.16;
     }
     gl_FragColor = vec4(mix(col, uFogColor, smoothstep(uFogNear, uFogFar, vFog)), 1.0);
   }
@@ -146,6 +172,8 @@ export function createTactical3d({ container, deps }) {
   controls.maxPolarAngle = Math.PI * 0.49; // stay above the horizon
   controls.target.set(0, 0, 0);
 
+  const blankTex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+  blankTex.needsUpdate = true;
   const uniforms = {
     uExagg: { value: 2 },
     uSea: { value: new THREE.Color(0x04131b) },
@@ -156,6 +184,8 @@ export function createTactical3d({ container, deps }) {
     uFogColor: { value: new THREE.Color(0x050a0c) },
     uFogNear: { value: 250_000 },
     uFogFar: { value: 2_200_000 },
+    uSat: { value: blankTex },
+    uSatMix: { value: 0 },
   };
   const terrainMaterial = new THREE.ShaderMaterial({
     uniforms,
@@ -174,32 +204,47 @@ export function createTactical3d({ container, deps }) {
   const WHITE = new THREE.Color(0xffffff);
   const AMBER = new THREE.Color(0xf59e0b);
   const RED = new THREE.Color(0xfb7185);
-  const BASE_NOSE = new THREE.Vector3(0, 0, -1);
-  const _fwd = new THREE.Vector3();
+
+  // A thin swept surface from four corners, used for wings/stabs/fin so the planform reads
+  // as a real jet. Indexed (like the primitive geometries) so mergeGeometries accepts it.
+  function panel(a, b, c, d) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array([...a, ...b, ...c, ...d]), 3));
+    g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(8), 2));
+    g.setIndex([0, 1, 2, 0, 2, 3]);
+    g.computeVertexNormals();
+    return g;
+  }
+  const mirrorX = (g) => { const c = g.clone(); c.scale(-1, 1, 1); return c; };
 
   function buildPlaneGeo() {
-    const fus = new THREE.CylinderGeometry(0.05, 0.07, 0.82, 12); fus.rotateX(Math.PI / 2);
-    const nose = new THREE.ConeGeometry(0.07, 0.3, 12); nose.rotateX(-Math.PI / 2); nose.translate(0, 0, -0.56);
-    const wing = new THREE.BoxGeometry(1.05, 0.02, 0.26); wing.translate(0, -0.01, 0.05);
-    const tailplane = new THREE.BoxGeometry(0.44, 0.02, 0.13); tailplane.translate(0, 0, 0.4);
-    const fin = new THREE.BoxGeometry(0.02, 0.2, 0.17); fin.translate(0, 0.1, 0.4);
-    return mergeGeometries([fus, nose, wing, tailplane, fin]);
+    const fus = new THREE.CylinderGeometry(0.05, 0.055, 0.62, 18); fus.rotateX(Math.PI / 2); fus.translate(0, 0, 0.02);
+    const nose = new THREE.ConeGeometry(0.05, 0.32, 18); nose.rotateX(-Math.PI / 2); nose.translate(0, 0, -0.45);
+    const tail = new THREE.ConeGeometry(0.05, 0.16, 18); tail.rotateX(Math.PI / 2); tail.translate(0, 0, 0.41);
+    // Swept main wings (root near fuselage, tip aft + outboard).
+    const wing = panel([0.045, 0, -0.04], [0.045, 0, 0.15], [0.62, 0, 0.25], [0.62, 0, 0.18]);
+    // Swept tailplanes near the tail.
+    const stab = panel([0.03, 0, 0.28], [0.03, 0, 0.40], [0.24, 0, 0.42], [0.24, 0, 0.35]);
+    // Vertical fin (in the x=0 plane, sweeping up and aft).
+    const fin = panel([0, 0, 0.28], [0, 0, 0.44], [0, 0.22, 0.44], [0, 0.20, 0.36]);
+    return mergeGeometries([fus, nose, tail, wing, mirrorX(wing), stab, mirrorX(stab), fin]);
   }
   function buildHeliGeo() {
-    const body = new THREE.SphereGeometry(0.2, 14, 12); body.scale(1, 0.92, 1.55);
-    const boom = new THREE.BoxGeometry(0.05, 0.05, 0.62); boom.translate(0, 0.03, 0.52);
-    const fin = new THREE.BoxGeometry(0.02, 0.17, 0.09); fin.translate(0, 0.09, 0.78);
-    const rotor = new THREE.CylinderGeometry(0.64, 0.64, 0.012, 24); rotor.translate(0, 0.2, 0);
-    return mergeGeometries([body, boom, fin, rotor]);
+    const body = new THREE.SphereGeometry(0.19, 16, 12); body.scale(1, 0.92, 1.7);
+    const boom = new THREE.CylinderGeometry(0.03, 0.02, 0.5, 10); boom.rotateX(Math.PI / 2); boom.translate(0, 0.04, 0.5);
+    const fin = panel([0, 0.02, 0.68], [0, 0.02, 0.78], [0, 0.18, 0.78], [0, 0.16, 0.7]);
+    const rotor = new THREE.CylinderGeometry(0.66, 0.66, 0.01, 28); rotor.translate(0, 0.19, -0.02);
+    const hub = new THREE.CylinderGeometry(0.03, 0.03, 0.08, 8); hub.translate(0, 0.16, -0.02);
+    return mergeGeometries([body, boom, fin, rotor, hub]);
   }
   function buildGroundGeo() {
-    const hull = new THREE.BoxGeometry(0.34, 0.16, 0.6);
-    const top = new THREE.BoxGeometry(0.26, 0.14, 0.3); top.translate(0, 0.14, 0.03);
+    const hull = new THREE.BoxGeometry(0.34, 0.14, 0.58); hull.translate(0, 0, 0);
+    const top = new THREE.BoxGeometry(0.26, 0.13, 0.28); top.translate(0, 0.13, 0.02);
     return mergeGeometries([hull, top]);
   }
   const GEO = { plane: buildPlaneGeo(), helicopter: buildHeliGeo(), ground: buildGroundGeo() };
-  const GEO_LEN = { plane: 1.12, helicopter: 1.1, ground: 0.6 }; // nose-to-tail units, for screen-size scaling
-  const aircraftMatBase = new THREE.MeshStandardMaterial({ roughness: 0.42, metalness: 0.14 });
+  const GEO_LEN = { plane: 1.2, helicopter: 1.25, ground: 0.58 }; // nose-to-tail units, for screen scaling
+  const aircraftMatBase = new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.16, side: THREE.DoubleSide });
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
   const TARGET_PX = 34; // apparent aircraft length in screen px, held constant across zoom
@@ -209,6 +254,9 @@ export function createTactical3d({ container, deps }) {
   // Elevation grid for stick-foot / airfield sampling (built alongside the mesh).
   let elevGrid = null; // Float32Array gridW*gridH, raw meters, clamped >= 0
   let grid = { w: 0, h: 0, x0: 0, z0: 0, dx: 1, dz: 1 }; // local-space origin + cell size
+  let demRect = null; // { tx0, ty0, cols, rows } stitched tile rect, for the satellite drape
+  let satTexture = null;
+  let satLoading = false;
   let disposed = false;
 
   function sampleElevation(lon, lat) {
@@ -278,9 +326,11 @@ export function createTactical3d({ container, deps }) {
     const h = Math.floor(canvas.height / DEM_STRIDE);
     const cell = (tileM / 256) * DEM_STRIDE * K_SCALE;
     grid = { w, h, x0, z0, dx: cell, dz: cell };
+    demRect = { tx0, ty0, cols, rows };
 
     elevGrid = new Float32Array(w * h);
     const positions = new Float32Array(w * h * 3);
+    const uvs = new Float32Array(w * h * 2);
     for (let j = 0; j < h; j += 1) {
       for (let i = 0; i < w; i += 1) {
         const p = (j * DEM_STRIDE * canvas.width + i * DEM_STRIDE) * 4;
@@ -292,6 +342,10 @@ export function createTactical3d({ container, deps }) {
         positions[idx * 3] = x0 + i * cell;
         positions[idx * 3 + 1] = elev; // raw meters — the shader applies exaggeration
         positions[idx * 3 + 2] = z0 + j * cell;
+        // UV over the same stitched tile rect the satellite texture will cover (v flipped
+        // for CanvasTexture's top-left origin).
+        uvs[idx * 2] = (i * DEM_STRIDE) / (canvas.width - 1);
+        uvs[idx * 2 + 1] = 1 - (j * DEM_STRIDE) / (canvas.height - 1);
       }
     }
     const indices = new Uint32Array((w - 1) * (h - 1) * 6);
@@ -305,6 +359,7 @@ export function createTactical3d({ container, deps }) {
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     terrainMesh = new THREE.Mesh(geometry, terrainMaterial);
     terrainMesh.frustumCulled = false;
@@ -338,6 +393,51 @@ export function createTactical3d({ container, deps }) {
     loadingEl.style.display = "none";
     rebuildAirfields();
     dataPass();
+    if (deps.getSettings().terrainSatellite) setSatellite(true);
+  }
+
+  // Satellite drape: stitch Esri World Imagery over the same tile rect as the DEM, so the
+  // photo lines up 1:1 with the terrain UVs and rides its exaggerated relief.
+  async function fetchSatTile(x, y) {
+    try {
+      const res = await fetch(`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${DEM_ZOOM}/${y}/${x}`, { mode: "cors" });
+      if (!res.ok) throw new Error(`sat tile ${DEM_ZOOM}/${y}/${x}: ${res.status}`);
+      return await createImageBitmap(await res.blob());
+    } catch (err) {
+      console.warn(err);
+      return null;
+    }
+  }
+  async function loadSatellite() {
+    if (satTexture || satLoading || !demRect) return;
+    satLoading = true;
+    const { tx0, ty0, cols, rows } = demRect;
+    const canvas = document.createElement("canvas");
+    canvas.width = cols * 256;
+    canvas.height = rows * 256;
+    const ctx = canvas.getContext("2d");
+    const jobs = [];
+    for (let ty = ty0; ty < ty0 + rows; ty += 1) {
+      for (let tx = tx0; tx < tx0 + cols; tx += 1) {
+        jobs.push(fetchSatTile(tx, ty).then((bmp) => { if (bmp) ctx.drawImage(bmp, (tx - tx0) * 256, (ty - ty0) * 256); }));
+      }
+    }
+    await Promise.all(jobs);
+    if (disposed) return;
+    satTexture = new THREE.CanvasTexture(canvas);
+    satTexture.colorSpace = THREE.SRGBColorSpace;
+    uniforms.uSat.value = satTexture;
+    satLoading = false;
+    needsRender = true;
+  }
+  function setSatellite(on) {
+    if (on) {
+      loadSatellite();
+      uniforms.uSatMix.value = 1.0;
+    } else {
+      uniforms.uSatMix.value = 0;
+    }
+    needsRender = true;
   }
 
   // --- Range rings (sea-level tactical reference) -----------------------------------------
@@ -391,10 +491,19 @@ export function createTactical3d({ container, deps }) {
     g, new THREE.PointsMaterial({ vertexColors: true, size: 3, sizeAttenuation: false, transparent: true, opacity: 0.9 }),
   ));
 
-  // Trail + conflict lines are rebuilt per dataPass (small geometries).
-  let trailLine = null;
+  // Trail + conflict lines are rebuilt per dataPass (small geometries). Trails use fat
+  // (Line2) lines so they're actually visible; a shared material is width-in-pixels and
+  // needs the viewport resolution kept current (see resize()).
+  let trailGroup = null;
   let conflictLine = null;
   const conflictLabels = []; // {x, y, z, el}
+  const trailMat = new LineMaterial({ vertexColors: true, worldUnits: false, linewidth: 3.6, transparent: true, depthWrite: false });
+  const trailCasingMat = new LineMaterial({ color: 0x02090b, worldUnits: false, linewidth: 6.5, transparent: true, opacity: 0.75, depthWrite: false });
+  function disposeGroup(group) {
+    if (!group) return;
+    group.traverse((o) => { o.geometry?.dispose?.(); if (o.material && o.material !== trailMat && o.material !== trailCasingMat) o.material.dispose?.(); });
+    scene.remove(group);
+  }
 
   // --- Aircraft targets: a lit 3D mesh (direction + attitude) plus a billboarded DOM
   // data block. hex -> {hex, interactive, el, blockEl, mesh, mat, geoKind, sigBlock,
@@ -404,16 +513,45 @@ export function createTactical3d({ container, deps }) {
   let ghostTarget = null; // playback marker, non-interactive
   let hoverHex = null; // aircraft under the pointer / hovered in the list
   let hoverAf = null; // airfield entry under the pointer (drives the single popover)
+  let activeHex = null; // aircraft whose data block is transiently shown (hover bridge)
+  let activeClearTimer = 0;
   let exagg = 2;
   let needsRender = true;
   let running = false;
   let rafId = 0;
+
+  // Bridge the gap between hovering the mesh (canvas raycast) and reaching its data block
+  // (a DOM element): a short delay before hiding lets the pointer travel to the block/pin.
+  function scheduleActive(hex) {
+    clearTimeout(activeClearTimer);
+    if (hex == null) {
+      activeClearTimer = setTimeout(() => { activeHex = null; needsRender = true; }, 320);
+    } else {
+      activeHex = hex;
+      needsRender = true;
+    }
+  }
+  // Data blocks are interactive DOM; delegate hover-keep and pin toggling to the overlay.
+  overlayEl.addEventListener("mouseover", (e) => {
+    const block = e.target.closest(".t3d-block");
+    if (block?.dataset.hex) scheduleActive(block.dataset.hex);
+  });
+  overlayEl.addEventListener("mouseout", (e) => {
+    const block = e.target.closest(".t3d-block");
+    if (block && !block.contains(e.relatedTarget)) scheduleActive(null);
+  });
+  overlayEl.addEventListener("click", (e) => {
+    const pin = e.target.closest(".tt-pin");
+    const hex = pin?.closest(".t3d-block")?.dataset.hex;
+    if (hex) { e.stopPropagation(); deps.togglePin(hex); dataPass(); }
+  });
 
   function makeTarget(hex, interactive) {
     const el = document.createElement("div");
     el.className = "t3d-marker";
     const blockEl = document.createElement("span");
     blockEl.className = "t3d-block";
+    if (interactive) blockEl.dataset.hex = hex;
     el.appendChild(blockEl);
     if (!interactive) el.classList.add("t3d-ghost");
     overlayEl.appendChild(el);
@@ -453,9 +591,11 @@ export function createTactical3d({ container, deps }) {
     target.stick = airborne;
     target.mesh.position.set(target.x, target.y, target.z);
 
-    // Orient by heading (yaw) and climb angle (pitch). setFromUnitVectors gives the
-    // minimal rotation from the base nose (-Z) to the flight vector, so wings stay level
-    // (no fake bank) while nose points exactly where the aircraft is going and climbing.
+    // Orient as a real aircraft: yaw = track, pitch = climb angle, roll = actual bank from
+    // ADS-B (roll field) if present else wings level. Euler order 'YXZ' applies yaw about
+    // world-up, then pitch about the lateral axis, then roll about the longitudinal axis —
+    // so climbing/turning no longer introduces the spurious tilt the single-axis minimal
+    // rotation produced.
     const th = (Number.isFinite(item.track) ? item.track : 0) * (Math.PI / 180);
     let phi = 0;
     if (airborne) {
@@ -464,9 +604,8 @@ export function createTactical3d({ container, deps }) {
       if (vs != null && gsMps > 5) phi = Math.atan2(vs * 0.00508, gsMps);
       phi = Math.max(-0.5, Math.min(0.5, phi)); // clamp to ±~29° so steep VS stays readable
     }
-    const cf = Math.cos(phi);
-    _fwd.set(Math.sin(th) * cf, Math.sin(phi), -Math.cos(th) * cf);
-    target.mesh.quaternion.setFromUnitVectors(BASE_NOSE, _fwd);
+    const bank = airborne && Number.isFinite(item.roll) ? Math.max(-1.1, Math.min(1.1, (item.roll * Math.PI) / 180)) : 0;
+    target.mesh.rotation.set(phi, -th, -bank, "YXZ");
 
     const sigBlock = deps.datablockHtml(item);
     if (target.sigBlock !== sigBlock) { target.blockEl.innerHTML = sigBlock; target.sigBlock = sigBlock; }
@@ -506,12 +645,61 @@ export function createTactical3d({ container, deps }) {
     t.blockEl.classList.toggle("hovered", !!t.hovered);
   }
 
+  // --- Runways: true-to-scale pavement drawn on the terrain from real threshold coords,
+  // length, width and heading (OurAirports). Only visible when zoomed toward an airport. --
+  let runwayGroup = null;
+  const runwayMat = new THREE.MeshBasicMaterial({
+    color: 0x9aa6b2, transparent: true, opacity: 0.92, side: THREE.DoubleSide, depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
+  });
+  const runwayLineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
+  function buildRunways() {
+    if (runwayGroup) { runwayGroup.traverse((o) => o.geometry?.dispose?.()); scene.remove(runwayGroup); runwayGroup = null; }
+    if (!deps.getSettings().airfields) return;
+    const group = new THREE.Group();
+    for (const rwy of RUNWAYS) {
+      const ax = toLocalX(rwy.le[0]);
+      const az = toLocalZ(rwy.le[1]);
+      const bx = toLocalX(rwy.he[0]);
+      const bz = toLocalZ(rwy.he[1]);
+      let dx = bx - ax;
+      let dz = bz - az;
+      const len = Math.hypot(dx, dz);
+      if (len < 1) continue;
+      dx /= len; dz /= len;
+      const px = -dz;
+      const pz = dx;
+      const hw = (rwy.width * FT_TO_M) / 2;
+      const y = sampleElevation((rwy.le[0] + rwy.he[0]) / 2, (rwy.le[1] + rwy.he[1]) / 2) * exagg + 3;
+      const pos = new Float32Array([
+        ax + px * hw, y, az + pz * hw,
+        ax - px * hw, y, az - pz * hw,
+        bx - px * hw, y, bz - pz * hw,
+        bx + px * hw, y, bz + pz * hw,
+      ]);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      geo.setIndex([0, 1, 2, 0, 2, 3]);
+      const mesh = new THREE.Mesh(geo, runwayMat);
+      mesh.frustumCulled = false;
+      group.add(mesh);
+      const cl = new THREE.BufferGeometry();
+      cl.setAttribute("position", new THREE.BufferAttribute(new Float32Array([ax, y + 0.5, az, bx, y + 0.5, bz]), 3));
+      const line = new THREE.Line(cl, runwayLineMat);
+      line.frustumCulled = false;
+      group.add(line);
+    }
+    runwayGroup = group;
+    scene.add(group);
+  }
+
   // --- Airfields (terrain-pinned DOM reference points, graded + hover info) ----------------
   const airfieldEls = []; // {x, y(raw m), z, el, field}
   function rebuildAirfields() {
     for (const f of airfieldEls) f.el.remove();
     airfieldEls.length = 0;
     if (hoverAf) { hoverAf = null; afTooltipEl.style.display = "none"; }
+    buildRunways();
     const settings = deps.getSettings();
     if (!settings.airfields) return;
     for (const field of AIRFIELDS) {
@@ -522,14 +710,14 @@ export function createTactical3d({ container, deps }) {
       el.innerHTML = `<span class="t3d-af-dot"></span>${minor ? "" : `<span class="t3d-af-code">${field.code}</span>`}`;
       overlayEl.appendChild(el);
       const entry = { x: toLocalX(field.lon), y: sampleElevation(field.lon, field.lat) * exagg, z: toLocalZ(field.lat), el, field };
-      const dot = el.querySelector(".t3d-af-dot");
-      dot.addEventListener("mouseenter", () => {
+      // Hover anywhere on the marker (dot OR code), not just the dot.
+      el.addEventListener("mouseenter", () => {
         hoverAf = entry;
         afTooltipEl.innerHTML = deps.airfieldTooltip(field);
         afTooltipEl.style.display = "";
         needsRender = true;
       });
-      dot.addEventListener("mouseleave", () => {
+      el.addEventListener("mouseleave", () => {
         if (hoverAf === entry) { hoverAf = null; afTooltipEl.style.display = "none"; }
       });
       airfieldEls.push(entry);
@@ -605,49 +793,68 @@ export function createTactical3d({ container, deps }) {
     needsRender = true;
   }
 
-  function rebuildTrail() {
-    if (trailLine) {
-      trailLine.geometry.dispose();
-      scene.remove(trailLine);
-      trailLine = null;
-    }
-    let pts = deps.getSelectedTrack().filter((p) => p.lat != null && p.lon != null);
+  // One track -> altitude-coloured fat polyline(s), split at long gaps, with a dark casing
+  // so it reads over bright terrain / the satellite drape.
+  function addTrail(group, rawPts) {
+    let pts = rawPts.filter((p) => p.lat != null && p.lon != null);
     if (pts.length < 2) return;
     if (pts.length > TRAIL_MAX_POINTS) {
       const step = Math.ceil(pts.length / TRAIL_MAX_POINTS);
       pts = pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
     }
-    const positions = [];
-    const colors = [];
-    let prev = null;
+    let seg = [];
     let prevTime = null;
     let lastAltM = 0;
+    const flush = () => {
+      if (seg.length < 2) { seg = []; return; }
+      const pos = [];
+      const col = [];
+      for (const v of seg) { pos.push(v.x, v.y, v.z); col.push(v.c.r, v.c.g, v.c.b); }
+      const geo = new LineGeometry();
+      geo.setPositions(pos);
+      geo.setColors(col);
+      const casing = new Line2(geo, trailCasingMat);
+      casing.frustumCulled = false;
+      casing.renderOrder = 1;
+      const line = new Line2(geo, trailMat);
+      line.frustumCulled = false;
+      line.renderOrder = 2;
+      group.add(casing, line);
+      seg = [];
+    };
     for (const point of pts) {
       const time = Date.parse(point.positionAt);
+      if (seg.length && Number.isFinite(time) && Number.isFinite(prevTime) && time - prevTime > TRACK_GAP_MS) flush();
       const altFt = point.altBaro ?? point.altGeom;
       const altM = altFt != null ? altFt * FT_TO_M : lastAltM;
       lastAltM = altM;
-      const v = [toLocalX(point.lon), Math.max(sampleElevation(point.lon, point.lat), altM) * exagg, toLocalZ(point.lat)];
-      const gap = prev && Number.isFinite(time) && Number.isFinite(prevTime) && time - prevTime > TRACK_GAP_MS;
-      if (prev && !gap) {
-        const c = parseCssColor(deps.trackSegmentColor(point));
-        positions.push(...prev, ...v);
-        colors.push(c.r, c.g, c.b, c.r, c.g, c.b);
-      }
-      prev = v;
+      seg.push({
+        x: toLocalX(point.lon),
+        y: Math.max(sampleElevation(point.lon, point.lat), altM) * exagg,
+        z: toLocalZ(point.lat),
+        c: parseCssColor(deps.trackSegmentColor(point)),
+      });
       prevTime = time;
     }
-    if (!positions.length) return;
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
-    geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
-    trailLine = new THREE.LineSegments(
-      geometry, new THREE.LineBasicMaterial({
-        vertexColors: true, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false,
-      }),
-    );
-    trailLine.frustumCulled = false;
-    scene.add(trailLine);
+    flush();
+  }
+
+  // Trails shown: the selected aircraft plus every pinned aircraft (their tracks stay up).
+  function rebuildTrail() {
+    disposeGroup(trailGroup);
+    trailGroup = null;
+    const tracks = [];
+    const seen = new Set();
+    const selHex = deps.getSelectedHex();
+    const selTrack = deps.getSelectedTrack();
+    if (selHex && selTrack.length) { tracks.push(selTrack); seen.add(selHex); }
+    for (const { hex, points } of deps.getPinnedTracks()) {
+      if (!seen.has(hex) && points?.length) { seen.add(hex); tracks.push(points); }
+    }
+    if (!tracks.length) return;
+    const group = new THREE.Group();
+    for (const pts of tracks) addTrail(group, pts);
+    if (group.children.length) { trailGroup = group; scene.add(group); }
   }
 
   function rebuildConflicts() {
@@ -683,65 +890,116 @@ export function createTactical3d({ container, deps }) {
     scene.add(conflictLine);
   }
 
-  // --- Coverage volume: the receiver's reception envelope as stacked altitude-band shells,
-  // so the reachable airspace reads as a 3D dome. Rebuilt only when coverage/exaggeration
-  // changes (not per-second), via the exported drawCoverage(). --------------------------
+  // --- Coverage VOLUME: the reception envelope as a closed 3D dome. Each altitude band's
+  // polygon is resampled to a fixed set of azimuths (rays cast from the receiver), giving a
+  // radius profile r(azimuth, altitude); adjacent altitude levels are joined by a skinned
+  // surface so the reachable airspace is a solid translucent volume, not flat layers.
+  // Rebuilt only on coverage/exaggeration change via the exported drawCoverage().
   let coverageGroup = null;
+  const COV_AZ = 72;
   function bandMidFeet(band) {
     const max = band.maxAltitude ?? band.minAltitude + 10000;
     return (band.minAltitude + max) / 2;
   }
-  function addCoverageShell(group, ring, y, color) {
-    const pts = ring.map(([lon, lat]) => [toLocalX(lon), toLocalZ(lat)]);
-    const n = pts.length;
-    if (n < 3) return;
-    // Fan-triangulate from the centroid — reception envelopes are star-shaped about the
-    // receiver, so a centroid fan fills them without a general triangulator.
-    let cx = 0;
-    let cz = 0;
-    for (const [x, z] of pts) { cx += x; cz += z; }
-    cx /= n; cz /= n;
-    const fill = [cx, y, cz];
-    for (const [x, z] of pts) fill.push(x, y, z);
+  // Farthest intersection of the ray (cx,cz)+t*(dx,dz) with the polygon boundary.
+  function rayRadius(ringXZ, cx, cz, dx, dz) {
+    let best = 0;
+    for (let i = 0; i < ringXZ.length; i += 1) {
+      const [ax, az] = ringXZ[i];
+      const [bx, bz] = ringXZ[(i + 1) % ringXZ.length];
+      const ex = bx - ax;
+      const ez = bz - az;
+      const det = ex * dz - dx * ez;
+      if (Math.abs(det) < 1e-9) continue;
+      const t = (-(ax - cx) * ez + ex * (az - cz)) / det;
+      const s = (dx * (az - cz) - dz * (ax - cx)) / det;
+      if (t >= 0 && s >= -1e-6 && s <= 1 + 1e-6 && t > best) best = t;
+    }
+    return best;
+  }
+  function buildDome(group, levels, cx, cz) {
+    // levels: [{feet, ring:[[x,z]...]}] sorted by altitude ascending.
+    const L = levels.length;
+    const verts = new Float32Array(L * COV_AZ * 3);
+    const cols = new Float32Array(L * COV_AZ * 3);
+    const radius = []; // [level][az]
+    for (let l = 0; l < L; l += 1) {
+      radius[l] = new Float32Array(COV_AZ);
+      const color = parseCssColor(deps.altitudeColorFeet(levels[l].feet));
+      const y = levels[l].feet * FT_TO_M * exagg;
+      for (let a = 0; a < COV_AZ; a += 1) {
+        const ang = (a / COV_AZ) * Math.PI * 2;
+        const dx = Math.cos(ang);
+        const dz = Math.sin(ang);
+        let r = rayRadius(levels[l].ring, cx, cz, dx, dz);
+        if (r <= 0) r = l > 0 ? radius[l - 1][a] : 0; // fall back to the level below on a miss
+        radius[l][a] = r;
+        const idx = (l * COV_AZ + a) * 3;
+        verts[idx] = cx + dx * r;
+        verts[idx + 1] = y;
+        verts[idx + 2] = cz + dz * r;
+        cols[idx] = color.r; cols[idx + 1] = color.g; cols[idx + 2] = color.b;
+      }
+    }
+    // Skin between consecutive levels (quads -> 2 tris), doubled so both faces show.
     const idx = [];
-    for (let i = 1; i <= n; i += 1) idx.push(0, i, i === n ? 1 : i + 1);
-    const fillGeo = new THREE.BufferGeometry();
-    fillGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(fill), 3));
-    fillGeo.setIndex(idx);
-    const fillMesh = new THREE.Mesh(fillGeo, new THREE.MeshBasicMaterial({
-      color, transparent: true, opacity: 0.06, side: THREE.DoubleSide, depthWrite: false,
+    for (let l = 0; l < L - 1; l += 1) {
+      for (let a = 0; a < COV_AZ; a += 1) {
+        const a2 = (a + 1) % COV_AZ;
+        const p0 = l * COV_AZ + a;
+        const p1 = l * COV_AZ + a2;
+        const p2 = (l + 1) * COV_AZ + a;
+        const p3 = (l + 1) * COV_AZ + a2;
+        idx.push(p0, p2, p1, p1, p2, p3);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+    geo.setAttribute("color", new THREE.BufferAttribute(cols, 3));
+    geo.setIndex(idx);
+    const skin = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false,
     }));
-    fillMesh.frustumCulled = false;
-    group.add(fillMesh);
-    const loop = [];
-    for (const [x, z] of pts) loop.push(x, y, z);
-    loop.push(pts[0][0], y, pts[0][1]);
-    const loopGeo = new THREE.BufferGeometry();
-    loopGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(loop), 3));
-    const line = new THREE.Line(loopGeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.55 }));
-    line.frustumCulled = false;
-    group.add(line);
+    skin.frustumCulled = false;
+    group.add(skin);
+    // Cap the top ring and draw each level's outline for definition.
+    for (let l = 0; l < L; l += 1) {
+      const color = parseCssColor(deps.altitudeColorFeet(levels[l].feet));
+      const y = levels[l].feet * FT_TO_M * exagg;
+      const loop = [];
+      for (let a = 0; a <= COV_AZ; a += 1) {
+        const ai = a % COV_AZ;
+        loop.push(cx + Math.cos((ai / COV_AZ) * Math.PI * 2) * radius[l][ai], y, cz + Math.sin((ai / COV_AZ) * Math.PI * 2) * radius[l][ai]);
+      }
+      const lgeo = new THREE.BufferGeometry();
+      lgeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(loop), 3));
+      const line = new THREE.Line(lgeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5 }));
+      line.frustumCulled = false;
+      group.add(line);
+    }
   }
   function drawCoverage() {
-    if (coverageGroup) {
-      coverageGroup.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
-      scene.remove(coverageGroup);
-      coverageGroup = null;
-    }
+    disposeGroup(coverageGroup);
+    coverageGroup = null;
     if (!deps.getSettings().coverage) return;
     const areas = deps.getCoverage()?.areas || [];
     if (!areas.length) return;
     const group = new THREE.Group();
     for (const area of areas) {
       const bands = (area.bands || []).filter((b) => b.polygon?.coordinates?.[0]?.length >= 3);
-      if (bands.length) {
-        for (const band of bands) {
-          const mid = bandMidFeet(band);
-          addCoverageShell(group, band.polygon.coordinates[0], mid * FT_TO_M * exagg, parseCssColor(deps.altitudeColorFeet(mid)));
-        }
-      } else if (area.polygon?.coordinates?.[0]?.length >= 3) {
-        addCoverageShell(group, area.polygon.coordinates[0], 60, new THREE.Color(0x2dd4bf));
+      const overall = area.polygon?.coordinates?.[0];
+      const levels = [];
+      if (overall?.length >= 3) levels.push({ feet: 0, ring: overall.map(([lon, lat]) => [toLocalX(lon), toLocalZ(lat)]) });
+      for (const b of bands.sort((x, y) => bandMidFeet(x) - bandMidFeet(y))) {
+        levels.push({ feet: b.maxAltitude ?? bandMidFeet(b), ring: b.polygon.coordinates[0].map(([lon, lat]) => [toLocalX(lon), toLocalZ(lat)]) });
       }
+      if (levels.length < 2) continue;
+      let cx = 0;
+      let cz = 0;
+      const base = levels[0].ring;
+      for (const [x, z] of base) { cx += x; cz += z; }
+      cx /= base.length; cz /= base.length;
+      buildDome(group, levels, cx, cz);
     }
     coverageGroup = group;
     scene.add(group);
@@ -777,7 +1035,16 @@ export function createTactical3d({ container, deps }) {
 
   function syncOverlay() {
     camera.updateMatrixWorld();
+    // Data blocks show only for pinned / selected / transiently-hovered aircraft, so the
+    // scene stays clean and you tag what you care about with the pin.
+    const pinnedSet = deps.getPinned();
+    const selHex = deps.getSelectedHex();
     for (const target of targets.values()) {
+      const show = pinnedSet.has(target.hex) || target.hex === selHex || target.hex === activeHex;
+      if (!show) {
+        if (target.visible !== false) { target.el.style.display = "none"; target.visible = false; }
+        continue;
+      }
       if (placeEl(target)) {
         target.el.style.zIndex = String(Math.max(1, 4_000_000 - Math.round(_p.depth)));
       }
@@ -879,6 +1146,7 @@ export function createTactical3d({ container, deps }) {
   renderer.domElement.addEventListener("pointermove", (event) => {
     if (!running || event.buttons) return; // ignore while dragging the camera
     const hex = pickHex(event);
+    scheduleActive(hex); // hovering a mesh shows its block (bridged when moving to the block)
     if (hex !== hoverHex) {
       hoverHex = hex;
       deps.onHover(hex);
@@ -900,6 +1168,8 @@ export function createTactical3d({ container, deps }) {
     viewW = w;
     viewH = h;
     renderer.setSize(w, h);
+    trailMat.resolution.set(w, h); // fat lines need the viewport size for pixel widths
+    trailCasingMat.resolution.set(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     needsRender = true;
@@ -993,6 +1263,7 @@ export function createTactical3d({ container, deps }) {
   function applySettings() {
     exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
     uniforms.uExagg.value = exagg;
+    setSatellite(!!deps.getSettings().terrainSatellite);
     rebuildAirfields();
     drawCoverage();
     dataPass();
@@ -1012,6 +1283,12 @@ export function createTactical3d({ container, deps }) {
     });
     for (const geo of Object.values(GEO)) geo.dispose();
     aircraftMatBase.dispose();
+    runwayMat.dispose();
+    runwayLineMat.dispose();
+    trailMat.dispose();
+    trailCasingMat.dispose();
+    satTexture?.dispose();
+    blankTex.dispose();
     terrainMaterial.dispose();
     renderer.dispose();
     for (const el of [renderer.domElement, overlayEl, afTooltipEl, loadingEl, hintEl]) el.remove();

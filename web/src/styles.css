@@ -1147,6 +1147,10 @@ select {
 }
 
 .aircraft-tt .tt-l1 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   font-weight: 800;
   letter-spacing: 0.05em;
   color: #eafffb;
@@ -1161,6 +1165,25 @@ select {
   color: var(--muted);
   font-weight: 600;
 }
+
+/* Vertical-trend arrow: green climbing, red descending, muted level. */
+.tt-trend { font-weight: 900; }
+.tt-trend.up { color: #34d399; }
+.tt-trend.down { color: #fb7185; }
+.tt-trend.level { color: #8aa0a0; }
+
+/* Small inline pin toggle in a popover's top-right; solid when pinned. */
+.tt-pin {
+  display: inline-flex;
+  align-items: center;
+  pointer-events: auto;
+  cursor: pointer;
+  color: var(--muted);
+  opacity: 0.7;
+}
+.tt-pin:hover { opacity: 1; color: var(--accent); }
+.tt-pin.on { color: var(--accent); opacity: 1; }
+.tt-pin.on svg { fill: var(--accent); }
 
 .aircraft-icon.hovered .aircraft-body {
   stroke: #ffffff;
@@ -1444,7 +1467,7 @@ select {
   position: absolute;
   left: 14px;
   top: 10px;
-  pointer-events: none;
+  pointer-events: auto; /* interactive so its pin is clickable and hovering keeps it up */
 }
 
 .t3d-datablock {
@@ -1453,11 +1476,18 @@ select {
   gap: 1px;
   padding: 3px 6px;
   border-left: 2px solid rgb(72 224 209 / 0.55);
-  background: rgb(5 10 12 / 0.7);
+  background: rgb(5 10 12 / 0.82);
   font: 600 10.5px/1.3 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color: #9fe8df;
   white-space: nowrap;
   text-shadow: 0 1px 2px #000;
+}
+
+.t3d-datablock .db-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .t3d-datablock b {
@@ -1466,9 +1496,11 @@ select {
   color: #eafffb;
 }
 
+/* Selected: a MORE opaque, accented panel (was washed-out translucent teal). */
 .t3d-block.selected .t3d-datablock {
   border-left-color: var(--accent);
-  background: rgb(72 224 209 / 0.16);
+  background: rgb(9 20 22 / 0.95);
+  box-shadow: 0 0 0 1px rgb(72 224 209 / 0.4), 0 4px 14px rgb(0 0 0 / 0.55);
 }
 
 .t3d-block.hovered .t3d-datablock b {
@@ -1478,6 +1510,7 @@ select {
 .t3d-ghost {
   opacity: 0.72;
 }
+.t3d-ghost .t3d-block { pointer-events: none; }
 
 /* Airfield hover popover: absolutely positioned in the overlay (not a Leaflet tooltip),
    reusing the shared .airfield-tt look. */
@@ -1505,14 +1538,17 @@ select {
   backdrop-filter: blur(8px);
 }
 
+/* Airfield marker: the anchor sits at the geo point; the dot is centred on it and the code
+   sits to the right, both vertically centred. The whole marker is hoverable (dot OR code)
+   with a pointer cursor. */
 .t3d-airfield {
   position: absolute;
   top: 0;
   left: 0;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  pointer-events: none;
+  width: 0;
+  height: 0;
+  pointer-events: auto;
+  cursor: pointer;
   --af-color: #c3ccd6;
 }
 
@@ -1523,15 +1559,16 @@ select {
 .t3d-airfield.minor { --af-color: #8b98a5; }
 
 .t3d-af-dot {
+  position: absolute;
+  left: 0;
+  top: 0;
   width: 8px;
   height: 8px;
-  margin: -4px 0 0 -4px;
+  transform: translate(-50%, -50%);
   border-radius: 50%;
   border: 1px solid #071012;
   background: var(--af-color);
   box-shadow: 0 0 7px color-mix(in srgb, var(--af-color) 65%, transparent), 0 0 0 1px rgb(255 255 255 / 0.3);
-  pointer-events: auto;
-  cursor: default;
 }
 
 .t3d-airfield.kind-large .t3d-af-dot { width: 10px; height: 10px; }
@@ -1545,6 +1582,11 @@ select {
 }
 
 .t3d-af-code {
+  position: absolute;
+  left: 8px;
+  top: 0;
+  transform: translateY(-50%);
+  white-space: nowrap;
   font: 700 10px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   letter-spacing: 0.06em;
   color: #cfe9e4;
