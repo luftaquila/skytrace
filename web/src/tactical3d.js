@@ -254,7 +254,9 @@ export function createTactical3d({ container, deps }) {
         { id: "airfield-small", type: "symbol", source: "airfields", minzoom: 7, filter: ["any", ["get", "minor"], ["==", ["get", "kind"], "small"]], layout: { ...afLayout }, paint: { ...afPaint } },
         { id: "ring-label", type: "symbol", source: "rings", filter: ["in", ["get", "kind"], ["literal", ["ringlabel", "compass"]]], layout: { "text-field": ["get", "label"], "text-font": ["Open Sans Regular"], "text-size": ["case", ["==", ["get", "kind"], "compass"], 15, 11], "text-allow-overlap": true }, paint: { "text-color": "#7fe6da", "text-opacity": ["case", ["==", ["get", "kind"], "compass"], 0.85, 0.55], "text-halo-color": "#050a0c", "text-halo-width": 1.2 } },
       ],
-      sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6 },
+      // atmosphere-blend 0 kills MapLibre globe's bright horizon atmosphere glow (a hazy white/orange
+      // glare that washed the view near-horizontal at high pitch); keep the dark tactical sky/fog.
+      sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6, "atmosphere-blend": 0 },
     },
   });
   // Swapped mouse drag (per request): LEFT-drag rotates & tilts, RIGHT-drag pans. MapLibre has no
@@ -273,6 +275,27 @@ export function createTactical3d({ container, deps }) {
   let drag = null;
   let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
   let followActive = false; // camera tracks the selected aircraft until the user drags/rotates it
+  let orbitZ = 0; // when > 0, the map centre is held at this altitude so the camera ORBITS the target
+  // Orbit the selected aircraft: keep the map centre at its lon/lat but raise the centre's ELEVATION
+  // to the aircraft's (exaggerated) altitude, so rotate / tilt / zoom pivot around the aircraft itself
+  // and hold it dead-centre — even looking UP from below (pitch > 90), at any zoom. MapLibre has no
+  // FreeCamera; setting the transform's centre elevation is the equivalent "orbit a point" control.
+  function focusOnSelected(sel) {
+    // Orbit by holding the map centre AT the aircraft's lon/lat and altitude — keeps it dead-centre
+    // and lets rotate/tilt/zoom pivot on it, INCLUDING looking up from below (pitch > 90). MapLibre
+    // only honours the centre elevation once zoomed in (~z12+, the range the look-up view is used
+    // at), where this is exact; zoomed further out it's ignored, so the aircraft stays horizontally
+    // centred but sits high on screen (its exaggerated-altitude parallax).
+    orbitZ = sel.z;
+    map.setCenter([sel.lon, sel.lat]);
+    map.transform.setElevation(sel.z); // apply LAST — setCenter/setBearing reset it to the ground
+  }
+  function clearOrbit() {
+    if (orbitZ === 0) return;
+    orbitZ = 0;
+    map.transform.setElevation(0);
+    map.triggerRepaint();
+  }
   let identBlinkOn = false; // toggled by a timer while any aircraft squawks IDENT (gold body flash)
   let identBlinkTimer = 0;
   const onDown = (e) => {
@@ -280,7 +303,7 @@ export function createTactical3d({ container, deps }) {
     dragMoved = false;
     followActive = false; // any manual drag/rotate stops auto-tracking
     if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
-    else if (e.button === 2) drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
+    else if (e.button === 2) { clearOrbit(); drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY }; } // free pan drops the orbit
   };
   const onMove = (e) => {
     if (!drag) return;
@@ -288,12 +311,12 @@ export function createTactical3d({ container, deps }) {
     if (drag.mode === "rotate") {
       map.setBearing(drag.bearing + (e.clientX - drag.x) * 0.35);
       map.setPitch(Math.max(0, Math.min(map.getMaxPitch(), drag.pitch - (e.clientY - drag.y) * 0.25)));
-      // With an aircraft selected, re-centre on IT (centerFor solves for the centre that puts the
-      // target — at its altitude — on screen centre) so rotation/tilt orbits the aircraft. panBy can't
-      // do this: it moves the ground plane, but the target is high up, so parallax drifts it away.
+      // With an aircraft selected, orbit IT: the centre-at-altitude keeps it dead-centre as we
+      // rotate/tilt (incl. past 90° to look up from below). Re-applied each move so it survives the
+      // setBearing/setPitch above resetting the centre elevation.
       const selHex = deps.getSelectedHex();
       const sel = selHex && lastList.find((d) => d.hex === selHex);
-      if (sel) map.setCenter(centerFor(sel.lon, sel.lat, sel.z));
+      if (sel) focusOnSelected(sel);
     } else {
       map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0 });
       drag.x = e.clientX; drag.y = e.clientY; // pan is incremental
@@ -309,7 +332,7 @@ export function createTactical3d({ container, deps }) {
     if (!e.originalEvent) return;
     const selHex = deps.getSelectedHex();
     const sel = selHex && lastList.find((d) => d.hex === selHex);
-    if (sel) map.setCenter(centerFor(sel.lon, sel.lat, sel.z));
+    if (sel) focusOnSelected(sel);
   });
   // Generate the tactical airfield glyph icons on demand (per class colour).
   map.on("styleimagemissing", (e) => {
@@ -328,7 +351,7 @@ export function createTactical3d({ container, deps }) {
   let aircraftDots = [];     // stick ground feet, as {p,color,sizePx}
   let aircraftCoverage = null; // coverage dome mesh: {positions, anchor, altExagg}
   const aircraftLayer = createAircraftLayer({ getData: () => aircraftRenderList, getSegments: () => aircraftSegments, getDots: () => aircraftDots, getCoverage: () => aircraftCoverage });
-  if (typeof window !== "undefined" && window.__T3D_DEBUG) { window.__t3dMap = map; window.__t3dOverlay = overlay; window.__WMV = WebMercatorViewport; window.__t3dAircraftLayer = aircraftLayer; }
+  if (typeof window !== "undefined" && window.__T3D_DEBUG) { window.__t3dMap = map; window.__t3dOverlay = overlay; window.__WMV = WebMercatorViewport; window.__t3dAircraftLayer = aircraftLayer; window.__t3dCenterFor = (lon, lat, z) => centerFor(lon, lat, z); }
 
   // --- DOM overlay: data-block popovers + pins (exact old styling), airfield popover ------
   const overlayEl = document.createElement("div");
@@ -757,7 +780,7 @@ export function createTactical3d({ container, deps }) {
   }
 
   // --- Public API -------------------------------------------------------------------------
-  function dataPass() { buildLayers(); followSelected(); }
+  function dataPass() { buildLayers(); if (!deps.getSelectedHex()) clearOrbit(); followSelected(); }
   function drawCoverage() { buildLayers(); }
   function applySettings() {
     exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
@@ -849,33 +872,28 @@ export function createTactical3d({ container, deps }) {
   // Called on select: ease-out focus (fast start, slow settle) to the target, then auto-track it.
   function panTo(lon, lat, altFt) {
     followActive = true;
-    followSettleUntil = performance.now() + 480;
-    map.easeTo({ center: centerFor(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * ALT_EXAGG), duration: 520, easing: EASE_OUT });
+    // Centre the aircraft AT its altitude via the orbit elevation (instant — easeTo can't carry the
+    // centre elevation without cancelling, and re-applying elevation mid-ease cancels the ease).
+    focusOnSelected({ lon, lat, z: (altFt != null ? altFt * FT_TO_M : 0) * ALT_EXAGG });
   }
   // Continuously keep the selected aircraft centred (smooth linear glide) until the user drags the
   // map — but not until the focus/locate animation has settled, so its ease-out plays out.
   function followSelected() {
     if (!followActive) return;
     const selHex = deps.getSelectedHex();
-    if (!selHex) { followActive = false; return; }
-    if (performance.now() < followSettleUntil) return;
+    if (!selHex) { followActive = false; clearOrbit(); return; }
     const d = lastList.find((x) => x.hex === selHex);
     if (!d) return;
-    const target = centerFor(d.lon, d.lat, d.z);
-    const cur = map.getCenter();
-    // Distance-proportional duration with a MIN-SPEED floor: a small position update snaps quickly
-    // (it used to crawl over a fixed 1.1s — the laggy/sluggish feel), a large one is capped so it
-    // still glides. Cuts the follow lag right after a position update.
-    const distDeg = Math.hypot(target[0] - cur.lng, target[1] - cur.lat);
-    const dur = Math.max(90, Math.min(480, distDeg * 3500));
-    map.easeTo({ center: target, duration: dur, easing: (t) => t });
+    // Re-centre on the aircraft at its altitude. Instant (the orbit elevation IS the centring); a
+    // live jet moves so little between ~1 s passes that the terrain barely nudges.
+    focusOnSelected(d);
   }
   // Locate button: ONE ease-out easeTo that changes zoom + pan together (centred on the aircraft at
   // altitude via the geometric centre, computed for the TARGET pitch), and resumes tracking.
   function flyToView(lon, lat, zoom, altFt) {
-    const z = altFt != null ? altFt * FT_TO_M * ALT_EXAGG : 0;
-    if (altFt != null) { followActive = true; followSettleUntil = performance.now() + 980; }
-    map.easeTo({ center: centerFor(lon, lat, z, 55, zoom + 1), zoom: zoom + 1, pitch: 55, duration: 900, easing: EASE_OUT });
+    map.jumpTo({ zoom: zoom + 1, pitch: 55 });
+    if (altFt != null) { followActive = true; focusOnSelected({ lon, lat, z: altFt * FT_TO_M * ALT_EXAGG }); }
+    else { clearOrbit(); map.jumpTo({ center: [lon, lat] }); }
   }
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {
