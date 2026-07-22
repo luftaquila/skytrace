@@ -310,9 +310,16 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
         const M0 = mul(main, frame);
         // pixels-per-metre here, from a 1 m east step, to hold a near-constant on-screen size
         const o = projectPx(M0, 0, 0, 0, w, h);
-        const e = projectPx(M0, 1, 0, 0, w, h);
         if (!(o[2] > 0)) continue;         // behind the camera
-        const ppm = Math.hypot(e[0] - o[0], e[1] - o[1]) || 1e-6;
+        // pixels-per-metre from the LEAST-foreshortened of the 3 local axes — a single axis (e.g.
+        // east) collapses to ~0 px when it points along the view ray, which blew the scale up at
+        // certain bearings/pitches. Taking the max gives the true on-screen scale at any angle.
+        const ex = projectPx(M0, 1, 0, 0, w, h), ny = projectPx(M0, 0, 1, 0, w, h), uz = projectPx(M0, 0, 0, 1, w, h);
+        const ppm = Math.max(
+          Math.hypot(ex[0] - o[0], ex[1] - o[1]),
+          Math.hypot(ny[0] - o[0], ny[1] - o[1]),
+          Math.hypot(uz[0] - o[0], uz[1] - o[1]),
+        ) || 1e-6;
         const worldPx = mesh.span * 185 * ppm;                 // sizeScale 185 m, like deck
         const clsMul = d.clsMul || 1;
         const px = Math.min(Math.max(worldPx, 48 * clsMul), 68 * clsMul);

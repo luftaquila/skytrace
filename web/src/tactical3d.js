@@ -789,18 +789,12 @@ export function createTactical3d({ container, deps }) {
     // unproject runs off the globe → invalid latitude that setCenter rejects). Clamp the pitch used
     // for framing so the result stays finite — the camera can still tilt past 90° for a bottom view,
     // the aircraft-centring just eases off up there instead of crashing.
-    const pEff = Math.min(pitchDeg, 85); // used only for the analytic seed (tan blows up past 90°)
     const b = (bearing * Math.PI) / 180, cosLat = Math.cos((lat * Math.PI) / 180) || 1;
     const w = map.getCanvas().clientWidth || 1, h = map.getCanvas().clientHeight || 1, cx = w / 2, cy = h / 2;
-    // Project the target through the MAP'S OWN matrix (deck's GlobeViewport ignores bearing/pitch, so
-    // the old solve was wrong in globe). Clone the transform, drop in each candidate centre, and read
-    // mainMatrix · getMatrixForModel — correct in globe AND at pitch > 90° (needed to frame a target
-    // for the bottom/look-up view).
+    // Project the target through the MAP'S OWN matrix (deck's GlobeViewport ignores bearing/pitch) at
+    // the REAL pitch — incl. > 90° — by cloning the transform and dropping in each candidate centre.
     const tf = map.transform.clone();
-    // Frame as if pitch ≤ 88: past ~90° "target at screen centre" is degenerate (the ground centre
-    // runs behind the camera). Solving at 88 gives a stable centre; the real higher pitch then just
-    // slides the target up the screen (still framed) for the look-up/bottom view.
-    tf.setBearing(bearing); tf.setPitch(Math.min(pitchDeg, 88)); tf.setZoom(zoom);
+    tf.setBearing(bearing); tf.setPitch(Math.min(pitchDeg, 150)); tf.setZoom(zoom);
     const project = (c) => {
       try {
         tf.setCenter(new maplibregl.LngLat(c[0], Math.max(-85, Math.min(85, c[1]))));
@@ -813,38 +807,42 @@ export function createTactical3d({ container, deps }) {
         return [((cxp / cw) * 0.5 + 0.5) * w, (1 - ((cyp / cw) * 0.5 + 0.5)) * h];
       } catch { return null; }
     };
-    // Analytical seed: shift z*tan(pitch) metres in the look direction so the target starts on-screen.
-    const d0 = z * Math.tan((pEff * Math.PI) / 180);
-    let center = [lon + (d0 * Math.sin(b)) / (M_PER_DEG_LAT * cosLat), lat + (d0 * Math.cos(b)) / M_PER_DEG_LAT];
-    // Newton refinement on the on-screen error: find the centre that projects the target (at its
-    // altitude) to screen centre, via a numerical 2x2 Jacobian d(screen)/d(centre). Projection-
-    // agnostic, so it converges in globe too — the old fixed-point assumed mercator and drifted there.
-    let best = center, bestOff = Infinity;
-    for (let i = 0; i < 8; i += 1) {
-      const air = project(center);
-      if (!air || !Number.isFinite(air[0]) || !Number.isFinite(air[1])) break;
-      const ex = air[0] - cx, ey = air[1] - cy, off = Math.hypot(ex, ey);
-      if (off < bestOff) { bestOff = off; best = center; }
-      if (off < 3) break;
-      const eLng = 0.01 / Math.max(cosLat, 0.2), eLat = 0.01; // ~1 km probes for the Jacobian
-      const ax = project([center[0] + eLng, center[1]]);
-      const ay = project([center[0], center[1] + eLat]);
-      if (!ax || !ay || !Number.isFinite(ax[0]) || !Number.isFinite(ay[0])) break;
-      const j00 = (ax[0] - air[0]) / eLng, j10 = (ax[1] - air[1]) / eLng;
-      const j01 = (ay[0] - air[0]) / eLat, j11 = (ay[1] - air[1]) / eLat;
-      const det = j00 * j11 - j01 * j10;
-      if (!det || !Number.isFinite(det)) break;
-      const dLng = (-j11 * ex + j01 * ey) / det, dLat = (j10 * ex - j00 * ey) / det;
-      if (!Number.isFinite(dLng) || !Number.isFinite(dLat) || Math.abs(dLng) > 8 || Math.abs(dLat) > 8) break;
-      center = [center[0] + dLng, center[1] + dLat];
-      if (Math.abs(center[1] - lat) > 10 || Math.abs(center[0] - lon) > 10) break; // runaway guard
-    }
-    // If the solve never brought the target near screen centre (steep/bottom pitch, where "target at
-    // centre" is degenerate), DON'T move — leave the camera put so the target stays where it is on
-    // screen (visible) instead of teleporting behind the camera on a bad far seed.
+    // Newton from a seed: nudge the centre until the target projects to screen centre (numerical 2x2
+    // Jacobian d(screen)/d(centre)). Works in globe AND at pitch > 90° for the look-up view.
+    const solve = (seed) => {
+      let center = seed, best = seed, bestOff = Infinity;
+      for (let i = 0; i < 10; i += 1) {
+        const air = project(center);
+        if (!air) break;
+        const ex = air[0] - cx, ey = air[1] - cy, off = Math.hypot(ex, ey);
+        if (off < bestOff) { bestOff = off; best = center; }
+        if (off < 2) break;
+        const eLng = 0.01 / Math.max(cosLat, 0.2), eLat = 0.01;
+        const ax = project([center[0] + eLng, center[1]]), ay = project([center[0], center[1] + eLat]);
+        if (!ax || !ay) break;
+        const j00 = (ax[0] - air[0]) / eLng, j10 = (ax[1] - air[1]) / eLng;
+        const j01 = (ay[0] - air[0]) / eLat, j11 = (ay[1] - air[1]) / eLat;
+        const det = j00 * j11 - j01 * j10;
+        if (!det || !Number.isFinite(det)) break;
+        const dLng = (-j11 * ex + j01 * ey) / det, dLat = (j10 * ex - j00 * ey) / det;
+        if (!Number.isFinite(dLng) || !Number.isFinite(dLat) || Math.abs(dLng) > 8 || Math.abs(dLat) > 8) break;
+        center = [center[0] + dLng, center[1] + dLat];
+        if (Math.abs(center[1] - lat) > 12 || Math.abs(center[0] - lon) > 12) break; // runaway guard
+      }
+      return { best, bestOff };
+    };
+    // Multi-start: the CURRENT centre (best while tracking / at pitch > 90, where the target is already
+    // near-centre from the previous step) plus an analytic seed (a fresh jump-to). Keep the better one.
     const cur = map.getCenter();
-    if (!Number.isFinite(bestOff) || bestOff > Math.min(w, h) * 0.5) return [cur.lng, cur.lat];
-    return [best[0], Math.max(-85, Math.min(85, best[1]))]; // keep latitude valid for setCenter
+    const d0 = z * Math.tan((Math.min(pitchDeg, 85) * Math.PI) / 180);
+    let winner = null, winOff = Infinity;
+    for (const seed of [[cur.lng, cur.lat], [lon + (d0 * Math.sin(b)) / (M_PER_DEG_LAT * cosLat), lat + (d0 * Math.cos(b)) / M_PER_DEG_LAT]]) {
+      const r = solve(seed);
+      if (r.bestOff < winOff) { winOff = r.bestOff; winner = r.best; }
+    }
+    // If neither seed brought the target near centre, DON'T move (keeps it visible rather than jumping).
+    if (!winner || !Number.isFinite(winOff) || winOff > Math.min(w, h) * 0.5) return [cur.lng, cur.lat];
+    return [winner[0], Math.max(-85, Math.min(85, winner[1]))];
   }
   const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3); // fast start, slow settle
   let followSettleUntil = 0; // suspend follow until the focus/locate animation has settled
