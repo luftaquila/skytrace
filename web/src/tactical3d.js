@@ -17,7 +17,23 @@ import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 
 const FT_TO_M = 0.3048;
 const HOME = { lon: 127.33113, lat: 36.36599 }; // Yuseong IC
-const SAT_TILES = ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"];
+// Satellite via a custom protocol so we can reject Esri's "Map data not yet available" placeholder
+// tile (byte-identical, exactly 2521 bytes) past its coverage — rejecting it makes MapLibre keep the
+// parent tile scaled up (per-location overzoom), instead of a hard global maxzoom cap.
+const SAT_TILES = ["esrisat://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"];
+const ESRI_PLACEHOLDER_BYTES = 2521;
+let esriProtocolAdded = false;
+function ensureEsriProtocol() {
+  if (esriProtocolAdded) return;
+  esriProtocolAdded = true;
+  maplibregl.addProtocol("esrisat", async (params, abortController) => {
+    const resp = await fetch(params.url.replace(/^esrisat:\/\//, "https://"), { signal: abortController.signal });
+    if (!resp.ok) throw new Error(`esri tile ${resp.status}`);
+    const data = await resp.arrayBuffer();
+    if (data.byteLength === ESRI_PLACEHOLDER_BYTES) throw new Error("esri placeholder"); // → keep parent tile (overzoom)
+    return { data };
+  });
+}
 // Terrain relief comes from Mapterhorn (higher-quality open DEM, terrarium-encoded webp, CORS *,
 // maxzoom 12 over Korea). AWS Terrarium is kept only for the maplibre-contour source.
 const MAPTERHORN_TILES = ["https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"];
@@ -175,6 +191,7 @@ export function createTactical3d({ container, deps }) {
   let running = false;
   let ready = false;
   const contour = ensureContourSource();
+  ensureEsriProtocol();
 
   // Shared airfield symbol layout/paint. Split into per-class layers (below) so the worldwide
   // dataset (~48k) declutters by zoom: large always, medium from z5, small from z7. allow-overlap
@@ -195,7 +212,9 @@ export function createTactical3d({ container, deps }) {
     container,
     attributionControl: false,
     bearingSnap: 0, // never auto-snap the bearing to north (camera moves were rotating it unbidden)
-    maxPitch: 85, // essentially flat-to-the-horizon (MapLibre's practical max before looking underground)
+    maxPitch: 90, // the practical max in mercator — MapLibre hard-clamps pitch to ~90° (the far plane
+    // can't exceed the horizon), so a true bottom view (looking UP, pitch>90) is not possible without
+    // the globe projection. 90 = the lowest, most horizon-level look mercator allows.
     // Do NOT clamp the map centre's elevation to the terrain. With the default (true) the centre's
     // elevation auto-tracks the terrain under it, so panning/rotating over relief triggers MapLibre's
     // `recalculateZoomAndCenter`, which yanks the centre+zoom to a weird place (the fly-away; MapLibre
@@ -209,10 +228,9 @@ export function createTactical3d({ container, deps }) {
       version: 8,
       glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
       sources: {
-        // maxzoom 17: Esri returns a "Map data not yet available" placeholder tile past its real
-        // coverage in some areas; capping here makes MapLibre OVERZOOM (scale up) the last real tile
-        // instead of ever requesting/showing that placeholder, so the imagery stays continuous.
-        satellite: { type: "raster", tiles: SAT_TILES, tileSize: 256, maxzoom: 17, attribution: "Esri, Maxar, Earthstar Geographics" },
+        // High maxzoom so deep imagery is used wherever it exists; the esrisat protocol rejects the
+        // placeholder tile per location, so gaps overzoom the last real tile instead of showing it.
+        satellite: { type: "raster", tiles: SAT_TILES, tileSize: 256, maxzoom: 20, attribution: "Esri, Maxar, Earthstar Geographics" },
         dem: { type: "raster-dem", tiles: MAPTERHORN_TILES, encoding: "terrarium", tileSize: 512, maxzoom: 12, attribution: "Terrain © Mapterhorn" },
         contours: { type: "vector", tiles: [contour.contourProtocolUrl({ multiplier: 1, thresholds: { 8: [500, 2000], 10: [200, 1000], 12: [100, 500], 14: [50, 250] }, elevationKey: "ele", levelKey: "level", contourLayer: "contours" })], maxzoom: 15 },
         grid: { type: "geojson", data: EMPTY_FC },
@@ -707,7 +725,12 @@ export function createTactical3d({ container, deps }) {
   function centerFor(lon, lat, z, pitchDeg = map.getPitch(), zoom = map.getZoom()) {
     if (!(z > 0)) return [lon, lat];
     const bearing = map.getBearing();
-    const p = (pitchDeg * Math.PI) / 180, b = (bearing * Math.PI) / 180, cosLat = Math.cos((lat * Math.PI) / 180) || 1;
+    // Past ~85° the ground-under-target solve degenerates (target sits near/above the horizon; the
+    // unproject runs off the globe → invalid latitude that setCenter rejects). Clamp the pitch used
+    // for framing so the result stays finite — the camera can still tilt past 90° for a bottom view,
+    // the aircraft-centring just eases off up there instead of crashing.
+    const pEff = Math.min(pitchDeg, 85);
+    const p = (pEff * Math.PI) / 180, b = (bearing * Math.PI) / 180, cosLat = Math.cos((lat * Math.PI) / 180) || 1;
     // Analytical seed: shift z*tan(pitch) metres in the look direction. Puts the target roughly
     // on-screen even at high zoom (where the nadir-centred aircraft projects off the top), so the
     // unproject refinement below starts from a valid on-screen point instead of the sky.
@@ -721,7 +744,7 @@ export function createTactical3d({ container, deps }) {
     for (let i = 0; i < 5; i += 1) {
       let air, g;
       try {
-        const vp = new WebMercatorViewport({ width: w, height: h, longitude: center[0], latitude: center[1], zoom, pitch: pitchDeg, bearing });
+        const vp = new WebMercatorViewport({ width: w, height: h, longitude: center[0], latitude: center[1], zoom, pitch: pEff, bearing });
         air = vp.project([lon, lat, z]);
         g = air && Number.isFinite(air[0]) && Number.isFinite(air[1]) ? vp.unproject([air[0], air[1]]) : null;
       } catch { break; }
@@ -731,7 +754,7 @@ export function createTactical3d({ container, deps }) {
       if (off < 4 || !g || !Number.isFinite(g[0]) || !Number.isFinite(g[1]) || Math.abs(g[0] - lon) > 6 || Math.abs(g[1] - lat) > 6) break;
       center = [g[0], g[1]];
     }
-    return best;
+    return [best[0], Math.max(-85, Math.min(85, best[1]))]; // keep latitude valid for setCenter
   }
   const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3); // fast start, slow settle
   let followSettleUntil = 0; // suspend follow until the focus/locate animation has settled
