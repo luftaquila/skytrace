@@ -196,7 +196,6 @@ export function createTactical3d({ container, deps }) {
   let hoverAf = null;
   let activeHex = null;
   let activeClearTimer = 0;
-  let clickedObject = false;
   const blocks = new Map(); // hex -> { el, sig }
 
   function scheduleActive(hex) {
@@ -332,7 +331,7 @@ export function createTactical3d({ container, deps }) {
       // per aircraft — bigger than the model — so selecting never needs pixel-perfect aim.
       new ScatterplotLayer({
         id: "hit", data: list, getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 40, radiusMinPixels: 40, radiusMaxPixels: 40,
-        filled: true, stroked: false, getFillColor: [0, 0, 0, 0], pickable: true, onClick: onAircraftClick, onHover: onAircraftHover, parameters: { depthCompare: "always" },
+        filled: true, stroked: false, getFillColor: [0, 0, 0, 0], pickable: true, onHover: onAircraftHover, parameters: { depthCompare: "always" },
       }),
     ].filter(Boolean);
     overlay.setProps({ layers });
@@ -427,7 +426,6 @@ export function createTactical3d({ container, deps }) {
   }
 
   // --- Interaction ------------------------------------------------------------------------
-  function onAircraftClick(info) { if (info.object) { clickedObject = true; deps.onSelect(info.object.hex); } }
   function onAircraftHover(info) {
     const hex = info.object?.hex || null;
     if (hex !== hoverHex) { hoverHex = hex; deps.onHover(hex); map.getCanvas().style.cursor = hex ? "pointer" : ""; scheduleActive(hex); }
@@ -446,7 +444,10 @@ export function createTactical3d({ container, deps }) {
   map.on("mouseleave", AF_LAYERS, () => { hoverAf = null; if (!hoverHex) map.getCanvas().style.cursor = ""; if (!afPinned) afTooltipEl.style.display = "none"; });
   map.on("click", (e) => {
     if (dragMoved) { dragMoved = false; return; }
-    if (clickedObject) { clickedObject = false; return; } // an aircraft (deck) handled this click
+    // Aircraft: pick synchronously off MapLibre's (immediate) click instead of deck's onClick,
+    // which waits ~300ms to disambiguate single- vs double-click — that lag was the select delay.
+    const hit = overlay._deck?.pickObject?.({ x: e.point.x, y: e.point.y, radius: 18, layerIds: ["hit"] });
+    if (hit?.object?.hex) { deps.onSelect(hit.object.hex); return; }
     const field = airfieldByKey.get(map.queryRenderedFeatures(e.point, { layers: AF_LAYERS })[0]?.properties?.key);
     if (field) { afPinned = field; showAf(field); return; } // clicking an airfield pins its popover
     if (afPinned) { afPinned = null; afTooltipEl.style.display = "none"; } // click elsewhere clears it
