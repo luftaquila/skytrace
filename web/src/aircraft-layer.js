@@ -126,6 +126,10 @@ void main() { fragColor = vec4(covColor(v_altFt), u_alpha); }`;
 function scale3(x, y, z) {
   return new Float64Array([x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1]);
 }
+// map.transform.getMatrixForModel gives a Y-UP local frame (X=east, Y=UP, Z=south) — the three.js
+// convention MapLibre's model-matrix API targets, NOT the Z-up ENU our mesh/attitude assume. This
+// change-of-basis maps ENU (X=east, Y=north, Z=up) into that frame: ENU east→X, north→-Z, up→Y.
+const ENU_TO_FRAME = new Float64Array([1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1]);
 
 function compile(gl, src, type) {
   const sh = gl.createShader(type);
@@ -242,7 +246,9 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
           covCount = cov.positions.length / 3;
           covRef = cov.positions;
         }
-        const covMvp = mul(mul(main, map.transform.getMatrixForModel(cov.anchor, 0)), scale3(1, 1, cov.altExagg));
+        // mesh verts are Z-up ENU metre offsets [east, north, alt]; ENU_TO_FRAME puts the altitude on
+        // the frame's UP axis (Y) so the dome stands vertically UP, not tipped over onto its side.
+        const covMvp = mul(mul(mul(main, map.transform.getMatrixForModel(cov.anchor, 0)), ENU_TO_FRAME), scale3(1, 1, cov.altExagg));
         gl.useProgram(covProgram);
         gl.uniformMatrix4fv(covLoc.mvp, false, new Float32Array(covMvp));
         gl.bindBuffer(gl.ARRAY_BUFFER, covBuf);
@@ -324,7 +330,9 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
         const clsMul = d.clsMul || 1;
         const px = Math.min(Math.max(worldPx, 48 * clsMul), 68 * clsMul);
         const s = px / (mesh.span * ppm);
-        const R = attitude(d.yaw, d.pitch, d.roll);
+        // attitude() orients the model in Z-up ENU; ENU_TO_FRAME re-expresses it in the frame's Y-up
+        // basis so the aircraft sits upright (not tipped 90° onto a wingtip).
+        const R = mul(ENU_TO_FRAME, attitude(d.yaw, d.pitch, d.roll));
         const mvp = mul(mul(M0, R), scale(s));
         if (typeof window !== "undefined" && window.__T3D_DEBUG && !window.__t3dLastSize) {
           window.__t3dLastSize = { px: +px.toFixed(1), s: +s.toFixed(1), ppm: +ppm.toFixed(5), span: +mesh.span.toFixed(3), worldPx: +worldPx.toFixed(1), clsMul, cls: d.cls };
