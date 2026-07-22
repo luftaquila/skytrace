@@ -9,12 +9,12 @@
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import mlcontour from "maplibre-contour";
-import { WebMercatorViewport, _GlobeViewport as GlobeViewport } from "@deck.gl/core";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { ScenegraphLayer, SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 import { createAircraftLayer } from "./aircraft-layer.js";
+import { installGlobeCenterElevation } from "./globe-center-elevation.js";
 
 const FT_TO_M = 0.3048;
 const HOME = { lon: 127.33113, lat: 36.36599 }; // Yuseong IC
@@ -214,11 +214,9 @@ export function createTactical3d({ container, deps }) {
     attributionControl: false,
     bearingSnap: 0, // never auto-snap the bearing to north (camera moves were rotating it unbidden)
     maxPitch: 150, // globe projection allows pitch > 90° — tilt past vertical for a bottom (look-up) view.
-    // Do NOT clamp the map centre's elevation to the terrain. With the default (true) the centre's
-    // elevation auto-tracks the terrain under it, so panning/rotating over relief triggers MapLibre's
-    // `recalculateZoomAndCenter`, which yanks the centre+zoom to a weird place (the fly-away; MapLibre
-    // bug #2937, unfixed). With false the centre stays at sea level and is never recalculated, so the
-    // camera no longer teleports on rotate/pan/zoom over terrain. (Docs also recommend false for high pitch.)
+    // Do NOT clamp the map centre's elevation to terrain. setTerrain still seeds one DEM elevation
+    // once (cleared after style load below), but subsequent renders must leave our explicit 3D orbit
+    // elevation alone. This also avoids recalculateZoomAndCenter fly-aways at very high pitch.
     centerClampedToGround: false,
     pitch: 55,
     zoom: 6,
@@ -259,10 +257,13 @@ export function createTactical3d({ container, deps }) {
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6, "atmosphere-blend": 0 },
     },
   });
+  // MapLibre's globe camera omits center elevation from its vertical-perspective matrix. Patch that
+  // missing camera term once, before any terrain/camera operation, so terrain, coverage, trails and
+  // aircraft all orbit the same real 3D point at every zoom (including the globe transition range).
+  const globeCenterElevationInstalled = installGlobeCenterElevation(map.transform);
+  if (!globeCenterElevationInstalled) throw new Error("MapLibre globe center-elevation adapter could not be installed");
   // Swapped mouse drag (per request): LEFT-drag rotates & tilts, RIGHT-drag pans. MapLibre has no
-  // button-swap option in this release, so drive both by hand off the canvas mouse events. This is
-  // safe over terrain ONLY because centerClampedToGround:false (above) disables MapLibre's
-  // centre-elevation recalculation — the source of the old "centre flies to a weird place" lurch.
+  // button-swap option in this release, so drive both by hand off the canvas mouse events.
   map.dragPan.disable();
   map.dragRotate.disable();
   map.touchZoomRotate.enableRotation();
@@ -275,85 +276,176 @@ export function createTactical3d({ container, deps }) {
   let drag = null;
   let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
   let followActive = false; // camera tracks the selected aircraft until the user drags/rotates it
-  let orbitZ = 0; // when > 0, the map centre is held at this altitude so the camera ORBITS the target
+  let orbitZ = 0; // exaggerated target altitude; the camera's real 3D pivot while orbit-attached
   let orbitAttached = false; // rotate/zoom re-centre on the selected aircraft ONLY while attached; a
   // free pan (right-drag) detaches so rotate/zoom then pivot on the current view, not teleport back.
-  // Orbit the selected aircraft by holding the map centre at its lon/lat AND raising the centre's
-  // ELEVATION to the aircraft's (exaggerated) altitude, so rotate/tilt/zoom pivot on the aircraft and
-  // hold it dead-centre at any pitch — including looking up from below (pitch > 90). Verified off=0 at
-  // zoom ≥ ~12.5 for all pitches; select/locate fly IN to that range so it's always exact. Every
-  // camera op resets the centre elevation to the terrain, so this must be re-applied after each.
-  function focusOnSelected(sel) {
-    // Transform-level (NOT map.setCenter) — map.setCenter routes through Camera and stops in-flight
-    // animations / re-anchors, causing the pan↔snap flicker. Direct mutation keeps the aircraft
-    // centred cleanly. Used by the rotate drag (keeps the centre on the — possibly moved — aircraft).
-    orbitZ = sel.z;
-    map.transform.setCenter(new maplibregl.LngLat(sel.lon, sel.lat));
-    map.transform.setElevation(sel.z);
+  let cameraAnimation = null;
+
+  const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3);
+  const EASE_IN_OUT = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const wrapDelta = (delta) => ((delta + 540) % 360) - 180;
+  function interpolateCenter(from, to, t) {
+    return new maplibregl.LngLat(from.lng + wrapDelta(to.lng - from.lng) * t, lerp(from.lat, to.lat, t));
   }
-  function clearOrbit() {
+  function interpolateAngle(from, to, t) { return from + wrapDelta(to - from) * t; }
+
+  // Direct transform updates avoid Camera._getTransformForUpdate(), whose terrain path overwrites
+  // center elevation before every jump/ease. One rAF owns all five camera dimensions, so center,
+  // zoom and altitude cannot land on different frames and produce the old ground→aircraft snap.
+  function applyCameraFrame({ center, zoom, bearing, pitch, elevation }) {
+    const tr = map.transform;
+    if (center) tr.setCenter(center instanceof maplibregl.LngLat ? center : new maplibregl.LngLat(center[0], center[1]));
+    if (zoom != null) tr.setZoom(Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), zoom)));
+    if (bearing != null) tr.setBearing(bearing);
+    if (pitch != null) tr.setPitch(Math.max(map.getMinPitch(), Math.min(map.getMaxPitch(), pitch)));
+    if (elevation != null) tr.setElevation(elevation);
+    map.triggerRepaint();
+  }
+
+  function cancelCameraAnimation() {
+    if (!cameraAnimation) return;
+    cancelAnimationFrame(cameraAnimation.raf);
+    cameraAnimation = null;
+  }
+
+  function animateCamera(target, { duration = 640, easing = EASE_IN_OUT, kind = "camera", onComplete } = {}) {
+    cancelCameraAnimation();
+    map.stop();
+    const startCenter = map.getCenter();
+    const endCenter = target.center
+      ? (target.center instanceof maplibregl.LngLat ? target.center : new maplibregl.LngLat(target.center[0], target.center[1]))
+      : startCenter;
+    const start = {
+      center: startCenter,
+      zoom: map.getZoom(),
+      bearing: map.getBearing(),
+      pitch: map.getPitch(),
+      elevation: map.transform.elevation || 0,
+    };
+    const end = {
+      center: endCenter,
+      zoom: target.zoom ?? start.zoom,
+      bearing: target.bearing ?? start.bearing,
+      pitch: target.pitch ?? start.pitch,
+      elevation: target.elevation ?? start.elevation,
+    };
+    if (duration <= 0) {
+      applyCameraFrame(end);
+      onComplete?.();
+      return;
+    }
+    const started = performance.now();
+    const animation = { raf: 0, kind, end };
+    cameraAnimation = animation;
+    const tick = (now) => {
+      if (cameraAnimation !== animation) return;
+      const raw = Math.min(1, Math.max(0, (now - started) / duration));
+      const k = easing(raw);
+      applyCameraFrame({
+        center: interpolateCenter(start.center, end.center, k),
+        zoom: lerp(start.zoom, end.zoom, k),
+        bearing: interpolateAngle(start.bearing, end.bearing, k),
+        pitch: lerp(start.pitch, end.pitch, k),
+        elevation: lerp(start.elevation, end.elevation, k),
+      });
+      if (raw < 1) animation.raf = requestAnimationFrame(tick);
+      else {
+        cameraAnimation = null;
+        applyCameraFrame(end);
+        onComplete?.();
+      }
+    };
+    animation.raf = requestAnimationFrame(tick);
+  }
+
+  // Orbit the selected aircraft by making its lon/lat/exaggerated altitude MapLibre's actual camera
+  // center. The globe matrix adapter above makes this the same physical pivot in globe and mercator.
+  function focusOnSelected(sel) {
+    orbitZ = sel.z;
+    applyCameraFrame({ center: [sel.lon, sel.lat], elevation: sel.z });
+  }
+  function clearOrbit({ animate = true } = {}) {
+    const elevation = map.transform.elevation || 0;
+    if (!orbitAttached && orbitZ === 0 && cameraAnimation?.kind === "release") return;
+    if (!orbitAttached && orbitZ === 0 && Math.abs(elevation) < 0.5) return;
     orbitAttached = false;
     map.scrollZoom.enable(); // normal cursor-anchored scroll-zoom when not orbiting
-    if (orbitZ === 0) return;
     orbitZ = 0;
-    map.transform.setElevation(0);
-    map.triggerRepaint();
+    if (animate && Math.abs(elevation) >= 0.5) animateCamera({ elevation: 0 }, { duration: 420, easing: EASE_IN_OUT, kind: "release" });
+    else applyCameraFrame({ elevation: 0 });
   }
   function attachOrbit(z) { orbitAttached = true; orbitZ = z; map.scrollZoom.disable(); } // orbit → custom centre-zoom
   let identBlinkOn = false; // toggled by a timer while any aircraft squawks IDENT (gold body flash)
   let identBlinkTimer = 0;
   const onDown = (e) => {
     e.preventDefault(); // no native drag-image / text selection while manipulating the camera
+    cancelCameraAnimation();
+    map.stop();
     dragMoved = false;
     followActive = false; // any manual drag/rotate stops auto-tracking
     if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
-    else if (e.button === 2) { clearOrbit(); drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY }; } // free pan drops the orbit
+    else if (e.button === 2) {
+      // Detach without dropping the elevated pivot on this frame. Pan preserves it, then on mouse-up
+      // the map eases back to a ground pivot instead of teleporting there.
+      orbitAttached = false;
+      orbitZ = 0;
+      map.scrollZoom.enable();
+      drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
+    }
   };
   const onMove = (e) => {
     if (!drag) return;
     if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 3) dragMoved = true;
     if (drag.mode === "rotate") {
-      map.setBearing(drag.bearing + (e.clientX - drag.x) * 0.35);
-      map.setPitch(Math.max(0, Math.min(map.getMaxPitch(), drag.pitch - (e.clientY - drag.y) * 0.25)));
-      // While ORBIT-ATTACHED to a selected aircraft, keep it dead-centre (centre-at-altitude) as we
-      // rotate/tilt, incl. past 90° to look up from below. Re-applied each move so it survives the
-      // setBearing/setPitch above resetting the centre elevation. If the user free-panned (detached),
-      // rotation pivots on the current view instead (no teleport back to the aircraft).
       const selHex = deps.getSelectedHex();
       const sel = orbitAttached && selHex && lastList.find((d) => d.hex === selHex);
-      if (sel) focusOnSelected(sel);
+      applyCameraFrame({
+        center: sel ? [sel.lon, sel.lat] : null,
+        bearing: drag.bearing + (e.clientX - drag.x) * 0.35,
+        pitch: drag.pitch - (e.clientY - drag.y) * 0.25,
+        elevation: sel ? sel.z : map.transform.elevation,
+      });
+      if (sel) orbitZ = sel.z;
     } else {
-      map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0 });
+      map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0, freezeElevation: true });
       drag.x = e.clientX; drag.y = e.clientY; // pan is incremental
     }
   };
-  const onUp = () => { drag = null; };
+  const onUp = () => {
+    const wasPan = drag?.mode === "pan";
+    drag = null;
+    if (wasPan && Math.abs(map.transform.elevation || 0) >= 0.5) {
+      animateCamera({ elevation: 0 }, { duration: 420, easing: EASE_IN_OUT, kind: "pan-release" });
+    }
+  };
   cv.addEventListener("mousedown", onDown);
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
-  // While orbit-attached, handle the wheel OURSELVES and zoom around the CENTRE (the aircraft),
-  // NOT the cursor. MapLibre's scrollZoom anchors on the cursor, which panned the view toward the
-  // ground point and then our re-centre snapped it back — a per-tick pan↔snap flicker. scrollZoom
-  // is disabled while attached (see focus/clearOrbit); here we zoom around centre via easeTo, and the
-  // move handler holds the centre elevation so the aircraft stays put. Off-attached, scrollZoom runs.
+  // While attached, zoom around the aircraft instead of the cursor. Repeated wheel events retarget
+  // one short camera tween, with no artificial floor: the globe elevation fix remains exact at z0.
   const onWheel = (e) => {
     if (!orbitAttached) return; // normal scroll-zoom when not orbiting
     e.preventDefault();
     followActive = false;
     const step = (e.deltaMode === 1 ? e.deltaY * 0.04 : e.deltaY * 0.0018);
-    // Floor at 12: below it MapLibre ignores the centre elevation, so the aircraft would fly off the
-    // top. Zooming out to see the overview → deselect. Zoom-in is unrestricted.
-    const z = Math.max(12, Math.min(map.getMaxZoom(), map.getZoom() - step));
-    map.easeTo({ zoom: z, duration: 90, easing: (t) => t }); // around the centre; centre stays on the aircraft
+    const baseZoom = cameraAnimation?.kind === "wheel" ? cameraAnimation.end.zoom : map.getZoom();
+    const z = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), baseZoom - step));
+    const selHex = deps.getSelectedHex();
+    const sel = selHex && lastList.find((d) => d.hex === selHex);
+    if (!sel) { clearOrbit(); return; }
+    orbitZ = sel.z;
+    animateCamera({ center: [sel.lon, sel.lat], zoom: z, elevation: sel.z }, { duration: 150, easing: EASE_OUT, kind: "wheel" });
   };
   cv.addEventListener("wheel", onWheel, { passive: false });
-  // Hold the orbit centre elevation through EASES (fly-in select/locate, follow glide) and drags:
-  // every camera op resets the centre elevation to the terrain, so re-apply it via the transform on
-  // each move. Transform-level (not map.setElevation) so it does NOT cancel the in-flight ease — the
-  // aircraft then glides smoothly to centre instead of snapping. Guarded so it never loops. (Only
-  // effective at zoom ≥ ~12.5, where the centre elevation is honoured — select/locate fly in to there.)
+  // Native touch gestures still emit `move`; reassert the selected 3D pivot synchronously before the
+  // next render. Our own rAF animations are excluded because they already interpolate that pivot.
   map.on("move", () => {
-    if (orbitAttached && orbitZ && Math.abs((map.transform.elevation || 0) - orbitZ) > 1) map.transform.setElevation(orbitZ);
+    if (orbitAttached && !cameraAnimation) {
+      const selHex = deps.getSelectedHex();
+      const sel = selHex && lastList.find((d) => d.hex === selHex);
+      if (sel) focusOnSelected(sel);
+    }
   });
   // Generate the tactical airfield glyph icons on demand (per class colour).
   map.on("styleimagemissing", (e) => {
@@ -372,7 +464,22 @@ export function createTactical3d({ container, deps }) {
   let aircraftDots = [];     // stick ground feet, as {p,color,sizePx}
   let aircraftCoverage = null; // coverage dome mesh: {positions, anchor, altExagg}
   const aircraftLayer = createAircraftLayer({ getData: () => aircraftRenderList, getSegments: () => aircraftSegments, getDots: () => aircraftDots, getCoverage: () => aircraftCoverage });
-  if (typeof window !== "undefined" && window.__T3D_DEBUG) { window.__t3dMap = map; window.__t3dOverlay = overlay; window.__WMV = WebMercatorViewport; window.__t3dAircraftLayer = aircraftLayer; window.__t3dCenterFor = (lon, lat, z) => centerFor(lon, lat, z); }
+  if (typeof window !== "undefined" && window.__T3D_DEBUG) {
+    window.__t3dMap = map;
+    window.__t3dOverlay = overlay;
+    window.__t3dAircraftLayer = aircraftLayer;
+    window.__t3dCameraState = () => ({
+      center: map.getCenter().toArray(),
+      zoom: map.getZoom(),
+      bearing: map.getBearing(),
+      pitch: map.getPitch(),
+      elevation: map.transform.elevation,
+      orbitAttached,
+      orbitZ,
+      animation: cameraAnimation?.kind || null,
+      globeCenterElevationInstalled,
+    });
+  }
 
   // --- DOM overlay: data-block popovers + pins (exact old styling), airfield popover ------
   const overlayEl = document.createElement("div");
@@ -805,102 +912,46 @@ export function createTactical3d({ container, deps }) {
   function drawCoverage() { buildLayers(); }
   function applySettings() {
     exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
-    if (ready) { map.setTerrain({ source: "dem", exaggeration: exagg }); refreshSources(); buildLayers(); }
+    if (ready) {
+      map.setTerrain({ source: "dem", exaggeration: exagg });
+      const selHex = deps.getSelectedHex();
+      const sel = orbitAttached && selHex && lastList.find((d) => d.hex === selHex);
+      if (sel) focusOnSelected(sel);
+      else applyCameraFrame({ elevation: 0 });
+      refreshSources();
+      buildLayers();
+    }
   }
   function setHoverClass(prev, next) { hoverHex = next; scheduleActive(next); }
   function setActive(active) {
     running = active;
     if (active) { map.resize(); hintEl.style.display = ""; setTimeout(() => { hintEl.style.display = "none"; }, 8000); }
-    else { hoverHex = null; hoverAf = null; afPinned = null; afPinEl.style.display = "none"; afHoverEl.style.display = "none"; }
+    else { cancelCameraAnimation(); hoverHex = null; hoverAf = null; afPinned = null; afPinEl.style.display = "none"; afHoverEl.style.display = "none"; }
   }
   function resize() { map.resize(); }
   // 3D sits one zoom level CLOSER than the 2D map (pitch pulls the view back), so the default
   // isn't too far out. getCameraForMap inverts this so a 2D<->3D round-trip is stable.
-  function setCameraFromMap(center, zoom) { map.jumpTo({ center: [center.lng ?? center.lon, center.lat], zoom: zoom + 1, pitch: 55 }); }
-  function getCameraForMap() { const c = map.getCenter(); return { center: [c.lat, c.lng], zoom: Math.min(18, Math.max(3, Math.round(map.getZoom() - 1))) }; }
-  // Screen-space lift of an altitude point above its ground point (for centring the aircraft,
-  // not its nadir). Cached as followOffset so follow uses a STABLE offset — recomputing it from
-  // a mid-animation camera every tick is what made the view oscillate.
-  // GROUND point to centre the map on so an aircraft at scene-height z lands at screen centre.
-  // Solved with the real (target) projection: the map centre we want is the ground point sitting
-  // under the aircraft's projected screen position; iterating converges to it. This is exact at any
-  // zoom (fixes "wrong place then re-align"). Guarded so a near-horizon unproject that runs off to
-  // the sky (non-finite or a huge shift) never jumps the camera to a garbage coordinate.
-  function centerFor(lon, lat, z, pitchDeg = map.getPitch(), zoom = map.getZoom()) {
-    if (!(z > 0)) return [lon, lat];
-    const bearing = map.getBearing();
-    // Past ~85° the ground-under-target solve degenerates (target sits near/above the horizon; the
-    // unproject runs off the globe → invalid latitude that setCenter rejects). Clamp the pitch used
-    // for framing so the result stays finite — the camera can still tilt past 90° for a bottom view,
-    // the aircraft-centring just eases off up there instead of crashing.
-    const b = (bearing * Math.PI) / 180, cosLat = Math.cos((lat * Math.PI) / 180) || 1;
-    const w = map.getCanvas().clientWidth || 1, h = map.getCanvas().clientHeight || 1, cx = w / 2, cy = h / 2;
-    // Project the target through the MAP'S OWN matrix (deck's GlobeViewport ignores bearing/pitch) at
-    // the REAL pitch — incl. > 90° — by cloning the transform and dropping in each candidate centre.
-    const tf = map.transform.clone();
-    tf.setBearing(bearing); tf.setPitch(Math.min(pitchDeg, 150)); tf.setZoom(zoom);
-    const project = (c) => {
-      try {
-        tf.setCenter(new maplibregl.LngLat(c[0], Math.max(-85, Math.min(85, c[1]))));
-        const m = tf.getProjectionData({ overscaledTileID: null, applyGlobeMatrix: true }).mainMatrix;
-        const M = tf.getMatrixForModel([lon, lat], z); // target's local frame; its origin is column 3
-        const cw = m[3] * M[12] + m[7] * M[13] + m[11] * M[14] + m[15] * M[15];
-        if (!(cw > 0)) return null; // behind the camera
-        const cxp = m[0] * M[12] + m[4] * M[13] + m[8] * M[14] + m[12] * M[15];
-        const cyp = m[1] * M[12] + m[5] * M[13] + m[9] * M[14] + m[13] * M[15];
-        return [((cxp / cw) * 0.5 + 0.5) * w, (1 - ((cyp / cw) * 0.5 + 0.5)) * h];
-      } catch { return null; }
-    };
-    // Newton from a seed: nudge the centre until the target projects to screen centre (numerical 2x2
-    // Jacobian d(screen)/d(centre)). Works in globe AND at pitch > 90° for the look-up view.
-    const solve = (seed) => {
-      let center = seed, best = seed, bestOff = Infinity;
-      for (let i = 0; i < 10; i += 1) {
-        const air = project(center);
-        if (!air) break;
-        const ex = air[0] - cx, ey = air[1] - cy, off = Math.hypot(ex, ey);
-        if (off < bestOff) { bestOff = off; best = center; }
-        if (off < 2) break;
-        const eLng = 0.01 / Math.max(cosLat, 0.2), eLat = 0.01;
-        const ax = project([center[0] + eLng, center[1]]), ay = project([center[0], center[1] + eLat]);
-        if (!ax || !ay) break;
-        const j00 = (ax[0] - air[0]) / eLng, j10 = (ax[1] - air[1]) / eLng;
-        const j01 = (ay[0] - air[0]) / eLat, j11 = (ay[1] - air[1]) / eLat;
-        const det = j00 * j11 - j01 * j10;
-        if (!det || !Number.isFinite(det)) break;
-        const dLng = (-j11 * ex + j01 * ey) / det, dLat = (j10 * ex - j00 * ey) / det;
-        if (!Number.isFinite(dLng) || !Number.isFinite(dLat) || Math.abs(dLng) > 8 || Math.abs(dLat) > 8) break;
-        center = [center[0] + dLng, center[1] + dLat];
-        if (Math.abs(center[1] - lat) > 12 || Math.abs(center[0] - lon) > 12) break; // runaway guard
-      }
-      return { best, bestOff };
-    };
-    // Multi-start: the CURRENT centre (best while tracking / at pitch > 90, where the target is already
-    // near-centre from the previous step) plus an analytic seed (a fresh jump-to). Keep the better one.
-    const cur = map.getCenter();
-    const d0 = z * Math.tan((Math.min(pitchDeg, 85) * Math.PI) / 180);
-    let winner = null, winOff = Infinity;
-    for (const seed of [[cur.lng, cur.lat], [lon + (d0 * Math.sin(b)) / (M_PER_DEG_LAT * cosLat), lat + (d0 * Math.cos(b)) / M_PER_DEG_LAT]]) {
-      const r = solve(seed);
-      if (r.bestOff < winOff) { winOff = r.bestOff; winner = r.best; }
-    }
-    // If neither seed brought the target near centre, DON'T move (keeps it visible rather than jumping).
-    if (!winner || !Number.isFinite(winOff) || winOff > Math.min(w, h) * 0.5) return [cur.lng, cur.lat];
-    return [winner[0], Math.max(-85, Math.min(85, winner[1]))];
+  function setCameraFromMap(center, zoom) {
+    cancelCameraAnimation();
+    orbitAttached = false;
+    orbitZ = 0;
+    map.scrollZoom.enable();
+    applyCameraFrame({ center: [center.lng ?? center.lon, center.lat], zoom: zoom + 1, pitch: 55, elevation: 0 });
   }
-  const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3); // fast start, slow settle
+  function getCameraForMap() { const c = map.getCenter(); return { center: [c.lat, c.lng], zoom: Math.min(18, Math.max(3, Math.round(map.getZoom() - 1))) }; }
   let followSettleUntil = 0; // suspend follow until the focus/locate animation has settled
-  // Select: smooth ease-out fly IN to the aircraft, framing it AT altitude — the move handler holds
-  // the centre elevation through the ease so the aircraft GLIDES to centre (no snap). Flies to zoom
-  // ≥ 12.5, where the centre-elevation orbit is exact; then auto-tracks. Zooms in only if zoomed out.
+  // Select: center, zoom and 3D pivot are one animation. No globe-transition threshold is needed.
   function panTo(lon, lat, altFt) {
     const z = (altFt != null ? altFt * FT_TO_M : 0) * ALT_EXAGG;
     followActive = true; attachOrbit(z);
-    followSettleUntil = performance.now() + 720;
-    map.easeTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 12.5), duration: 640, easing: EASE_OUT });
+    followSettleUntil = performance.now() + 820;
+    animateCamera(
+      { center: [lon, lat], zoom: Math.max(map.getZoom(), 10.5), elevation: z },
+      { duration: 760, easing: EASE_IN_OUT, kind: "focus" },
+    );
   }
-  // Auto-track the selected aircraft — a short eased glide (the move handler keeps it centred at
-  // altitude), so tracking is smooth, not tick-tick.
+  // Auto-track with an interruptible glide. New receiver samples retarget from the current in-flight
+  // frame, so sparse feed ticks never appear as position jumps.
   function followSelected() {
     if (!followActive) return;
     const selHex = deps.getSelectedHex();
@@ -909,19 +960,35 @@ export function createTactical3d({ container, deps }) {
     const d = lastList.find((x) => x.hex === selHex);
     if (!d) return;
     attachOrbit(d.z);
-    map.easeTo({ center: [d.lon, d.lat], duration: 260, easing: (t) => t });
+    const center = map.getCenter();
+    if (Math.abs(wrapDelta(d.lon - center.lng)) < 1e-8 && Math.abs(d.lat - center.lat) < 1e-8 && Math.abs(d.z - map.transform.elevation) < 0.5) return;
+    animateCamera({ center: [d.lon, d.lat], elevation: d.z }, { duration: 600, easing: EASE_IN_OUT, kind: "follow" });
   }
   // Locate button: ease-out fly to the aircraft, zoom + pitch, framed at altitude; resumes tracking.
   function flyToView(lon, lat, zoom, altFt) {
-    if (altFt == null) { clearOrbit(); followActive = false; map.easeTo({ center: [lon, lat], zoom: zoom + 1, pitch: 55, duration: 900, easing: EASE_OUT }); return; }
+    if (altFt == null) {
+      orbitAttached = false;
+      orbitZ = 0;
+      map.scrollZoom.enable();
+      followActive = false;
+      animateCamera({ center: [lon, lat], zoom: zoom + 1, pitch: 55, elevation: 0 }, { duration: 900, easing: EASE_IN_OUT, kind: "locate-home" });
+      return;
+    }
     const z = altFt * FT_TO_M * ALT_EXAGG;
     followActive = true; attachOrbit(z);
     followSettleUntil = performance.now() + 1000;
-    map.easeTo({ center: [lon, lat], zoom: Math.max(zoom + 1, 12.5), pitch: 55, duration: 900, easing: EASE_OUT });
+    animateCamera({ center: [lon, lat], zoom: Math.max(zoom + 1, 10.5), pitch: 55, elevation: z }, { duration: 900, easing: EASE_IN_OUT, kind: "locate-aircraft" });
   }
-  function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
+  function fitAircraft(points) {
+    if (!points.length) return;
+    clearOrbit({ animate: false });
+    const b = new maplibregl.LngLatBounds();
+    for (const p of points) b.extend([p.lon, p.lat]);
+    map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900, freezeElevation: true });
+  }
   function destroy() {
     disposed = true;
+    cancelCameraAnimation();
     if (identBlinkTimer) clearInterval(identBlinkTimer);
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);
@@ -938,6 +1005,9 @@ export function createTactical3d({ container, deps }) {
     if (disposed || ready) return;
     ready = true;
     map.setTerrain({ source: "dem", exaggeration: exagg });
+    // setTerrain seeds center elevation from the DEM even with centerClampedToGround:false.
+    // The free camera uses sea-level/ground pivot until an aircraft orbit is explicitly attached.
+    applyCameraFrame({ elevation: 0 });
     if (!map.getLayer(aircraftLayer.id)) map.addLayer(aircraftLayer);
     hideLoading();
     refreshSources();
