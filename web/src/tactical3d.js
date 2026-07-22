@@ -246,15 +246,6 @@ export function createTactical3d({ container, deps }) {
   let drag = null;
   let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
   let followActive = false; // camera tracks the selected aircraft until the user drags the map
-  // Auto-follow must yield to the USER on ANY manual camera gesture, whatever the input device.
-  // Mouse rotate/tilt/pan is our own drag (handled in onDown below); trackpad two-finger, touch
-  // pinch/rotate, wheel zoom and keyboard rotate/pitch/zoom come in through MapLibre's own handlers,
-  // so stop following on those too. Otherwise follow re-centres the target on the next data pass
-  // WHILE the user is rotating OR zooming, and at high tilt that re-frame yanks the ground far across
-  // the screen — the "flies to a weird coordinate" the user was seeing. e.originalEvent is set only
-  // for real user gestures; our own follow easeTo (centre only) and panTo/flyToView (programmatic)
-  // fire these without originalEvent, so this never cancels follow spuriously.
-  for (const ev of ["rotatestart", "pitchstart", "zoomstart", "dragstart", "boxzoomstart"]) map.on(ev, (e) => { if (e.originalEvent) followActive = false; });
   const onCtx = (e) => e.preventDefault();
   const onDown = (e) => {
     dragMoved = false;
