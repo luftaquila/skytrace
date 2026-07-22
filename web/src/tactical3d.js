@@ -313,6 +313,7 @@ export function createTactical3d({ container, deps }) {
   let activeHex = null;
   let activeClearTimer = 0;
   const blocks = new Map(); // hex -> { el, sig }
+  const identRings = new Map(); // hex -> blinking IDENT/SPI ring element
 
   function scheduleActive(hex) {
     clearTimeout(activeClearTimer);
@@ -352,7 +353,7 @@ export function createTactical3d({ container, deps }) {
       // deck maps the nose (+X) to world-Z = -sin(pitch) and the right wing (+Y) to
       // world-Z = cos(pitch)*sin(roll). ADS-B roll>0 = right wing DOWN and climb phi>0 = nose UP,
       // both the opposite sign of what deck needs — so negate both pitch and roll.
-      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * ALT_EXAGG, airborne, rgb, cls, orientation: [-phi, 90 - track, -bank], coasting: deps.isCoasting(item), item });
+      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * ALT_EXAGG, airborne, rgb, cls, orientation: [-phi, 90 - track, -bank], coasting: deps.isCoasting(item), spi: !!item.spi, item });
     }
     return out;
   }
@@ -364,6 +365,16 @@ export function createTactical3d({ container, deps }) {
     const list = aircraftList();
     lastList = list;
     const selHex = deps.getSelectedHex();
+
+    // Proximity/collision alert (same STCA data as the 2D map): a red link between each close pair —
+    // in 3D drawn tip-to-tip at altitude — and the involved aircraft reddened.
+    const conflicts = deps.getConflicts?.() || [];
+    const conflictHexes = new Set();
+    for (const p of conflicts) { conflictHexes.add(p.a.hex); conflictHexes.add(p.b.hex); }
+    const conflictLines = conflicts.map((p) => ({
+      source: [p.a.lon, p.a.lat, ((p.a.altBaro ?? p.a.altGeom) || 0) * FT_TO_M * ALT_EXAGG],
+      target: [p.b.lon, p.b.lat, ((p.b.altBaro ?? p.b.altGeom) || 0) * FT_TO_M * ALT_EXAGG],
+    }));
 
     const sticks = list.filter((d) => d.airborne).map((d) => ({ source: [d.lon, d.lat, d.z], target: [d.lon, d.lat, 0], color: [d.rgb.r, d.rgb.g, d.rgb.b, 200] }));
 
@@ -409,7 +420,7 @@ export function createTactical3d({ container, deps }) {
     for (const d of list) { const g = byCls.get(d.cls) || []; g.push(d); byCls.set(d.cls, g); }
     const aircraftLayers = [...byCls.entries()].map(([cls, data]) => new GlowScenegraphLayer({
       id: `aircraft-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-      getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255],
+      getColor: (d) => conflictHexes.has(d.hex) ? [251, 113, 133, 255] : [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255],
       sizeScale: 185, sizeMinPixels: Math.round(48 * cls), sizeMaxPixels: Math.round(68 * cls), _lighting: "pbr",
       pickable: false, parameters: { depthCompare: "always" },
     }));
@@ -439,6 +450,8 @@ export function createTactical3d({ container, deps }) {
       new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
       // Small dot at each stick's ground foot (the old view had these).
       new ScatterplotLayer({ id: "ground-dots", data: sticks, getPosition: (d) => d.target, radiusUnits: "pixels", getRadius: 3, radiusMinPixels: 2.5, radiusMaxPixels: 4, filled: true, stroked: false, getFillColor: (d) => d.color, parameters: { depthCompare: "always" } }),
+      // Collision/proximity alert link between each conflicting pair (red, over everything).
+      conflictLines.length && new LineLayer({ id: "conflicts", data: conflictLines, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: [251, 113, 133, 235], widthUnits: "pixels", getWidth: 2.6, widthMinPixels: 2, parameters: { depthCompare: "always" } }),
       ...aircraftLayers,
       ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 150, sizeMinPixels: 38, sizeMaxPixels: 54, parameters: { depthCompare: "always" } }),
       // Invisible, generous click/hover target (like the old hit sphere): a constant ~80px disc
@@ -498,10 +511,13 @@ export function createTactical3d({ container, deps }) {
 
   // --- HTML data blocks (pinned / selected / hovered), positioned via the deck viewport ---
   function project(lon, lat, z) {
-    const vp = overlay._deck?.getViewports?.()[0];
-    if (!vp) return null;
-    const p = vp.project([lon, lat, z]);
-    return p && Number.isFinite(p[0]) ? p : null;
+    try {
+      // getViewports() asserts if deck isn't sized/ready yet (early renders) — treat as "not placeable".
+      const vp = overlay._deck?.getViewports?.()[0];
+      if (!vp) return null;
+      const p = vp.project([lon, lat, z]);
+      return p && Number.isFinite(p[0]) ? p : null;
+    } catch { return null; }
   }
   function syncBlocks() {
     if (!ready) return;
@@ -536,6 +552,18 @@ export function createTactical3d({ container, deps }) {
     const lp = sel && project(sel.lon, sel.lat, sel.z);
     if (lp) { lockEl.style.display = ""; lockEl.style.transform = `translate3d(${lp[0].toFixed(1)}px, ${lp[1].toFixed(1)}px, 0) translate(-50%, -50%)`; }
     else lockEl.style.display = "none";
+    // Blinking IDENT (SPI) ring on every squawking-ident aircraft, independent of selection.
+    const identShown = new Set();
+    for (const d of lastList) {
+      if (!d.spi) continue;
+      identShown.add(d.hex);
+      let r = identRings.get(d.hex);
+      if (!r) { r = document.createElement("div"); r.className = "t3d-ident"; overlayEl.appendChild(r); identRings.set(d.hex, r); }
+      const ip = project(d.lon, d.lat, d.z);
+      if (ip) { r.style.display = ""; r.style.transform = `translate3d(${ip[0].toFixed(1)}px, ${ip[1].toFixed(1)}px, 0) translate(-50%, -50%)`; }
+      else r.style.display = "none";
+    }
+    for (const [hex, r] of identRings) if (!identShown.has(hex)) { r.remove(); identRings.delete(hex); }
   }
 
   // --- Interaction ------------------------------------------------------------------------

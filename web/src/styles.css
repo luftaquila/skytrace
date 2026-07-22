@@ -1545,6 +1545,26 @@ select {
 }
 .t3d-ghost .t3d-block { pointer-events: none; }
 
+/* IDENT (SPI): a blinking amber ring around any aircraft squawking ident. Positioned on the target
+   by JS (translate3d + centre); the blink is pure CSS. */
+.t3d-ident {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 54px;
+  height: 54px;
+  border: 2.5px solid #fbbf24;
+  border-radius: 50%;
+  box-shadow: 0 0 8px #fbbf24, inset 0 0 4px #fbbf24;
+  pointer-events: none;
+  z-index: 4000001;
+  animation: t3d-ident-blink 1s steps(1, end) infinite;
+}
+@keyframes t3d-ident-blink {
+  0%, 50% { opacity: 0.95; }
+  50.01%, 100% { opacity: 0; }
+}
+
 /* Airfield hover popover: absolutely positioned in the overlay (not a Leaflet tooltip),
    reusing the shared .airfield-tt look. */
 .t3d-tt {
