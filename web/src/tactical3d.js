@@ -705,7 +705,7 @@ export function createTactical3d({ container, deps }) {
       const conflict = conflictHexes.has(d.hex);
       const cls = d.cls < 0.95 ? "small" : d.cls < 1.1 ? "medium" : "large";
       const [r, g, b] = gold ? [255, 215, 0] : conflict ? [251, 113, 133] : [d.rgb.r, d.rgb.g, d.rgb.b];
-      return { hex: d.hex, lon: d.lon, lat: d.lat, z: d.z, r, g, b, a: d.coasting ? 150 : 255, pitch: d.orientation[0], yaw: d.orientation[1], roll: d.orientation[2], cls, clsMul: d.cls, selected: d.hex === selHex };
+      return { hex: d.hex, lon: d.lon, lat: d.lat, z: d.z, r, g, b, a: d.coasting ? 150 : 255, pitch: d.orientation[0], yaw: d.orientation[1], roll: d.orientation[2], cls, clsMul: d.cls };
     });
     aircraftRenderByHex = new Map(aircraftRenderList.map((d) => [d.hex, d]));
     // Sticks (aircraft→ground), altitude-gradient trails, and conflict links as line segments; the
