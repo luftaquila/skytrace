@@ -266,6 +266,9 @@ export function createTactical3d({ container, deps }) {
   // button-swap option in this release, so drive both by hand off the canvas mouse events.
   map.dragPan.disable();
   map.dragRotate.disable();
+  // Native cursor-anchored wheel zoom can choose a distant surface point as the new pivot on a
+  // pitched globe. All wheel zooming below is center-anchored instead, selected or not.
+  map.scrollZoom.disable();
   map.touchZoomRotate.enableRotation();
   const cv = map.getCanvas();
   cv.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -275,7 +278,7 @@ export function createTactical3d({ container, deps }) {
   cv.style.userSelect = "none";
   let drag = null;
   let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
-  let followActive = false; // camera tracks the selected aircraft until the user drags/rotates it
+  let followActive = false; // camera tracks the selected aircraft until a free right-drag pan
   let orbitZ = 0; // exaggerated target altitude; the camera's real 3D pivot while orbit-attached
   let orbitAttached = false; // rotate/zoom re-centre on the selected aircraft ONLY while attached; a
   // free pan (right-drag) detaches so rotate/zoom then pivot on the current view, not teleport back.
@@ -295,12 +298,18 @@ export function createTactical3d({ container, deps }) {
   // zoom and altitude cannot land on different frames and produce the old ground→aircraft snap.
   function applyCameraFrame({ center, zoom, bearing, pitch, elevation }) {
     const tr = map.transform;
+    const previousZoom = tr.zoom;
     if (center) tr.setCenter(center instanceof maplibregl.LngLat ? center : new maplibregl.LngLat(center[0], center[1]));
     if (zoom != null) tr.setZoom(Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), zoom)));
     if (bearing != null) tr.setBearing(bearing);
     if (pitch != null) tr.setPitch(Math.max(map.getMinPitch(), Math.min(map.getMaxPitch(), pitch)));
     if (elevation != null) tr.setElevation(elevation);
-    map.triggerRepaint();
+    // triggerRepaint() alone does not mark MapLibre's sources dirty. Direct transform animation
+    // would then keep painting the old tile set while following/rotating into a new area. Mirror the
+    // update normally requested by MapLibre's move/zoom events so every camera frame also selects
+    // and loads the newly visible satellite/DEM tiles.
+    if (typeof map._update === "function") map._update(Math.abs(tr.zoom - previousZoom) > 1e-9);
+    else map.triggerRepaint();
   }
 
   function cancelCameraAnimation() {
@@ -365,17 +374,35 @@ export function createTactical3d({ container, deps }) {
     orbitZ = sel.z;
     applyCameraFrame({ center: [sel.lon, sel.lat], elevation: sel.z });
   }
-  function clearOrbit({ animate = true } = {}) {
-    const elevation = map.transform.elevation || 0;
-    if (!orbitAttached && orbitZ === 0 && cameraAnimation?.kind === "release") return;
-    if (!orbitAttached && orbitZ === 0 && Math.abs(elevation) < 0.5) return;
-    orbitAttached = false;
-    map.scrollZoom.enable(); // normal cursor-anchored scroll-zoom when not orbiting
-    orbitZ = 0;
-    if (animate && Math.abs(elevation) >= 0.5) animateCamera({ elevation: 0 }, { duration: 420, easing: EASE_IN_OUT, kind: "release" });
-    else applyCameraFrame({ elevation: 0 });
+  function rebaseOrbitToGround() {
+    const tr = map.transform;
+    // Recalculate center and zoom around the exact current camera position while changing the
+    // elevated aircraft pivot back to ground. Simply tweening elevation to zero visibly flies the
+    // camera to the aircraft's ground projection when selection is cleared.
+    if (typeof tr.getCameraLngLat === "function" && typeof tr.getCameraAltitude === "function" && typeof tr.calculateCenterFromCameraLngLatAlt === "function") {
+      const cameraLngLat = tr.getCameraLngLat();
+      const cameraAltitude = tr.getCameraAltitude();
+      tr.setElevation(0);
+      const groundState = tr.calculateCenterFromCameraLngLatAlt(cameraLngLat, cameraAltitude, tr.bearing, tr.pitch);
+      tr.setCenter(groundState.center);
+      tr.setZoom(groundState.zoom);
+      tr.setElevation(groundState.elevation);
+    } else tr.setElevation(0);
+    if (typeof map._update === "function") map._update(true);
+    else map.triggerRepaint();
   }
-  function attachOrbit(z) { orbitAttached = true; orbitZ = z; map.scrollZoom.disable(); } // orbit → custom centre-zoom
+  function clearOrbit() {
+    const elevation = map.transform.elevation || 0;
+    const hadOrbit = orbitAttached || orbitZ !== 0 || ["focus", "follow", "locate-aircraft", "wheel-orbit"].includes(cameraAnimation?.kind);
+    followActive = false;
+    if (!hadOrbit) return;
+    cancelCameraAnimation();
+    map.stop();
+    orbitAttached = false;
+    orbitZ = 0;
+    if (Math.abs(elevation) >= 0.5) rebaseOrbitToGround();
+  }
+  function attachOrbit(z) { orbitAttached = true; orbitZ = z; } // orbit → aircraft-centred zoom
   let identBlinkOn = false; // toggled by a timer while any aircraft squawks IDENT (gold body flash)
   let identBlinkTimer = 0;
   const onDown = (e) => {
@@ -383,14 +410,13 @@ export function createTactical3d({ container, deps }) {
     cancelCameraAnimation();
     map.stop();
     dragMoved = false;
-    followActive = false; // any manual drag/rotate stops auto-tracking
     if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
     else if (e.button === 2) {
-      // Detach without dropping the elevated pivot on this frame. Pan preserves it, then on mouse-up
-      // the map eases back to a ground pivot instead of teleporting there.
+      // A free pan intentionally detaches tracking. Rotation does not: it keeps orbiting and
+      // following the selected aircraft while only changing bearing/pitch.
+      followActive = false;
       orbitAttached = false;
       orbitZ = 0;
-      map.scrollZoom.enable();
       drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
     }
   };
@@ -414,28 +440,33 @@ export function createTactical3d({ container, deps }) {
   };
   const onUp = () => {
     const wasPan = drag?.mode === "pan";
+    const wasRotate = drag?.mode === "rotate";
     drag = null;
     if (wasPan && Math.abs(map.transform.elevation || 0) >= 0.5) {
-      animateCamera({ elevation: 0 }, { duration: 420, easing: EASE_IN_OUT, kind: "pan-release" });
+      rebaseOrbitToGround();
     }
+    if (wasRotate && followActive) followSelected();
   };
   cv.addEventListener("mousedown", onDown);
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
-  // While attached, zoom around the aircraft instead of the cursor. Repeated wheel events retarget
-  // one short camera tween, with no artificial floor: the globe elevation fix remains exact at z0.
+  // Zoom around the aircraft while attached, otherwise around the current view center. Repeated
+  // wheel events retarget one short camera tween. Native cursor-anchored globe zoom is intentionally
+  // disabled because it can rotate/teleport the center to a distant surface point at high pitch.
   const onWheel = (e) => {
-    if (!orbitAttached) return; // normal scroll-zoom when not orbiting
     e.preventDefault();
-    followActive = false;
     const step = (e.deltaMode === 1 ? e.deltaY * 0.04 : e.deltaY * 0.0018);
-    const baseZoom = cameraAnimation?.kind === "wheel" ? cameraAnimation.end.zoom : map.getZoom();
+    const baseZoom = cameraAnimation?.kind?.startsWith("wheel") ? cameraAnimation.end.zoom : map.getZoom();
     const z = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), baseZoom - step));
-    const selHex = deps.getSelectedHex();
-    const sel = selHex && lastList.find((d) => d.hex === selHex);
-    if (!sel) { clearOrbit(); return; }
-    orbitZ = sel.z;
-    animateCamera({ center: [sel.lon, sel.lat], zoom: z, elevation: sel.z }, { duration: 150, easing: EASE_OUT, kind: "wheel" });
+    if (orbitAttached) {
+      const selHex = deps.getSelectedHex();
+      const sel = selHex && lastList.find((d) => d.hex === selHex);
+      if (!sel) { clearOrbit(); return; }
+      orbitZ = sel.z;
+      animateCamera({ center: [sel.lon, sel.lat], zoom: z, elevation: sel.z }, { duration: 150, easing: EASE_OUT, kind: "wheel-orbit" });
+    } else {
+      animateCamera({ zoom: z }, { duration: 150, easing: EASE_OUT, kind: "wheel-free" });
+    }
   };
   cv.addEventListener("wheel", onWheel, { passive: false });
   // Native touch gestures still emit `move`; reassert the selected 3D pivot synchronously before the
@@ -908,7 +939,27 @@ export function createTactical3d({ container, deps }) {
   }
 
   // --- Public API -------------------------------------------------------------------------
-  function dataPass() { buildLayers(); if (!deps.getSelectedHex()) clearOrbit(); followSelected(); }
+  let followingSelectionHex = null;
+  function dataPass() {
+    buildLayers();
+    const selectedHex = deps.getSelectedHex();
+    if (!selectedHex) {
+      followingSelectionHex = null;
+      clearOrbit();
+      return;
+    }
+    // Follow is selection state, not an accidental side effect of which UI path called panTo().
+    // This also covers a selection that already existed when the 3D view was opened.
+    if (selectedHex !== followingSelectionHex) {
+      followingSelectionHex = selectedHex;
+      const selected = lastList.find((item) => item.hex === selectedHex);
+      if (selected) {
+        beginSelectionFocus(selected.lon, selected.lat, selected.z);
+        return;
+      }
+    }
+    followSelected();
+  }
   function drawCoverage() { buildLayers(); }
   function applySettings() {
     exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
@@ -935,20 +986,23 @@ export function createTactical3d({ container, deps }) {
     cancelCameraAnimation();
     orbitAttached = false;
     orbitZ = 0;
-    map.scrollZoom.enable();
     applyCameraFrame({ center: [center.lng ?? center.lon, center.lat], zoom: zoom + 1, pitch: 55, elevation: 0 });
   }
   function getCameraForMap() { const c = map.getCenter(); return { center: [c.lat, c.lng], zoom: Math.min(18, Math.max(3, Math.round(map.getZoom() - 1))) }; }
-  let followSettleUntil = 0; // suspend follow until the focus/locate animation has settled
+  function beginSelectionFocus(lon, lat, z) {
+    followActive = true; attachOrbit(z);
+    animateCamera(
+      { center: [lon, lat], zoom: Math.max(map.getZoom(), 10.5), elevation: z },
+      // Ease out from the first frame so centering is never perceived as starting only after zoom.
+      // All dimensions still share this one timeline and land on the same frame.
+      { duration: 760, easing: EASE_OUT, kind: "focus", onComplete: followSelected },
+    );
+  }
   // Select: center, zoom and 3D pivot are one animation. No globe-transition threshold is needed.
   function panTo(lon, lat, altFt) {
     const z = (altFt != null ? altFt * FT_TO_M : 0) * ALT_EXAGG;
-    followActive = true; attachOrbit(z);
-    followSettleUntil = performance.now() + 820;
-    animateCamera(
-      { center: [lon, lat], zoom: Math.max(map.getZoom(), 10.5), elevation: z },
-      { duration: 760, easing: EASE_IN_OUT, kind: "focus" },
-    );
+    followingSelectionHex = deps.getSelectedHex();
+    beginSelectionFocus(lon, lat, z);
   }
   // Auto-track with an interruptible glide. New receiver samples retarget from the current in-flight
   // frame, so sparse feed ticks never appear as position jumps.
@@ -956,7 +1010,8 @@ export function createTactical3d({ container, deps }) {
     if (!followActive) return;
     const selHex = deps.getSelectedHex();
     if (!selHex) { followActive = false; clearOrbit(); return; }
-    if (performance.now() < followSettleUntil) return; // let the fly-in settle first
+    // Position updates received during the initial fly-in are picked up by its completion callback.
+    if (["focus", "locate-aircraft"].includes(cameraAnimation?.kind)) return;
     const d = lastList.find((x) => x.hex === selHex);
     if (!d) return;
     attachOrbit(d.z);
@@ -969,19 +1024,21 @@ export function createTactical3d({ container, deps }) {
     if (altFt == null) {
       orbitAttached = false;
       orbitZ = 0;
-      map.scrollZoom.enable();
       followActive = false;
       animateCamera({ center: [lon, lat], zoom: zoom + 1, pitch: 55, elevation: 0 }, { duration: 900, easing: EASE_IN_OUT, kind: "locate-home" });
       return;
     }
     const z = altFt * FT_TO_M * ALT_EXAGG;
+    followingSelectionHex = deps.getSelectedHex();
     followActive = true; attachOrbit(z);
-    followSettleUntil = performance.now() + 1000;
-    animateCamera({ center: [lon, lat], zoom: Math.max(zoom + 1, 10.5), pitch: 55, elevation: z }, { duration: 900, easing: EASE_IN_OUT, kind: "locate-aircraft" });
+    animateCamera(
+      { center: [lon, lat], zoom: Math.max(zoom + 1, 10.5), pitch: 55, elevation: z },
+      { duration: 900, easing: EASE_OUT, kind: "locate-aircraft", onComplete: followSelected },
+    );
   }
   function fitAircraft(points) {
     if (!points.length) return;
-    clearOrbit({ animate: false });
+    clearOrbit();
     const b = new maplibregl.LngLatBounds();
     for (const p of points) b.extend([p.lon, p.lat]);
     map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900, freezeElevation: true });
@@ -1020,7 +1077,7 @@ export function createTactical3d({ container, deps }) {
     if (!map.getLayer(aircraftLayer.id)) map.addLayer(aircraftLayer);
     hideLoading();
     refreshSources();
-    buildLayers();
+    dataPass();
   });
   setCameraFromMap({ lat: HOME.lat, lng: HOME.lon }, 7);
 
