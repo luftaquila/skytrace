@@ -942,7 +942,9 @@ export function createTactical3d({ container, deps }) {
       b.block.classList.toggle("selected", d.hex === selHex);
       // Offset scales continuously with zoom (the mesh grows toward its pixel cap as you zoom in), so
       // the block clears the body at close range and sits closer when zoomed out.
-      b.block.style.left = `${Math.round(Math.max(34, Math.min(64, (map.getZoom() - 9) * 6 + 40)))}px`;
+      const modelPixels = aircraftRenderByHex.get(d.hex)?.screenPx || 0;
+      const zoomOffset = Math.max(34, Math.min(64, (map.getZoom() - 9) * 6 + 40));
+      b.block.style.left = `${Math.round(Math.max(zoomOffset, modelPixels / 2 + 14))}px`;
       const p = project(d.lon, d.lat, d.z);
       if (p) { b.el.style.display = ""; b.el.style.transform = `translate3d(${p[0].toFixed(1)}px, ${p[1].toFixed(1)}px, 0)`; }
       else b.el.style.display = "none";
@@ -953,7 +955,7 @@ export function createTactical3d({ container, deps }) {
     const lp = sel && project(sel.lon, sel.lat, sel.z);
     if (lp) {
       const modelPixels = aircraftRenderByHex.get(selHex)?.screenPx || 48;
-      const lockPixels = Math.round(Math.max(62, Math.min(116, modelPixels + 14)));
+      const lockPixels = Math.round(Math.max(62, Math.min(156, modelPixels + 14)));
       const lockSvg = lockEl.firstElementChild;
       if (lockSvg && lockSvg.getAttribute("width") !== String(lockPixels)) {
         lockSvg.setAttribute("width", String(lockPixels));

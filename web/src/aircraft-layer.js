@@ -7,7 +7,7 @@
 // It reproduces the old deck look on purpose: per-class baked geometry, TRUE altitude colour,
 // the whole-volume self-glow formula, near-constant on-screen size, and IDENT-gold / conflict-pink.
 import { AIRCRAFT_GEOMETRY } from "./aircraft-geometry.js";
-import { aircraftPixelSize } from "./aircraft-size.js";
+import { aircraftPixelSize, selectionTransitionAmount, SELECTION_SIZE_TRANSITION_MS } from "./aircraft-size.js";
 
 const DEG = Math.PI / 180;
 
@@ -153,6 +153,7 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
   const lineLoc = {};
   const covLoc = {};
   const meshes = {}; // per class: { posBuf, normBuf, idxBuf, count, span }
+  const selectionStates = new Map(); // hex -> animated 0..1 selected-size blend
 
   function buildClass(cls) {
     const g = AIRCRAFT_GEOMETRY[cls];
@@ -310,6 +311,9 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
       if (data && data.length) {
       gl.useProgram(program);
       gl.uniform3f(loc.lightDir, 0.35, 0.25, 0.9);  // light mostly from above, in local ENU
+      const selectionNow = performance.now();
+      const renderedHexes = new Set();
+      let selectionAnimating = false;
       for (const d of data) {
         const mesh = meshes[d.cls === "small" || d.cls === "medium" || d.cls === "large" ? d.cls : "medium"];
         // frame at the aircraft's lon/lat/exaggerated-altitude
@@ -329,7 +333,26 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
         ) || 1e-6;
         const worldPx = mesh.span * 130 * ppm;
         const clsMul = d.clsMul || 1;
-        const px = aircraftPixelSize({ worldPixels: worldPx, classMultiplier: clsMul, selected: d.selected, zoom: map.getZoom() });
+        let selectionAmount = d.selected ? 1 : 0;
+        if (d.hex) {
+          renderedHexes.add(d.hex);
+          let state = selectionStates.get(d.hex);
+          if (!state) {
+            state = { from: selectionAmount, target: selectionAmount, startedAt: selectionNow, value: selectionAmount };
+            selectionStates.set(d.hex, state);
+          } else {
+            state.value = selectionTransitionAmount({ from: state.from, to: state.target, elapsedMs: selectionNow - state.startedAt });
+            if (state.target !== selectionAmount) {
+              state.from = state.value;
+              state.target = selectionAmount;
+              state.startedAt = selectionNow;
+            }
+            state.value = selectionTransitionAmount({ from: state.from, to: state.target, elapsedMs: selectionNow - state.startedAt });
+          }
+          selectionAmount = state.value;
+          if (selectionNow - state.startedAt < SELECTION_SIZE_TRANSITION_MS) selectionAnimating = true;
+        }
+        const px = aircraftPixelSize({ worldPixels: worldPx, classMultiplier: clsMul, selectionAmount, zoom: map.getZoom() });
         d.screenPx = px; // lets the HTML target-lock follow the selected model's actual footprint
         const s = px / (mesh.span * ppm);
         // attitude() orients the model in Z-up ENU; ENU_TO_FRAME re-expresses it in the frame's Y-up
@@ -353,6 +376,8 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.idxBuf);
         gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_SHORT, 0);
       }
+      for (const hex of selectionStates.keys()) if (!renderedHexes.has(hex)) selectionStates.delete(hex);
+      if (selectionAnimating) map.triggerRepaint();
       }
       // Restore the GL state MapLibre expects for the rest of its frame.
       gl.colorMask(true, true, true, true);
