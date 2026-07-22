@@ -231,50 +231,23 @@ export function createTactical3d({ container, deps }) {
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6 },
     },
   });
-  // Swapped mouse drag (per request): LEFT-drag rotates/tilts, RIGHT-drag pans. MapLibre has
-  // no button-swap option, so drive both by hand off the canvas' mouse events. Wheel-zoom,
-  // keyboard and touch pinch/rotate keep working through their own handlers.
-  map.dragPan.disable();
-  map.dragRotate.disable();
+  // Use MapLibre's NATIVE drag handlers (left-drag pans, right-drag / Ctrl+left rotates & tilts).
+  // They are terrain-aware — the camera elevation is frozen for the duration of the gesture and
+  // reconciled once at the end — so the camera never dives into the terrain mid-gesture and there is
+  // no "flies to a weird coordinate" lurch. A hand-rolled panBy/setBearing loop bypassed that path,
+  // which is what caused the jumps. Suppress the browser context menu so right-drag rotate is clean.
   map.touchZoomRotate.enableRotation();
+  map.getCanvas().addEventListener("contextmenu", (e) => e.preventDefault());
+  let followActive = false; // camera tracks the selected aircraft until the user drags/rotates it
+  // A user-initiated drag / rotate / tilt (originalEvent present) hands control back to the user and
+  // stops auto-follow. Zoom is intentionally excluded so tracking survives a zoom. Our own follow
+  // easeTo and panTo/flyToView are programmatic (no originalEvent) and never trip this.
+  for (const ev of ["dragstart", "rotatestart", "pitchstart"]) map.on(ev, (e) => { if (e.originalEvent) followActive = false; });
   // Generate the tactical airfield glyph icons on demand (per class colour).
   map.on("styleimagemissing", (e) => {
     const color = AF_ICON_COLORS[e.id];
     if (color && !map.hasImage(e.id)) map.addImage(e.id, makeAirfieldIcon(color), { pixelRatio: 2 });
   });
-  const cv = map.getCanvas();
-  let drag = null;
-  let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
-  let followActive = false; // camera tracks the selected aircraft until the user drags the map
-  const onCtx = (e) => e.preventDefault();
-  const onDown = (e) => {
-    dragMoved = false;
-    followActive = false; // any manual drag stops auto-tracking
-    if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
-    else if (e.button === 2) drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
-  };
-  const onMove = (e) => {
-    if (!drag) return;
-    if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 3) dragMoved = true;
-    if (drag.mode === "rotate") {
-      map.setBearing(drag.bearing + (e.clientX - drag.x) * 0.35);
-      map.setPitch(Math.max(0, Math.min(map.getMaxPitch(), drag.pitch - (e.clientY - drag.y) * 0.25)));
-    } else {
-      // At near-horizon pitch a small drag can unproject to a wild ground point; undo any step that
-      // jumps the centre absurdly far so it never teleports to a garbage coordinate.
-      const before = map.getCenter();
-      map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0 });
-      const after = map.getCenter();
-      if (Math.abs(after.lng - before.lng) > 2 || Math.abs(after.lat - before.lat) > 2) map.setCenter(before);
-      drag.x = e.clientX; drag.y = e.clientY; // pan is incremental
-    }
-  };
-  const onUp = () => { drag = null; };
-  cv.addEventListener("contextmenu", onCtx);
-  cv.addEventListener("mousedown", onDown);
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp);
-
   // pickingRadius widens the click/hover search around the pointer so selecting an aircraft is
   // forgiving (on top of the invisible hit disc) — no pixel-perfect aim on the small model.
   const overlay = new MapboxOverlay({ interleaved: true, pickingRadius: 16, layers: [] });
@@ -302,7 +275,7 @@ export function createTactical3d({ container, deps }) {
   loadingEl.textContent = "LOADING TERRAIN…";
   const hintEl = document.createElement("div");
   hintEl.className = "t3d-hint";
-  hintEl.textContent = "Drag rotate · Ctrl/right-drag tilt · Scroll zoom";
+  hintEl.textContent = "Drag pan · Right/Ctrl-drag rotate & tilt · Scroll zoom";
   container.append(overlayEl, afPinEl, afHoverEl, lockEl, loadingEl, hintEl);
 
   let hoverHex = null;
@@ -563,7 +536,7 @@ export function createTactical3d({ container, deps }) {
   });
   map.on("mouseleave", AF_LAYERS, () => { hoverAf = null; if (!hoverHex) map.getCanvas().style.cursor = ""; afHoverEl.style.display = "none"; });
   map.on("click", (e) => {
-    if (dragMoved) { dragMoved = false; return; }
+    // MapLibre only fires "click" for a genuine click (a drag is a separate gesture), so no drag guard.
     // Aircraft: pick synchronously off MapLibre's (immediate) click instead of deck's onClick,
     // which waits ~300ms to disambiguate single- vs double-click — that lag was the select delay.
     const hit = overlay._deck?.pickObject?.({ x: e.point.x, y: e.point.y, radius: 18, layerIds: ["hit"] });
@@ -715,8 +688,6 @@ export function createTactical3d({ container, deps }) {
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {
     disposed = true;
-    window.removeEventListener("mousemove", onMove);
-    window.removeEventListener("mouseup", onUp);
     try { map.removeControl(overlay); } catch { /* gone */ }
     map.remove();
     for (const el of [overlayEl, afPinEl, afHoverEl, lockEl, loadingEl, hintEl]) el.remove();
