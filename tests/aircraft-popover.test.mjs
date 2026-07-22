@@ -25,22 +25,32 @@ test("aircraft popovers place update age immediately before the pin", () => {
   assert.match(css, /\.tt-top-actions \.tt-age\s*\{[^}]*text-align:\s*right/s);
 });
 
-test("historic and all-aircraft trails are display settings, not popover controls", () => {
+test("historic, live and all-recorded trails are display settings, not popover controls", () => {
   const source = between("function datablockHtml(", "function airfieldTooltip(");
   const refresh = between("async function refreshAllAircraftTracks(", "async function refreshTrackRange(");
   assert.match(app, /historicTracks:\s*false/);
   assert.match(app, /allAircraftTracks:\s*false/);
+  assert.match(app, /recordedAircraftTracks:\s*false/);
   assert.doesNotMatch(source, /historic|tt-historic/i);
   assert.match(app, /v-model="settings\.historicTracks"[^>]*\/> Historic/);
   assert.match(app, /v-model="settings\.allAircraftTracks"[^>]*\/> All aircraft trails/);
-  assert.match(tactical, /historicTracks \? allPoints : currentTrackRun\(allPoints\)/);
+  assert.match(app, /v-model="settings\.recordedAircraftTracks"[^>]*\/> All recorded trails/);
+  assert.match(tactical, /includeHistoric \? allPoints : currentTrackRun\(allPoints\)/);
   assert.match(tactical, /deps\.getAllAircraftTracks\(\)/);
+  assert.match(tactical, /deps\.getRecordedAircraftTracks\(\)/);
+  assert.match(tactical, /addTrail\(hex, points, true\)/);
   assert.doesNotMatch(tactical, /tt-historic-toggle|setHistoricTracks/);
   assert.match(refresh, /if \(!settings\.value\.allAircraftTracks\)/);
   assert.match(refresh, /index \+= 250/);
   assert.match(refresh, /afterId: previousCursors\.get\(hex\) \?\? null/);
   assert.match(refresh, /mergeTrackPoints\(current, track\?\.points \|\| \[\], settings\.value\.historicTracks\)/);
   assert.match(refresh, /method: "POST"/);
+  const recordedRefresh = between("async function refreshRecordedAircraftTracks(", "async function refreshTrackRange(");
+  assert.match(recordedRefresh, /\/api\/aircraft\/tracks\/recorded/);
+  assert.match(recordedRefresh, /pageAfterHex, snapshotId/);
+  assert.match(recordedRefresh, /afterId: recordedTrackCursor/);
+  assert.match(recordedRefresh, /decodeRecordedPoints\(track\)/);
+  assert.match(recordedRefresh, /mergeTrackPoints\([^\n]+true\)/);
 });
 
 test("Locate uses browser geolocation only when no aircraft is selected", () => {
