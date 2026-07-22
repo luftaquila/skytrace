@@ -333,7 +333,7 @@ export function createTactical3d({ container, deps }) {
       if (airborne) {
         const vs = item.baroRate ?? item.geomRate;
         const gs = (item.gs ?? 0) * 0.514444;
-        if (vs != null && gs > 5) phi = (Math.atan2(vs * 0.00508, gs) * 5 * 180) / Math.PI;
+        if (vs != null && gs > 5) phi = (Math.atan2(vs * 0.00508, gs) * 3 * 180) / Math.PI;
         phi = Math.max(-40, Math.min(40, phi));
       }
       const bank = airborne && Number.isFinite(item.roll) ? Math.max(-45, Math.min(45, item.roll)) : 0;
