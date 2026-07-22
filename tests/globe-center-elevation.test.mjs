@@ -6,6 +6,7 @@ import {
   applyGlobeCenterElevation,
   installGlobeCenterElevation,
   invertMatrix4,
+  syncGlobeTileCoverFrustum,
 } from "../web/src/globe-center-elevation.js";
 
 const identity = (Type = Float64Array) => new Type([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
@@ -81,6 +82,35 @@ test("globe elevation keeps the forward and inverse view matrices consistent", (
   assert.ok(inverse);
   const product = multiply(base, inverse);
   for (let i = 0; i < 16; i += 1) close(product[i], i % 5 === 0 ? 1 : 0, 1e-8);
+});
+
+test("tile-cover frustum follows the same elevated globe camera without shrinking", () => {
+  const elevation = 36000 * 0.3048 * 5;
+  const normalizedElevation = elevation / EARTH_RADIUS_M;
+  const frustum = { points: [], planes: [], aabb: { min: [], max: [], center: [] } };
+  const transform = {
+    center: { lng: 0, lat: 0 },
+    elevation,
+    _globeViewProjMatrix32f: identity(Float32Array),
+    _globeViewProjMatrixNoCorrection: identity(),
+    _globeViewProjMatrixNoCorrectionInverted: identity(),
+    _cameraPosition: new Float64Array([0, 0, 2]),
+    _cachedClippingPlane: [0, 0, 1, -0.5],
+    _cachedFrustum: frustum,
+  };
+
+  applyGlobeCenterElevation(transform);
+
+  assert.equal(frustum.points.length, 8);
+  assert.equal(frustum.planes.length, 6);
+  close(frustum.aabb.center[0], 0);
+  close(frustum.aabb.center[1], 0);
+  close(frustum.aabb.center[2], normalizedElevation);
+  close(frustum.aabb.max[0] - frustum.aabb.min[0], 2);
+  close(frustum.aabb.max[1] - frustum.aabb.min[1], 2);
+  close(frustum.aabb.max[2] - frustum.aabb.min[2], 2);
+  assert.ok(frustum.planes.flat().every(Number.isFinite));
+  assert.equal(syncGlobeTileCoverFrustum({}), false);
 });
 
 test("installer wraps MapLibre's vertical transform exactly once", () => {

@@ -65,6 +65,72 @@ function centerSurfaceVector(center) {
   return [Math.sin(lng) * cosLat, Math.sin(lat), Math.cos(lng) * cosLat];
 }
 
+const GLOBE_CLIP_CORNERS = [
+  [-1, 1, -1, 1], [1, 1, -1, 1], [1, -1, -1, 1], [-1, -1, -1, 1],
+  [-1, 1, 1, 1], [1, 1, 1, 1], [1, -1, 1, 1], [-1, -1, 1, 1],
+];
+const GLOBE_FRUSTUM_PLANES = [
+  [6, 5, 4], // near (globe uses flipped near/far)
+  [0, 1, 2], // far
+  [0, 3, 7], // left
+  [2, 1, 5], // right
+  [3, 2, 6], // bottom
+  [0, 4, 5], // top
+];
+
+function unprojectPoint(matrix, point) {
+  const out = [0, 0, 0, 0];
+  for (let row = 0; row < 4; row += 1) {
+    out[row] = matrix[row] * point[0] + matrix[4 + row] * point[1]
+      + matrix[8 + row] * point[2] + matrix[12 + row] * point[3];
+  }
+  const w = out[3] || 1;
+  return [out[0] / w, out[1] / w, out[2] / w, 1];
+}
+
+function planeThrough(a, b, c) {
+  const ax = a[0] - b[0], ay = a[1] - b[1], az = a[2] - b[2];
+  const bx = c[0] - b[0], by = c[1] - b[1], bz = c[2] - b[2];
+  let nx = ay * bz - az * by;
+  let ny = az * bx - ax * bz;
+  let nz = ax * by - ay * bx;
+  const length = Math.hypot(nx, ny, nz) || 1;
+  nx /= length; ny /= length; nz /= length;
+  return [nx, ny, nz, -(nx * b[0] + ny * b[1] + nz * b[2])];
+}
+
+// MapLibre caches the tile-cover frustum separately from the render matrix. Rebuild that cache from
+// the patched inverse or high-zoom tracking will render through the elevated camera while culling
+// and requesting tiles through the old ground-centered camera. The horizon remains constrained by
+// _cachedClippingPlane in coveringTiles(), so the full projection far plane is safe and avoids
+// under-fetching along the edge of the viewport.
+export function syncGlobeTileCoverFrustum(verticalTransform) {
+  const inverse = verticalTransform?._globeViewProjMatrixNoCorrectionInverted;
+  const frustum = verticalTransform?._cachedFrustum;
+  if (!inverse || !frustum) return false;
+
+  // MapLibre applies mat4.scale(inverse, inverse, [1, 1, -1]) before constructing a globe frustum.
+  const globeInverse = new inverse.constructor(inverse);
+  for (let i = 8; i < 12; i += 1) globeInverse[i] *= -1;
+  const points = GLOBE_CLIP_CORNERS.map((point) => unprojectPoint(globeInverse, point));
+  const planes = GLOBE_FRUSTUM_PLANES.map(([a, b, c]) => planeThrough(points[a], points[b], points[c]));
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const point of points) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      min[axis] = Math.min(min[axis], point[axis]);
+      max[axis] = Math.max(max[axis], point[axis]);
+    }
+  }
+  frustum.points = points;
+  frustum.planes = planes;
+  frustum.aabb ||= {};
+  frustum.aabb.min = min;
+  frustum.aabb.max = max;
+  frustum.aabb.center = min.map((value, axis) => (value + max[axis]) * 0.5);
+  return true;
+}
+
 export function applyGlobeCenterElevation(verticalTransform) {
   const elevation = Number(verticalTransform?.elevation) || 0;
   if (!elevation) return;
@@ -98,6 +164,7 @@ export function applyGlobeCenterElevation(verticalTransform) {
       -1 / cameraLength,
     ];
   }
+  syncGlobeTileCoverFrustum(verticalTransform);
 }
 
 export function installGlobeCenterElevation(transform) {
