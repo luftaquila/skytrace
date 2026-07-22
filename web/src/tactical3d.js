@@ -9,6 +9,7 @@
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import mlcontour from "maplibre-contour";
+import { WebMercatorViewport } from "@deck.gl/core";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { ScenegraphLayer, SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
@@ -157,7 +158,12 @@ export function createTactical3d({ container, deps }) {
       map.setBearing(drag.bearing + (e.clientX - drag.x) * 0.35);
       map.setPitch(Math.max(0, Math.min(map.getMaxPitch(), drag.pitch - (e.clientY - drag.y) * 0.25)));
     } else {
+      // At near-horizon pitch a small drag can unproject to a wild ground point; undo any step that
+      // jumps the centre absurdly far so it never teleports to a garbage coordinate.
+      const before = map.getCenter();
       map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0 });
+      const after = map.getCenter();
+      if (Math.abs(after.lng - before.lng) > 2 || Math.abs(after.lat - before.lat) > 2) map.setCenter(before);
       drag.x = e.clientX; drag.y = e.clientY; // pan is incremental
     }
   };
@@ -171,7 +177,7 @@ export function createTactical3d({ container, deps }) {
   // forgiving (on top of the invisible hit disc) — no pixel-perfect aim on the small model.
   const overlay = new MapboxOverlay({ interleaved: true, pickingRadius: 16, layers: [] });
   map.addControl(overlay);
-  if (typeof window !== "undefined" && window.__T3D_DEBUG) { window.__t3dMap = map; window.__t3dOverlay = overlay; }
+  if (typeof window !== "undefined" && window.__T3D_DEBUG) { window.__t3dMap = map; window.__t3dOverlay = overlay; window.__WMV = WebMercatorViewport; }
 
   // --- DOM overlay: data-block popovers + pins (exact old styling), airfield popover ------
   const overlayEl = document.createElement("div");
@@ -287,18 +293,17 @@ export function createTactical3d({ container, deps }) {
 
     const covMesh = coverageMesh();
     // Aircraft grouped by size class so per-category size differences survive the pixel clamp
-    // (constant on-screen size per class). Each class gets a dark, slightly-larger silhouette drawn
-    // behind it (a crisp outline — NOT a background ring) so targets read against similar-colour
-    // coverage, then the altitude-coloured model on top.
+    // (constant on-screen size per class). Colours are brightened toward white so the target reads
+    // as a bright contact against the (translucent) coverage — no outline/ring, just luminance.
     const byCls = new Map();
     for (const d of list) { const g = byCls.get(d.cls) || []; g.push(d); byCls.set(d.cls, g); }
-    const commonAc = { scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, sizeScale: 185, _lighting: "pbr", pickable: false, parameters: { depthCompare: "always" } };
-    const aircraftLayers = [];
-    for (const [cls, data] of byCls) {
-      const minP = 48 * cls, maxP = 68 * cls;
-      aircraftLayers.push(new ScenegraphLayer({ ...commonAc, id: `ac-outline-${cls}`, data, getColor: [4, 12, 14, 255], sizeMinPixels: Math.round(minP * 1.16), sizeMaxPixels: Math.round(maxP * 1.16) }));
-      aircraftLayers.push(new ScenegraphLayer({ ...commonAc, id: `aircraft-${cls}`, data, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255], sizeMinPixels: Math.round(minP), sizeMaxPixels: Math.round(maxP) }));
-    }
+    const bright = (v) => Math.round(v + (255 - v) * 0.34);
+    const aircraftLayers = [...byCls.entries()].map(([cls, data]) => new ScenegraphLayer({
+      id: `aircraft-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
+      getColor: (d) => [bright(d.rgb.r), bright(d.rgb.g), bright(d.rgb.b), d.coasting ? 150 : 255],
+      sizeScale: 185, sizeMinPixels: Math.round(48 * cls), sizeMaxPixels: Math.round(68 * cls), _lighting: "pbr",
+      pickable: false, parameters: { depthCompare: "always" },
+    }));
 
     const covMat = { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] };
     const layers = [
@@ -315,7 +320,7 @@ export function createTactical3d({ container, deps }) {
       }),
       covMesh && new SimpleMeshLayer({
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 78], sizeScale: 1, material: covMat, pickable: false,
+        getColor: [255, 255, 255, 58], sizeScale: 1, material: covMat, pickable: false,
         parameters: { depthWriteEnabled: false, depthCompare: "less-equal" },
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
@@ -533,54 +538,65 @@ export function createTactical3d({ container, deps }) {
   // Screen-space lift of an altitude point above its ground point (for centring the aircraft,
   // not its nadir). Cached as followOffset so follow uses a STABLE offset — recomputing it from
   // a mid-animation camera every tick is what made the view oscillate.
-  let followOffset = [0, 0];
-  function altOffset(lon, lat, z) {
-    const vp = overlay._deck?.getViewports?.()[0];
-    if (vp && z > 0) {
-      const air = vp.project([lon, lat, z]);
-      const gnd = vp.project([lon, lat, 0]);
-      if (air && gnd) return [gnd[0] - air[0], gnd[1] - air[1]];
+  // GROUND point to centre the map on so an aircraft at scene-height z lands at screen centre.
+  // Solved with the real (target) projection: the map centre we want is the ground point sitting
+  // under the aircraft's projected screen position; iterating converges to it. This is exact at any
+  // zoom (fixes "wrong place then re-align"). Guarded so a near-horizon unproject that runs off to
+  // the sky (non-finite or a huge shift) never jumps the camera to a garbage coordinate.
+  function centerFor(lon, lat, z, pitchDeg = map.getPitch(), zoom = map.getZoom()) {
+    if (!(z > 0)) return [lon, lat];
+    const bearing = map.getBearing();
+    const p = (pitchDeg * Math.PI) / 180, b = (bearing * Math.PI) / 180, cosLat = Math.cos((lat * Math.PI) / 180) || 1;
+    // Analytical seed: shift z*tan(pitch) metres in the look direction. Puts the target roughly
+    // on-screen even at high zoom (where the nadir-centred aircraft projects off the top), so the
+    // unproject refinement below starts from a valid on-screen point instead of the sky.
+    const d0 = z * Math.tan(p);
+    let center = [lon + (d0 * Math.sin(b)) / (M_PER_DEG_LAT * cosLat), lat + (d0 * Math.cos(b)) / M_PER_DEG_LAT];
+    const w = map.getCanvas().clientWidth || 1, h = map.getCanvas().clientHeight || 1, cx = w / 2, cy = h / 2;
+    // Refine by moving the centre onto the ground point under the aircraft's screen position. Track
+    // the BEST centre (smallest aircraft-off-centre) and return it, so an ill-conditioned near-horizon
+    // case (very high zoom) can't diverge — it just returns the closest achievable framing.
+    let best = center, bestOff = Infinity;
+    for (let i = 0; i < 5; i += 1) {
+      let air, g;
+      try {
+        const vp = new WebMercatorViewport({ width: w, height: h, longitude: center[0], latitude: center[1], zoom, pitch: pitchDeg, bearing });
+        air = vp.project([lon, lat, z]);
+        g = air && Number.isFinite(air[0]) && Number.isFinite(air[1]) ? vp.unproject([air[0], air[1]]) : null;
+      } catch { break; }
+      if (!air || !Number.isFinite(air[0]) || !Number.isFinite(air[1])) break;
+      const off = Math.hypot(air[0] - cx, air[1] - cy);
+      if (off < bestOff) { bestOff = off; best = center; }
+      if (off < 4 || !g || !Number.isFinite(g[0]) || !Number.isFinite(g[1]) || Math.abs(g[0] - lon) > 6 || Math.abs(g[1] - lat) > 6) break;
+      center = [g[0], g[1]];
     }
-    return [0, 0];
+    return best;
   }
   const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3); // fast start, slow settle
   let followSettleUntil = 0; // suspend follow until the focus/locate animation has settled
   // Called on select: ease-out focus (fast start, slow settle) to the target, then auto-track it.
   function panTo(lon, lat, altFt) {
     followActive = true;
-    followOffset = altOffset(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * exagg);
     followSettleUntil = performance.now() + 780;
-    map.easeTo({ center: [lon, lat], offset: followOffset, duration: 750, easing: EASE_OUT });
+    map.easeTo({ center: centerFor(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * exagg), duration: 750, easing: EASE_OUT });
   }
-  // Continuously keep the selected aircraft centred (smooth linear glide, stable cached offset)
-  // until the user drags the map — but not until the focus/locate animation has settled, so its
-  // ease-out plays out instead of being overridden.
+  // Continuously keep the selected aircraft centred (smooth linear glide) until the user drags the
+  // map — but not until the focus/locate animation has settled, so its ease-out plays out.
   function followSelected() {
     if (!followActive) return;
     const selHex = deps.getSelectedHex();
     if (!selHex) { followActive = false; return; }
     if (performance.now() < followSettleUntil) return;
     const d = lastList.find((x) => x.hex === selHex);
-    if (d) map.easeTo({ center: [d.lon, d.lat], offset: followOffset, duration: 1100, easing: (t) => t });
+    if (d) map.easeTo({ center: centerFor(d.lon, d.lat, d.z), duration: 1100, easing: (t) => t });
   }
-  // Locate button: ONE ease-out easeTo that changes zoom + pan + altitude-offset together (not a
-  // zoom-then-pan flyTo arc), and resumes tracking. The offset is scaled to the target zoom (the
-  // screen lift of a point at altitude scales with 2^zoom) so the aircraft lands centred at once.
+  // Locate button: ONE ease-out easeTo that changes zoom + pan together (centred on the aircraft at
+  // altitude via the geometric centre, computed for the TARGET pitch), and resumes tracking.
   function flyToView(lon, lat, zoom, altFt) {
-    const tgtZoom = zoom + 1;
-    let offset = [0, 0];
-    if (altFt != null) {
-      const off0 = altOffset(lon, lat, altFt * FT_TO_M * exagg); // at the current zoom
-      const scale = Math.pow(2, tgtZoom - map.getZoom());
-      offset = [off0[0] * scale, off0[1] * scale];
-      followOffset = offset;
-      followActive = true;
-      followSettleUntil = performance.now() + 980;
-    }
-    map.easeTo({ center: [lon, lat], zoom: tgtZoom, offset, pitch: 55, duration: 900, easing: EASE_OUT });
+    const z = altFt != null ? altFt * FT_TO_M * exagg : 0;
+    if (altFt != null) { followActive = true; followSettleUntil = performance.now() + 980; }
+    map.easeTo({ center: centerFor(lon, lat, z, 55, zoom + 1), zoom: zoom + 1, pitch: 55, duration: 900, easing: EASE_OUT });
   }
-  // Offset depends on zoom, so refresh it after the user (or a locate fly) changes zoom.
-  map.on("zoomend", () => { if (!followActive) return; const d = lastList.find((x) => x.hex === deps.getSelectedHex()); if (d) followOffset = altOffset(d.lon, d.lat, d.z); });
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {
     disposed = true;
