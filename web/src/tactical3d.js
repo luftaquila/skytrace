@@ -53,6 +53,29 @@ function parseRgb(css) {
   return { r: parseInt(n.slice(0, 2), 16), g: parseInt(n.slice(2, 4), 16), b: parseInt(n.slice(4, 6), 16) };
 }
 
+// Tactical airfield glyph (aeronautical style): a glowing ring with crossed runways and a core,
+// drawn to a canvas so MapLibre can use it as a symbol icon (constant screen size, hit-testable).
+const AF_ICON_COLORS = { "af-large": "#ffd23f", "af-medium": "#ff9f45", "af-small": "#c3ccd6", "af-minor": "#8b98a5" };
+function makeAirfieldIcon(color) {
+  const S = 44;
+  const c = document.createElement("canvas");
+  c.width = c.height = S;
+  const ctx = c.getContext("2d");
+  const cx = S / 2, r = 13, k = r * 0.72;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.6;
+  ctx.lineCap = "round";
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 5;
+  ctx.beginPath(); ctx.arc(cx, cx, r, 0, Math.PI * 2); ctx.stroke();               // ring
+  ctx.beginPath(); ctx.moveTo(cx - k, cx - k); ctx.lineTo(cx + k, cx + k);
+  ctx.moveTo(cx - k, cx + k); ctx.lineTo(cx + k, cx - k); ctx.stroke();             // crossed runways
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(cx, cx, 2.4, 0, Math.PI * 2); ctx.fill();               // core
+  return ctx.getImageData(0, 0, S, S);
+}
+
 export function createTactical3d({ container, deps }) {
   let exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
   let disposed = false;
@@ -66,7 +89,7 @@ export function createTactical3d({ container, deps }) {
     container,
     attributionControl: false,
     bearingSnap: 0, // never auto-snap the bearing to north (camera moves were rotating it unbidden)
-    maxPitch: 80,
+    maxPitch: 85, // essentially flat-to-the-horizon (MapLibre's practical max before looking underground)
     pitch: 55,
     zoom: 6,
     center: [HOME.lon, HOME.lat],
@@ -88,11 +111,18 @@ export function createTactical3d({ container, deps }) {
         { id: "grid-line", type: "line", source: "grid", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "major"], 1, 0.28, 0.12], "line-width": ["match", ["get", "major"], 1, 1, 0.6] } },
         { id: "contour-line", type: "line", source: "contours", "source-layer": "contours", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "level"], 1, 0.4, 0.16], "line-width": ["match", ["get", "level"], 1, 1.1, 0.6], "line-blur": 0.6 } },
         { id: "rings-line", type: "line", source: "rings", filter: ["==", ["get", "kind"], "ring"], paint: { "line-color": "#48e0d1", "line-opacity": 0.5, "line-width": 1.3, "line-blur": 1.2 } },
-        // Tactical airfield glyph: a glowing hollow ring (radius + colour by class) with a bright
-        // core, and a teal glowing code — sized so the airport hierarchy reads at a glance.
-        { id: "airfield-ring", type: "circle", source: "airfields", paint: { "circle-radius": ["get", "r"], "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": ["get", "color"], "circle-stroke-width": ["case", ["get", "minor"], 1, 1.7], "circle-blur": 0.22, "circle-opacity": 0.9 } },
-        { id: "airfield-core", type: "circle", source: "airfields", paint: { "circle-radius": ["get", "cr"], "circle-color": ["get", "color"], "circle-opacity": 0.95, "circle-blur": 0.4 } },
-        { id: "airfield-code", type: "symbol", source: "airfields", filter: ["==", ["get", "minor"], false], layout: { "text-field": ["get", "code"], "text-font": ["Open Sans Regular"], "text-size": ["match", ["get", "kind"], "large", 12, 11], "text-letter-spacing": 0.08, "text-offset": [1, 0], "text-anchor": "left" }, paint: { "text-color": "#8ff0e4", "text-halo-color": "#04211f", "text-halo-width": 1.7, "text-halo-blur": 0.6 } },
+        // Tactical airfield: an aeronautical glyph icon (ring + crossed runways, class colour/size,
+        // constant screen size) with the code below it. One symbol layer, hit-testable for hover/click.
+        { id: "airfield-icon", type: "symbol", source: "airfields",
+          layout: {
+            "icon-image": ["case", ["get", "minor"], "af-minor", ["match", ["get", "kind"], "large", "af-large", "medium", "af-medium", "af-small"]],
+            "icon-size": ["case", ["get", "minor"], 0.5, ["match", ["get", "kind"], "large", 0.92, "medium", 0.76, 0.62]],
+            "icon-allow-overlap": true,
+            "text-field": ["case", ["get", "minor"], "", ["get", "code"]],
+            "text-font": ["Open Sans Regular"], "text-size": ["match", ["get", "kind"], "large", 12, 11],
+            "text-letter-spacing": 0.08, "text-offset": [0, 1.15], "text-anchor": "top", "text-optional": true,
+          },
+          paint: { "text-color": "#8ff0e4", "text-halo-color": "#04211f", "text-halo-width": 1.7, "text-halo-blur": 0.6 } },
         { id: "ring-label", type: "symbol", source: "rings", filter: ["in", ["get", "kind"], ["literal", ["ringlabel", "compass"]]], layout: { "text-field": ["get", "label"], "text-font": ["Open Sans Regular"], "text-size": ["case", ["==", ["get", "kind"], "compass"], 15, 11], "text-allow-overlap": true }, paint: { "text-color": "#7fe6da", "text-opacity": ["case", ["==", ["get", "kind"], "compass"], 0.85, 0.55], "text-halo-color": "#050a0c", "text-halo-width": 1.2 } },
       ],
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6 },
@@ -104,6 +134,11 @@ export function createTactical3d({ container, deps }) {
   map.dragPan.disable();
   map.dragRotate.disable();
   map.touchZoomRotate.enableRotation();
+  // Generate the tactical airfield glyph icons on demand (per class colour).
+  map.on("styleimagemissing", (e) => {
+    const color = AF_ICON_COLORS[e.id];
+    if (color && !map.hasImage(e.id)) map.addImage(e.id, makeAirfieldIcon(color), { pixelRatio: 2 });
+  });
   const cv = map.getCanvas();
   let drag = null;
   let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
@@ -253,15 +288,18 @@ export function createTactical3d({ container, deps }) {
 
     const covMesh = coverageMesh();
     // Aircraft grouped by size class so per-category size differences survive the pixel clamp
-    // (constant on-screen size per class); one ScenegraphLayer per distinct class.
+    // (constant on-screen size per class). Each class gets a dark, slightly-larger silhouette drawn
+    // behind it (a crisp outline — NOT a background ring) so targets read against similar-colour
+    // coverage, then the altitude-coloured model on top.
     const byCls = new Map();
     for (const d of list) { const g = byCls.get(d.cls) || []; g.push(d); byCls.set(d.cls, g); }
-    const aircraftLayers = [...byCls.entries()].map(([cls, data]) => new ScenegraphLayer({
-      id: `aircraft-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-      getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255],
-      sizeScale: 185, sizeMinPixels: Math.round(48 * cls), sizeMaxPixels: Math.round(68 * cls), _lighting: "pbr",
-      pickable: false, parameters: { depthCompare: "always" },
-    }));
+    const commonAc = { scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, sizeScale: 185, _lighting: "pbr", pickable: false, parameters: { depthCompare: "always" } };
+    const aircraftLayers = [];
+    for (const [cls, data] of byCls) {
+      const minP = 48 * cls, maxP = 68 * cls;
+      aircraftLayers.push(new ScenegraphLayer({ ...commonAc, id: `ac-outline-${cls}`, data, getColor: [4, 12, 14, 255], sizeMinPixels: Math.round(minP * 1.16), sizeMaxPixels: Math.round(maxP * 1.16) }));
+      aircraftLayers.push(new ScenegraphLayer({ ...commonAc, id: `aircraft-${cls}`, data, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255], sizeMinPixels: Math.round(minP), sizeMaxPixels: Math.round(maxP) }));
+    }
 
     const covMat = { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] };
     const layers = [
@@ -396,7 +434,7 @@ export function createTactical3d({ container, deps }) {
   }
   const airfieldByKey = new Map();
   let afPinned = null; // airfield popover pinned by a click; stays until a click elsewhere
-  const AF_LAYERS = ["airfield-ring", "airfield-code"]; // hover/click on the icon OR its label
+  const AF_LAYERS = ["airfield-icon"]; // one symbol layer (icon + label) — hover/click on either
   const activeAf = () => afPinned || hoverAf?.field || null;
   function showAf(field) { afTooltipEl.innerHTML = deps.airfieldTooltip(field); afTooltipEl.style.display = ""; positionAfTooltip(); }
   function positionAfTooltip() { const f = activeAf(); if (!f) return; const p = map.project([f.lon, f.lat]); afTooltipEl.style.transform = `translate3d(${p.x.toFixed(1)}px, ${(p.y - 12).toFixed(1)}px, 0) translate(-50%, -100%)`; }
@@ -426,11 +464,8 @@ export function createTactical3d({ container, deps }) {
       if (minor && !s.airfieldsMinor) continue;
       const key = f.icao || f.code;
       airfieldByKey.set(key, f);
-      const color = minor ? "#8b98a5" : f.kind === "large" ? "#ffd23f" : f.kind === "medium" ? "#ff9f45" : "#c3ccd6";
-      // Ring radius r + core radius cr scale with airport class (large > medium > small > minor).
-      const r = minor ? 4 : f.kind === "large" ? 9 : f.kind === "medium" ? 7 : 5.5;
-      const cr = minor ? 1.2 : f.kind === "large" ? 2.2 : f.kind === "medium" ? 1.8 : 1.5;
-      features.push({ type: "Feature", properties: { key, code: f.code, minor, kind: f.kind, r, cr, color }, geometry: { type: "Point", coordinates: [f.lon, f.lat] } });
+      // icon-image/size + text pick their own per-class values from kind/minor in the style.
+      features.push({ type: "Feature", properties: { key, code: f.code, minor, kind: f.kind }, geometry: { type: "Point", coordinates: [f.lon, f.lat] } });
     }
     return { type: "FeatureCollection", features };
   }
@@ -527,11 +562,21 @@ export function createTactical3d({ container, deps }) {
     const d = lastList.find((x) => x.hex === selHex);
     if (d) map.easeTo({ center: [d.lon, d.lat], offset: followOffset, duration: 1100, easing: (t) => t });
   }
-  // Locate button: ease-out fly to the aircraft's ground point at the target zoom, then let follow
-  // re-centre it at altitude (offset refreshed by the zoomend handler below).
+  // Locate button: ONE ease-out easeTo that changes zoom + pan + altitude-offset together (not a
+  // zoom-then-pan flyTo arc), and resumes tracking. The offset is scaled to the target zoom (the
+  // screen lift of a point at altitude scales with 2^zoom) so the aircraft lands centred at once.
   function flyToView(lon, lat, zoom, altFt) {
-    map.flyTo({ center: [lon, lat], zoom: zoom + 1, pitch: 55, duration: 900 });
-    if (altFt != null) { followActive = true; followSettleUntil = performance.now() + 950; }
+    const tgtZoom = zoom + 1;
+    let offset = [0, 0];
+    if (altFt != null) {
+      const off0 = altOffset(lon, lat, altFt * FT_TO_M * exagg); // at the current zoom
+      const scale = Math.pow(2, tgtZoom - map.getZoom());
+      offset = [off0[0] * scale, off0[1] * scale];
+      followOffset = offset;
+      followActive = true;
+      followSettleUntil = performance.now() + 980;
+    }
+    map.easeTo({ center: [lon, lat], zoom: tgtZoom, offset, pitch: 55, duration: 900, easing: EASE_OUT });
   }
   // Offset depends on zoom, so refresh it after the user (or a locate fly) changes zoom.
   map.on("zoomend", () => { if (!followActive) return; const d = lastList.find((x) => x.hex === deps.getSelectedHex()); if (d) followOffset = altOffset(d.lon, d.lat, d.z); });
