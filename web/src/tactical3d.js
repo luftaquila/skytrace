@@ -244,10 +244,17 @@ export function createTactical3d({ container, deps }) {
   map.touchZoomRotate.enableRotation();
   const cv = map.getCanvas();
   cv.addEventListener("contextmenu", (e) => e.preventDefault());
+  // Stop the browser from starting a native image/text drag of the canvas (the "whole canvas drags
+  // as a ghost image" effect) — our own handlers drive the camera.
+  cv.addEventListener("dragstart", (e) => e.preventDefault());
+  cv.style.userSelect = "none";
   let drag = null;
   let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
   let followActive = false; // camera tracks the selected aircraft until the user drags/rotates it
+  let identBlinkOn = false; // toggled by a timer while any aircraft squawks IDENT (gold body flash)
+  let identBlinkTimer = 0;
   const onDown = (e) => {
+    e.preventDefault(); // no native drag-image / text selection while manipulating the camera
     dragMoved = false;
     followActive = false; // any manual drag/rotate stops auto-tracking
     if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
@@ -313,7 +320,6 @@ export function createTactical3d({ container, deps }) {
   let activeHex = null;
   let activeClearTimer = 0;
   const blocks = new Map(); // hex -> { el, sig }
-  const identRings = new Map(); // hex -> blinking IDENT/SPI ring element
 
   function scheduleActive(hex) {
     clearTimeout(activeClearTimer);
@@ -364,6 +370,11 @@ export function createTactical3d({ container, deps }) {
     if (!ready) return;
     const list = aircraftList();
     lastList = list;
+    // IDENT (SPI): flash the whole body gold. Run a blink toggle only while some aircraft squawks
+    // ident (rare/brief); each toggle rebuilds so the aircraft getColor re-evaluates.
+    const hasIdent = list.some((d) => d.spi);
+    if (hasIdent && !identBlinkTimer) identBlinkTimer = setInterval(() => { identBlinkOn = !identBlinkOn; buildLayers(); }, 480);
+    else if (!hasIdent && identBlinkTimer) { clearInterval(identBlinkTimer); identBlinkTimer = 0; identBlinkOn = false; }
     const selHex = deps.getSelectedHex();
 
     // Proximity/collision alert (same STCA data as the 2D map): a red link between each close pair —
@@ -420,7 +431,8 @@ export function createTactical3d({ container, deps }) {
     for (const d of list) { const g = byCls.get(d.cls) || []; g.push(d); byCls.set(d.cls, g); }
     const aircraftLayers = [...byCls.entries()].map(([cls, data]) => new GlowScenegraphLayer({
       id: `aircraft-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-      getColor: (d) => conflictHexes.has(d.hex) ? [251, 113, 133, 255] : [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255],
+      getColor: (d) => (d.spi && identBlinkOn) ? [255, 215, 0, 255] : conflictHexes.has(d.hex) ? [251, 113, 133, 255] : [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255],
+      updateTriggers: { getColor: `${identBlinkOn}|${[...conflictHexes].sort().join(",")}` },
       sizeScale: 185, sizeMinPixels: Math.round(48 * cls), sizeMaxPixels: Math.round(68 * cls), _lighting: "pbr",
       pickable: false, parameters: { depthCompare: "always" },
     }));
@@ -542,6 +554,9 @@ export function createTactical3d({ container, deps }) {
       const sig = deps.datablockHtml(d.item);
       if (b.sig !== sig) { b.block.innerHTML = sig; b.sig = sig; }
       b.block.classList.toggle("selected", d.hex === selHex);
+      // Widen the block's offset when zoomed in (the aircraft mesh grows toward its pixel cap), so it
+      // clears the body at close range too.
+      b.block.style.left = `${map.getZoom() >= 11 ? 62 : 44}px`;
       const p = project(d.lon, d.lat, d.z);
       if (p) { b.el.style.display = ""; b.el.style.transform = `translate3d(${p[0].toFixed(1)}px, ${p[1].toFixed(1)}px, 0)`; }
       else b.el.style.display = "none";
@@ -552,18 +567,6 @@ export function createTactical3d({ container, deps }) {
     const lp = sel && project(sel.lon, sel.lat, sel.z);
     if (lp) { lockEl.style.display = ""; lockEl.style.transform = `translate3d(${lp[0].toFixed(1)}px, ${lp[1].toFixed(1)}px, 0) translate(-50%, -50%)`; }
     else lockEl.style.display = "none";
-    // Blinking IDENT (SPI) ring on every squawking-ident aircraft, independent of selection.
-    const identShown = new Set();
-    for (const d of lastList) {
-      if (!d.spi) continue;
-      identShown.add(d.hex);
-      let r = identRings.get(d.hex);
-      if (!r) { r = document.createElement("div"); r.className = "t3d-ident"; overlayEl.appendChild(r); identRings.set(d.hex, r); }
-      const ip = project(d.lon, d.lat, d.z);
-      if (ip) { r.style.display = ""; r.style.transform = `translate3d(${ip[0].toFixed(1)}px, ${ip[1].toFixed(1)}px, 0) translate(-50%, -50%)`; }
-      else r.style.display = "none";
-    }
-    for (const [hex, r] of identRings) if (!identShown.has(hex)) { r.remove(); identRings.delete(hex); }
   }
 
   // --- Interaction ------------------------------------------------------------------------
@@ -754,6 +757,7 @@ export function createTactical3d({ container, deps }) {
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {
     disposed = true;
+    if (identBlinkTimer) clearInterval(identBlinkTimer);
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);
     try { map.removeControl(overlay); } catch { /* gone */ }
