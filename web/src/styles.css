@@ -1654,6 +1654,23 @@ select {
   z-index: 4000001;
 }
 
+/* Tactical target-lock reticle (HUD corner brackets) on the selected aircraft. */
+.t3d-lock {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 3;
+  pointer-events: none;
+  color: var(--accent);
+  filter: drop-shadow(0 0 4px rgb(72 224 209 / 0.7));
+  will-change: transform;
+  animation: t3d-lock-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes t3d-lock-pulse {
+  50% { opacity: 0.55; }
+}
+
 .t3d-loading {
   position: absolute;
   left: 50%;

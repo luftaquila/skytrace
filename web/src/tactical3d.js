@@ -144,13 +144,18 @@ export function createTactical3d({ container, deps }) {
   const afTooltipEl = document.createElement("div");
   afTooltipEl.className = "t3d-tt airfield-tt";
   afTooltipEl.style.display = "none";
+  // Tactical target-lock reticle (HUD corner brackets) around the selected aircraft.
+  const lockEl = document.createElement("div");
+  lockEl.className = "t3d-lock";
+  lockEl.style.display = "none";
+  lockEl.innerHTML = '<svg viewBox="0 0 48 48" width="48" height="48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"><path d="M3 15V3H15"/><path d="M33 3H45V15"/><path d="M45 33V45H33"/><path d="M15 45H3V33"/></svg>';
   const loadingEl = document.createElement("div");
   loadingEl.className = "t3d-loading";
   loadingEl.textContent = "LOADING TERRAIN…";
   const hintEl = document.createElement("div");
   hintEl.className = "t3d-hint";
   hintEl.textContent = "Drag rotate · Ctrl/right-drag tilt · Scroll zoom";
-  container.append(overlayEl, afTooltipEl, loadingEl, hintEl);
+  container.append(overlayEl, afTooltipEl, lockEl, loadingEl, hintEl);
 
   let hoverHex = null;
   let hoverAf = null;
@@ -194,7 +199,9 @@ export function createTactical3d({ container, deps }) {
       const bank = airborne && Number.isFinite(item.roll) ? Math.max(-45, Math.min(45, item.roll)) : 0;
       const track = Number.isFinite(item.track) ? item.track : 0;
       const cls = deps.planeSizeScale(item.category); // 0.85 light · 1 · 1.18 heavy (matches 2D)
-      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * exagg, airborne, rgb, cls, orientation: [phi, 90 - track, bank], coasting: deps.isCoasting(item), item });
+      // deck maps the nose (+X) to world-Z = -sin(pitch), so a climb (phi>0) needs NEGATIVE pitch
+      // to raise the nose. Negate phi so climbing points up and descending points down.
+      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * exagg, airborne, rgb, cls, orientation: [-phi, 90 - track, bank], coasting: deps.isCoasting(item), item });
     }
     return out;
   }
@@ -244,7 +251,6 @@ export function createTactical3d({ container, deps }) {
     const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * exagg, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
 
     const covMesh = coverageMesh();
-    const selObj = list.find((d) => d.hex === selHex);
     // Aircraft grouped by size class so per-category size differences survive the pixel clamp
     // (constant on-screen size per class); one ScenegraphLayer per distinct class.
     const byCls = new Map();
@@ -259,12 +265,12 @@ export function createTactical3d({ container, deps }) {
     const layers = [
       covMesh && new SimpleMeshLayer({
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 46], sizeScale: 1,
+        getColor: [255, 255, 255, 60], sizeScale: 1,
         material: { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] },
-        // deck 9 / luma v9 pipeline params (WebGPU-style keys). The dome must not WRITE depth,
-        // or it occludes targets drawn after it. cullMode 'back' draws only the near shell so the
-        // translucency doesn't stack front+back into brighter (whiter) overlapping triangles.
-        pickable: false, parameters: { depthWriteEnabled: false, cullMode: "back" },
+        // The dome WRITES depth (depthCompare less-equal) so only the nearest surface draws at each
+        // pixel — translucency can't stack front+back (or overlapping bands) into brighter/white
+        // triangles. Aircraft/sticks/trails use depthCompare 'always', so the dome never hides them.
+        pickable: false, parameters: { depthWriteEnabled: true, depthCompare: "less-equal" },
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
       // Trail: a single crisp altitude-gradient line (no glow/casing). billboard:true keeps the
@@ -273,11 +279,6 @@ export function createTactical3d({ container, deps }) {
       new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
       // Small dot at each stick's ground foot (the old view had these).
       new ScatterplotLayer({ id: "ground-dots", data: sticks, getPosition: (d) => d.target, radiusUnits: "pixels", getRadius: 3, radiusMinPixels: 2.5, radiusMaxPixels: 4, filled: true, stroked: false, getFillColor: (d) => d.color, parameters: { depthCompare: "always" } }),
-      // Selection highlight: a glowing teal reticle ring around the selected aircraft.
-      selObj && new ScatterplotLayer({
-        id: "selection", data: [selObj], getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 30, radiusMinPixels: 30, radiusMaxPixels: 30,
-        filled: false, stroked: true, getLineColor: [120, 240, 220, 235], lineWidthUnits: "pixels", getLineWidth: 2.4, parameters: { depthCompare: "always" },
-      }),
       ...aircraftLayers,
       ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 150, sizeMinPixels: 38, sizeMaxPixels: 54, parameters: { depthCompare: "always" } }),
       // Invisible, generous click/hover target (like the old hit sphere): a constant ~80px disc
@@ -371,6 +372,11 @@ export function createTactical3d({ container, deps }) {
       else b.el.style.display = "none";
     }
     for (const [hex, b] of blocks) if (!shown.has(hex)) { b.el.remove(); blocks.delete(hex); }
+    // Position the tactical target-lock on the selected aircraft.
+    const sel = selHex && lastList.find((d) => d.hex === selHex);
+    const lp = sel && project(sel.lon, sel.lat, sel.z);
+    if (lp) { lockEl.style.display = ""; lockEl.style.transform = `translate3d(${lp[0].toFixed(1)}px, ${lp[1].toFixed(1)}px, 0) translate(-50%, -50%)`; }
+    else lockEl.style.display = "none";
   }
 
   // --- Interaction ------------------------------------------------------------------------
@@ -492,20 +498,27 @@ export function createTactical3d({ container, deps }) {
     }
     return [0, 0];
   }
-  // Called on select: smoothly focus the target (at altitude) and start auto-tracking it.
+  const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3); // fast start, slow settle
+  // Called on select: smoothly focus the target (at altitude, ease-out) and start auto-tracking it.
   function panTo(lon, lat, altFt) {
     followActive = true;
     followOffset = altOffset(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * exagg);
-    map.easeTo({ center: [lon, lat], offset: followOffset, duration: 500 });
+    map.easeTo({ center: [lon, lat], offset: followOffset, duration: 750, easing: EASE_OUT });
   }
-  // Smoothly keep the selected aircraft centred each data pass (linear glide, stable offset) until
-  // the user drags the map.
+  // Keep the selected aircraft centred until the user drags the map. Only re-centres (ease-out)
+  // once it has drifted off-centre, and never while a focus animation is still settling — so the
+  // select/locate move plays out its ease-out instead of being overridden into a constant glide.
   function followSelected() {
-    if (!followActive) return;
+    if (!followActive || map.isEasing()) return;
     const selHex = deps.getSelectedHex();
     if (!selHex) { followActive = false; return; }
     const d = lastList.find((x) => x.hex === selHex);
-    if (d) map.easeTo({ center: [d.lon, d.lat], offset: followOffset, duration: 900, easing: (t) => t });
+    const vp = overlay._deck?.getViewports?.()[0];
+    if (!d || !vp) return;
+    const air = vp.project([d.lon, d.lat, d.z]);
+    if (!air || !Number.isFinite(air[0])) return;
+    const cx = map.getCanvas().clientWidth / 2, cy = map.getCanvas().clientHeight / 2;
+    if (Math.hypot(air[0] - cx, air[1] - cy) > 30) map.easeTo({ center: [d.lon, d.lat], offset: followOffset, duration: 650, easing: EASE_OUT });
   }
   // Locate button: fly to the aircraft's ground point at the target zoom, then let follow re-centre
   // it at altitude (offset depends on the target zoom, refreshed by the zoomend handler below).
@@ -522,7 +535,7 @@ export function createTactical3d({ container, deps }) {
     window.removeEventListener("mouseup", onUp);
     try { map.removeControl(overlay); } catch { /* gone */ }
     map.remove();
-    for (const el of [overlayEl, afTooltipEl, loadingEl, hintEl]) el.remove();
+    for (const el of [overlayEl, afTooltipEl, lockEl, loadingEl, hintEl]) el.remove();
   }
 
   const hideLoading = () => { loadingEl.style.display = "none"; };
