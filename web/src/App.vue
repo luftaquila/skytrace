@@ -1,6 +1,5 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import L from "leaflet";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import {
@@ -13,8 +12,6 @@ import {
   Pause,
   Play,
   RadioTower,
-  Rotate3d,
-  Ruler,
   Search,
   Settings,
   SlidersHorizontal,
@@ -22,16 +19,11 @@ import {
   X,
 } from "@lucide/vue";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
-import { RUNWAYS } from "./runways.js";
 
 const SETTINGS_KEY = "skytrace.settings.v3";
 const DEFAULT_SETTINGS = {
   units: "aero",
-  baseLayer: "satellite",
-  iconScale: 1,
-  labels: false,
   coverage: true,
-  coverageBands: false,
   airfields: true,
   airfieldsMinor: false,
   showGround: true,
@@ -42,51 +34,24 @@ const DEFAULT_SETTINGS = {
   flightLevels: false,
   coastDrop: true,
   proximity: true,
-  view3d: true,
   terrainExaggeration: 2,
   terrainSatellite: true,
 };
 
-const baseLayers = {
-  satellite: {
-    label: "Satellite",
-    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    options: {
-      maxZoom: 19,
-      attribution: "Tiles &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
-    },
-  },
-  osm: {
-    label: "OSM",
-    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    options: {
-      maxZoom: 19,
-      attribution: "&copy; OpenStreetMap contributors",
-    },
-  },
-  dark: {
-    label: "Dark",
-    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-    options: {
-      maxZoom: 19,
-      attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
-    },
-  },
-};
-
 function loadSettings() {
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") };
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+    const settings = { ...DEFAULT_SETTINGS };
+    for (const key of Object.keys(DEFAULT_SETTINGS)) {
+      if (Object.hasOwn(saved, key)) settings[key] = saved[key];
+    }
+    return settings;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
 }
 
-const mapEl = ref(null);
 const map3dEl = ref(null);
-// True only once the 3D scene is ready and shown; the containers swap on this, not on
-// settings.view3d, so the UI never flips to a blank canvas while the chunk/DEM loads.
-const view3dActive = ref(false);
 const aircraft = ref([]);
 const receivers = ref([]);
 const coverage = ref({ areas: [], points: [] });
@@ -111,10 +76,6 @@ const playbackSpeed = ref(0);
 const playbackIndex = ref(0);
 const chartEl = ref(null);
 const selectedHistoryMetrics = ref(["altBaro", "gs"]);
-// Range/bearing measure tool: click two map points to read distance + bearing.
-const measureMode = ref(false);
-const measurePoints = ref([]);
-const measureCursor = ref(null);
 
 // Resizable panel: sidebar width (desktop) / panel height in vh (mobile), persisted.
 const LAYOUT_KEY = "skytrace.layout.v1";
@@ -138,28 +99,20 @@ function startPanelResize(event) {
     } else {
       sidebarWidth.value = clampWidth(window.innerWidth - ev.clientX);
     }
-    if (!raf) raf = requestAnimationFrame(() => { raf = 0; map?.invalidateSize(); });
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; tac3d?.resize(); });
   };
   const onUp = () => {
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
     document.body.style.userSelect = "";
     localStorage.setItem(LAYOUT_KEY, JSON.stringify({ sidebarWidth: sidebarWidth.value, panelHeight: panelHeight.value }));
-    map?.invalidateSize();
+    tac3d?.resize();
   };
   document.body.style.userSelect = "none";
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
 }
 
-let map;
-let tileLayer;
-let trackLayer;
-let playbackMarker;
-let coverageLayer;
-let airfieldLayer;
-let conflictLayer;
-let measureLayer;
 let historyChart;
 let chartResizeObserver;
 let refreshTimer;
@@ -170,20 +123,10 @@ let sseRetryTimer;
 let playbackTimer;
 let tac3d;
 let tac3dPromise;
-const markers = new Map();
 
 watch(settings, (value) => {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(value));
-  if (view3dActive.value) {
-    tac3d?.applySettings();
-    queueHistoryChartRender();
-    return;
-  }
-  applyBaseLayer();
-  upsertMarkers();
-  drawCoverage();
-  drawAirfields();
-  drawConflicts();
+  tac3d?.applySettings();
   queueHistoryChartRender();
 }, { deep: true });
 
@@ -253,9 +196,8 @@ const altFilter = computed(() => {
   };
 });
 
-// Shared predicate for the sidebar list and the map markers, so upsertMarkers() can
-// reuse it without materialising a second filtered array. The search haystack is only
-// built when there is actually a query.
+// Shared predicate for the sidebar list and the 3D aircraft layer. The search haystack is
+// only built when there is actually a query.
 function passesFilters(item) {
   const q = searchQuery.value;
   if (q) {
@@ -281,9 +223,7 @@ function passesFilters(item) {
   return true;
 }
 
-// Caps the sidebar list only. Map markers are limited separately (MARKER_LIMIT + viewport
-// culling), so the map can show aircraft that fall past this list cap — the two limits
-// intentionally serve different surfaces.
+// Cap only the sidebar list; the 3D layer continues to render every aircraft that passes filters.
 const LIST_LIMIT = 600;
 const filteredAircraft = computed(() =>
   sortAircraft(aircraft.value.filter(passesFilters), sortKey.value).slice(0, LIST_LIMIT),
@@ -454,8 +394,7 @@ function focusTrackPoint(index) {
   playbackIndex.value = index;
 }
 
-// --- Great-circle helpers (nautical miles + true bearing) for the measure tool and the
-// proximity check. Points are {lat, lng} to match Leaflet's LatLng. ---
+// Great-circle distance for the proximity check. Points use {lat, lng}.
 const EARTH_RADIUS_NM = 3440.065;
 function toRadians(deg) { return (deg * Math.PI) / 180; }
 function distanceNm(a, b) {
@@ -466,15 +405,6 @@ function distanceNm(a, b) {
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   return 2 * EARTH_RADIUS_NM * Math.asin(Math.min(1, Math.sqrt(h)));
 }
-function bearingDeg(a, b) {
-  const lat1 = toRadians(a.lat);
-  const lat2 = toRadians(b.lat);
-  const dLon = toRadians(b.lng - a.lng);
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
-}
-
 // Coast/drop: a target stops updating (out of range, landed, feed hiccup). Grey it as
 // "coasting" past COAST_AGE, then stop drawing it past DROP_AGE. DROP_AGE sits just above
 // the server's 90 s current-window, so it is only a safety net for a stalled feed.
@@ -523,12 +453,6 @@ const conflicts = computed(() => {
   }
   return pairs;
 });
-const conflictHexes = computed(() => {
-  const set = new Set();
-  for (const pair of conflicts.value) { set.add(pair.a.hex); set.add(pair.b.hex); }
-  return set;
-});
-
 const HISTORY_METRICS = [
   { key: "altBaro", label: "Baro Alt", color: "#48e0d1", kind: "alt", get: (point) => point.altBaro },
   { key: "altGeom", label: "Geom Alt", color: "#7dd3fc", kind: "alt", get: (point) => point.altGeom },
@@ -652,103 +576,11 @@ const altitudeLegend = computed(() => {
   };
 });
 
-function aircraftKind(item) {
-  if (item.onGround) return "ground";
-  const cat = String(item.category || "").toUpperCase();
-  if (cat === "A7") return "helicopter";
-  if (cat.startsWith("C")) return "ground";
-  return "plane";
-}
-
 function planeSizeScale(category) {
   const cat = String(category || "").toUpperCase();
   if (cat === "A1" || cat === "A2" || cat === "B1") return 0.85;
   if (cat === "A4" || cat === "A5") return 1.18;
   return 1;
-}
-
-function glyphInner(kind) {
-  if (kind === "ground") {
-    return `<rect class="aircraft-body" x="8" y="12" width="20" height="12" rx="3"></rect>
-      <path class="aircraft-detail" d="M11 16h14M13 24v4M23 24v4"></path>
-      <circle class="aircraft-wheel" cx="13" cy="28" r="2"></circle>
-      <circle class="aircraft-wheel" cx="23" cy="28" r="2"></circle>`;
-  }
-  if (kind === "helicopter") {
-    return `<path class="aircraft-body" d="M16.4 7h3.2v18l3.4 3.4v2.2h-13.2v-2.2l3.4-3.4z"></path>
-      <path class="aircraft-detail" d="M3 10.5 33 25.5M3 25.5 33 10.5"></path>`;
-  }
-  return `<path class="aircraft-body" d="M18 2.5c1.4 0 2.4 1.2 2.4 2.8v9.4l12.1 7.2v3.4l-12.1-3.2v6.8l4 3v2.4L18 32.5l-6.4 1.8v-2.4l4-3v-6.8L3.5 25.3v-3.4l12.1-7.2V5.3c0-1.6 1-2.8 2.4-2.8Z"></path>
-    <path class="aircraft-highlight" d="M18 5.4v23.8"></path>`;
-}
-
-function markerRotation(item) {
-  if (item.onGround) return 0;
-  return Number.isFinite(item.track) ? Math.round(item.track) : 0;
-}
-
-function markerHtml(item) {
-  const rotation = markerRotation(item);
-  const color = altitudeColor(item);
-  const scale = Math.max(0.75, Math.min(1.6, Number(settings.value.iconScale) || 1));
-  // Persistent labels clutter the map and hide neighbouring aircraft, so only the
-  // selected aircraft is always labelled; the "Labels" setting opts into all of them.
-  // Every aircraft still shows its callsign in the hover tooltip.
-  const showLabel = settings.value.labels || selectedHex.value === item.hex;
-  const label = showLabel ? `<span class="aircraft-label">${escapeHtml(formatFlight(item))}</span>` : "";
-  const classes = [
-    item.emergency && item.emergency !== "none" ? "is-emergency" : "",
-    item.spi ? "is-ident" : "",
-    conflictHexes.value.has(item.hex) ? "is-conflict" : "",
-    isCoasting(item) ? "is-coasting" : "",
-  ].filter(Boolean).join(" ");
-  const kind = aircraftKind(item);
-  const sizeScale = kind === "plane" ? planeSizeScale(item.category) : 1;
-  const glyph = `<svg class="aircraft-svg ${kind}-svg" viewBox="0 0 36 36" aria-hidden="true" style="transform: rotate(${rotation}deg) scale(${sizeScale})">
-      ${glyphInner(kind)}
-    </svg>`;
-  return `<span class="aircraft-wrap ${classes}" style="--aircraft-color:${color};--aircraft-scale:${scale}">
-    <span class="aircraft-symbol">${glyph}</span>${label}
-  </span>`;
-}
-
-function markerIcon(item) {
-  const selected = selectedHex.value === item.hex;
-  return L.divIcon({
-    className: `aircraft-icon ${selected ? "selected" : ""}`,
-    html: markerHtml(item),
-    iconSize: [112, 46],
-    iconAnchor: [18, 18],
-  });
-}
-
-function markerVisualScale() {
-  return Math.max(0.75, Math.min(1.6, Number(settings.value.iconScale) || 1));
-}
-
-function markerSizeScale(item) {
-  return aircraftKind(item) === "plane" ? planeSizeScale(item.category) : 1;
-}
-
-// Everything that changes the rendered icon HTML *except* position and rotation.
-// When unchanged, upsertMarkers() skips the costly setIcon() innerHTML rebuild and
-// only moves the marker (and, if needed, rotates its glyph) in place.
-function markerSignature(item) {
-  const selected = selectedHex.value === item.hex ? 1 : 0;
-  const showLabel = settings.value.labels || selected;
-  const label = showLabel ? formatFlight(item) : "";
-  const emergency = item.emergency && item.emergency !== "none" ? 1 : 0;
-  const ident = item.spi ? 1 : 0;
-  const conflict = conflictHexes.value.has(item.hex) ? 1 : 0;
-  const coasting = isCoasting(item) ? 1 : 0;
-  return `${aircraftKind(item)}|${altitudeColor(item)}|${markerVisualScale()}|${markerSizeScale(item)}|${selected}|${emergency}|${ident}|${conflict}|${coasting}|${label}`;
-}
-
-function applyMarkerRotation(marker, rot, item) {
-  const svg = marker.getElement()?.querySelector(".aircraft-svg");
-  if (!svg) return false;
-  svg.style.transform = `rotate(${rot}deg) scale(${markerSizeScale(item)})`;
-  return true;
 }
 
 function verticalArrowSymbol(item) {
@@ -760,19 +592,10 @@ function verticalArrowSymbol(item) {
   return "→";
 }
 
-function tooltipHtml(item) {
-  // Same tactical data-block styling and layout as the 3D view: callsign + age + pin over the
-  // shared status line (trend+altitude · speed). The .tt-age span is patched every
-  // second by patchTooltipAge() so the age stays live while the pointer rests on a marker.
-  return `<span class="tt-l1"><b>${escapeHtml(formatFlight(item))}</b><span class="tt-top-actions"><span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>${pinIcon(item.hex)}</span></span>`
-    + `<span class="tt-l2">${targetLine(item, false, false)}</span>`;
-}
-
-// Second line shared by the 3D data block and the 2D hover popover: the vertical-trend
-// arrow immediately before the altitude (green climb / red descent), then speed and optionally
-// the update age (#s), each field separated by a middle dot. Altitude is quantised to 100 ft so
+// Second line in the 3D data block: the vertical-trend arrow immediately before the altitude
+// (green climb / red descent), then speed. Altitude is quantised to 100 ft so
 // the label text (and the DOM rebuild it triggers) stays stable while an aircraft drifts.
-function targetLine(item, altRound, includeAge = true) {
+function targetLine(item, altRound) {
   const altFt = item.altBaro ?? item.altGeom;
   const feet = altRound && altFt != null ? Math.round(altFt / 100) * 100 : altFt;
   const alt = item.onGround ? "GND" : feet == null ? "-" : altText(feet);
@@ -781,7 +604,6 @@ function targetLine(item, altRound, includeAge = true) {
   const arrowHtml = arrow ? `<span class="tt-trend ${trend}">${arrow}</span>` : "";
   const parts = [`<span class="tt-alt">${arrowHtml}${escapeHtml(alt)}</span>`];
   if (item.gs != null) parts.push(escapeHtml(formatSpeed(item)));
-  if (includeAge) parts.push(`<span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>`);
   return parts.join(" · ");
 }
 
@@ -797,186 +619,7 @@ function pinIcon(hex) {
 // Tactical data block beside each 3D target: callsign + pin over the shared status line.
 function datablockHtml(item) {
   return `<span class="t3d-datablock"><span class="db-top"><b>${escapeHtml(formatFlight(item))}</b><span class="tt-top-actions"><span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>${pinIcon(item.hex)}</span></span>`
-    + `<span>${targetLine(item, true, false)}</span></span>`;
-}
-
-// Plain-text label for the 3D view's deck.gl TextLayer (no HTML): callsign over
-// "trend+altitude · speed · age".
-function labelText(item) {
-  const altFt = item.altBaro ?? item.altGeom;
-  const alt = item.onGround ? "GND" : altFt == null ? "-" : altText(Math.round(altFt / 100) * 100);
-  const parts = [`${verticalArrowSymbol(item)}${alt}`];
-  if (item.gs != null) parts.push(formatSpeed(item));
-  parts.push(formatAge(item.observedAt));
-  return `${formatFlight(item)}\n${parts.join(" · ")}`;
-}
-
-function applyMarkerHover(marker, hex) {
-  marker.getElement()?.classList.toggle("hovered", hoveredHex.value === hex);
-}
-
-// Interactive so the pin icon is clickable and the tooltip stays while the pointer is on
-// it; permanent for pinned aircraft so their label stays up without hovering.
-function bindMarkerTooltip(marker, tip, isPinned) {
-  marker.unbindTooltip();
-  marker.bindTooltip(tip, {
-    direction: "top", offset: [0, -14], className: "aircraft-tt", interactive: true, permanent: isPinned,
-  });
-  marker._pinned = isPinned;
-}
-
-// The tooltip HTML is built once per upsert, so its baked-in age would freeze while the
-// pointer rests on a marker. Patch just the age node of the open tooltip in place so it
-// ticks every second (driven by the clock timer) without rebuilding the whole tooltip.
-function patchTooltipAge(marker, hex) {
-  const ageEl = marker?.getTooltip()?.getElement()?.querySelector(".tt-age");
-  if (!ageEl) return;
-  const item = aircraft.value.find((row) => row.hex === hex);
-  if (item) ageEl.textContent = formatAge(item.observedAt);
-}
-
-// Slightly beyond the visible bounds so markers don't pop in right at the edge on a pan.
-const MARKER_BOUNDS_PAD = 0.25;
-// Safety cap on simultaneous DOM markers, independent of the sidebar's LIST_LIMIT. It only
-// bites on an extreme zoom-out with very heavy traffic (viewport culling keeps the normal
-// count far below it); when it does, the kept markers follow aircraft.value order, which is
-// arbitrary — acceptable for that edge case.
-const MARKER_LIMIT = 1000;
-
-function upsertMarkers() {
-  if (!map) return;
-  const bounds = map.getBounds().pad(MARKER_BOUNDS_PAD);
-  const visible = new Set();
-  let count = 0;
-  for (const item of aircraft.value) {
-    if (item.lat == null || item.lon == null) continue;
-    if (!passesFilters(item)) continue;
-    if (isDropped(item)) continue;
-    const selected = selectedHex.value === item.hex;
-    // Cull anything off-screen, but always keep the selected and pinned aircraft so their
-    // highlight, permanent label and track survive a pan away. Real position updates still
-    // land the instant the marker is in view — this only trims what the user cannot see.
-    const keep = selected || pinned.value.has(item.hex);
-    if (!keep && !bounds.contains([item.lat, item.lon])) continue;
-    if (!keep && count >= MARKER_LIMIT) continue;
-    count += 1;
-    visible.add(item.hex);
-
-    const rot = markerRotation(item);
-    const sig = markerSignature(item);
-    const tip = tooltipHtml(item);
-    const existing = markers.get(item.hex);
-    if (existing) {
-      if (existing._lat !== item.lat || existing._lon !== item.lon) {
-        existing.setLatLng([item.lat, item.lon]);
-        existing._lat = item.lat;
-        existing._lon = item.lon;
-      }
-      if (existing._sig !== sig) {
-        // Appearance changed (colour band, selection, label, …): rebuild the icon,
-        // which also bakes in the current rotation.
-        existing.setIcon(markerIcon(item));
-        existing._sig = sig;
-        existing._rot = rot;
-      } else if (existing._rot !== rot) {
-        // Only the heading changed: nudge the glyph transform instead of rebuilding.
-        if (!applyMarkerRotation(existing, rot, item)) existing.setIcon(markerIcon(item));
-        existing._rot = rot;
-      }
-      const isPinned = pinned.value.has(item.hex);
-      if (existing._pinned !== isPinned) {
-        // Pin state changed: rebind so the tooltip becomes permanent (pinned) or hover-only.
-        bindMarkerTooltip(existing, tip, isPinned);
-      } else if (existing._tip !== tip) {
-        existing.setTooltipContent(tip);
-      }
-      existing._tip = tip;
-      applyMarkerHover(existing, item.hex);
-    } else {
-      const marker = L.marker([item.lat, item.lon], { icon: markerIcon(item) });
-      marker._lat = item.lat;
-      marker._lon = item.lon;
-      marker._sig = sig;
-      marker._rot = rot;
-      marker._tip = tip;
-      bindMarkerTooltip(marker, tip, pinned.value.has(item.hex));
-      marker.on("tooltipopen", () => patchTooltipAge(marker, item.hex));
-      marker.on("click", () => toggleAircraft(item.hex));
-      marker.on("mouseover", () => { hoveredHex.value = item.hex; });
-      marker.on("mouseout", () => { if (hoveredHex.value === item.hex) hoveredHex.value = null; });
-      marker.addTo(map);
-      markers.set(item.hex, marker);
-      applyMarkerHover(marker, item.hex);
-    }
-  }
-
-  for (const [hex, marker] of markers) {
-    if (!visible.has(hex)) {
-      marker.remove();
-      markers.delete(hex);
-    }
-  }
-}
-
-function bandMidFeet(band) {
-  const max = band.maxAltitude ?? band.minAltitude + 10000;
-  return (band.minAltitude + max) / 2;
-}
-
-// Backend ring is [lon, lat]; Leaflet wants [lat, lon]. Straight segments (no spline) so
-// the real per-bearing reach — airway spikes and no-coverage notches — is shown as-is.
-function ringToLatLngs(ring) {
-  return (ring || []).map(([lon, lat]) => [lat, lon]);
-}
-
-function drawCoverage() {
-  if (!map) return;
-  if (coverageLayer) coverageLayer.remove();
-  coverageLayer = L.layerGroup();
-  if (!settings.value.coverage) return;
-
-  for (const area of coverage.value.areas || []) {
-    const bands = area.bands || [];
-    const banded = settings.value.coverageBands && bands.length > 0;
-
-    // Overall extent as a single translucent area with its true jagged edge (always drawn:
-    // altitude bands drop the ~1/5 of far receptions with no altitude, so this is the
-    // honest boundary). Dark casing underneath keeps the edge readable over satellite.
-    const overallRing = area.polygon?.coordinates?.[0];
-    if (overallRing?.length) {
-      const latlngs = ringToLatLngs(overallRing);
-      // Non-interactive: no hover tooltip, and clicks pass through to the map/markers.
-      L.polygon(latlngs, {
-        color: "#071012", weight: (banded ? 1 : 2) + 2, opacity: 0.4, fill: false, interactive: false, lineJoin: "round",
-      }).addTo(coverageLayer);
-      L.polygon(latlngs, {
-        color: "#5eead4",
-        weight: banded ? 1 : 2,
-        opacity: banded ? 0.6 : 0.95,
-        fillColor: "#2dd4bf",
-        fillOpacity: banded ? 0.04 : 0.1,
-        interactive: false,
-        lineJoin: "round",
-      }).addTo(coverageLayer);
-    }
-
-    // Altitude bands: thin coloured outlines inside the boundary (highest first).
-    if (banded) {
-      for (const band of [...bands].sort((a, b) => bandMidFeet(b) - bandMidFeet(a))) {
-        const ring = band.polygon?.coordinates?.[0];
-        if (!ring?.length) continue;
-        L.polyline(ringToLatLngs(ring), {
-          color: altitudeColorFeet(bandMidFeet(band)),
-          weight: 2,
-          opacity: 0.9,
-          interactive: false,
-          lineCap: "round",
-          lineJoin: "round",
-        }).addTo(coverageLayer);
-      }
-    }
-  }
-  coverageLayer.addTo(map);
+    + `<span>${targetLine(item, true)}</span></span>`;
 }
 
 function airfieldTooltip(field) {
@@ -992,161 +635,6 @@ function airfieldTooltip(field) {
   return `<span class="af-tt-name">${escapeHtml(field.name)}</span>`
     + (meta ? `<span class="af-tt-meta">${escapeHtml(meta)}</span>` : "")
     + `<span class="af-tt-runways"><span class="af-tt-runway-title">Runways</span>${runwayRows}</span>`;
-}
-
-function airfieldIcon(field, minor, showLabel = true) {
-  const label = !minor && showLabel ? `<span class="airfield-code">${escapeHtml(field.code)}</span>` : "";
-  return L.divIcon({
-    className: `airfield-icon kind-${field.kind}${minor ? " minor" : ""}`,
-    html: `<span class="airfield-wrap"><span class="airfield-dot"></span>${label}</span>`,
-    iconSize: [1, 1],
-    iconAnchor: [0, 0],
-  });
-}
-
-// Four [lat, lon] corners of a runway rectangle from its threshold coords + width, using a
-// local metres-per-degree approximation (fine at runway scale).
-function runwayCorners(rwy) {
-  const midLat = (rwy.le[1] + rwy.he[1]) / 2;
-  const mPerLat = 111320;
-  const mPerLon = 111320 * Math.cos((midLat * Math.PI) / 180);
-  let ex = (rwy.he[0] - rwy.le[0]) * mPerLon;
-  let ez = (rwy.he[1] - rwy.le[1]) * mPerLat;
-  const len = Math.hypot(ex, ez) || 1;
-  ex /= len; ez /= len;
-  const hw = (rwy.width * 0.3048) / 2;
-  const dLon = (-ez * hw) / mPerLon;
-  const dLat = (ex * hw) / mPerLat;
-  return [
-    [rwy.le[1] + dLat, rwy.le[0] + dLon],
-    [rwy.le[1] - dLat, rwy.le[0] - dLon],
-    [rwy.he[1] - dLat, rwy.he[0] - dLon],
-    [rwy.he[1] + dLat, rwy.he[0] + dLon],
-  ];
-}
-
-function drawAirfields() {
-  if (!map) return;
-  if (airfieldLayer) airfieldLayer.remove();
-  airfieldLayer = L.layerGroup();
-  if (settings.value.airfields) {
-    // Real runways to scale (position/length/heading/width) — visible when zoomed in.
-    for (const rwy of RUNWAYS) {
-      // Asphalt pavement with a crisp white edge — reads as a real runway (no centreline).
-      L.polygon(runwayCorners(rwy), {
-        color: "#e8edf2", weight: 1, opacity: 0.85, fillColor: "#262b31", fillOpacity: 0.92,
-        interactive: false, lineJoin: "miter",
-      }).addTo(airfieldLayer);
-    }
-    // The worldwide dataset (~48k) is progressively disclosed by airport size and culled to the
-    // viewport, so the 2D map never spawns tens of thousands of DOM markers: large always, medium
-    // from z5, small/minor from z7. Labels only appear once zoomed in (z6+).
-    const zoom = map.getZoom();
-    const bounds = map.getBounds().pad(0.15);
-    const south = bounds.getSouth(), north = bounds.getNorth(), west = bounds.getWest(), east = bounds.getEast();
-    for (const field of AIRFIELDS) {
-      const minor = isMinorAirfield(field);
-      // Uncoded minor strips (military helipads, emergency runways) are hidden
-      // unless explicitly enabled, to keep the coded airfields legible.
-      if (minor && !settings.value.airfieldsMinor) continue;
-      if ((field.kind === "medium" && zoom < 5) || ((field.kind === "small" || minor) && zoom < 7)) continue;
-      if (field.lat < south || field.lat > north) continue;
-      const lonVisible = (field.lon >= west && field.lon <= east)
-        || (field.lon + 360 >= west && field.lon + 360 <= east)
-        || (field.lon - 360 >= west && field.lon - 360 <= east);
-      if (!lonVisible) continue;
-      L.marker([field.lat, field.lon], {
-        icon: airfieldIcon(field, minor, zoom >= 6),
-        pane: "airfields",
-        keyboard: false,
-        zIndexOffset: -1000,
-      }).bindTooltip(airfieldTooltip(field), { direction: "top", offset: [0, -6], className: "airfield-tt" })
-        .addTo(airfieldLayer);
-    }
-  }
-  airfieldLayer.addTo(map);
-}
-
-// Proximity links: a dashed red line between each close pair, labelled with the lateral and
-// vertical separation. The markers themselves are reddened by the is-conflict class.
-function drawConflicts() {
-  if (!map) return;
-  if (conflictLayer) conflictLayer.remove();
-  conflictLayer = L.layerGroup();
-  if (settings.value.proximity) {
-    for (const pair of conflicts.value) {
-      const a = [pair.a.lat, pair.a.lon];
-      const b = [pair.b.lat, pair.b.lon];
-      L.polyline([a, b], {
-        color: "#fb7185", weight: 2, opacity: 0.9, dashArray: "5 4", interactive: false, lineCap: "round",
-      }).addTo(conflictLayer);
-      const mid = [(pair.a.lat + pair.b.lat) / 2, (pair.a.lon + pair.b.lon) / 2];
-      L.marker(mid, {
-        icon: L.divIcon({
-          className: "conflict-label",
-          html: `${pair.distNm.toFixed(1)} NM · ${Math.round(pair.vertFt)} ft`,
-          iconSize: [1, 1],
-        }),
-        interactive: false,
-        keyboard: false,
-        zIndexOffset: 1000,
-      }).addTo(conflictLayer);
-    }
-  }
-  conflictLayer.addTo(map);
-}
-
-// Range/bearing measure tool. Two clicks fix the endpoints (a live segment follows the
-// cursor between them); a further click starts a fresh measurement.
-function drawMeasure() {
-  if (!map) return;
-  if (measureLayer) measureLayer.remove();
-  measureLayer = L.layerGroup();
-  const pts = measurePoints.value;
-  const endpoints = pts.length === 1 && measureCursor.value ? [pts[0], measureCursor.value] : pts.slice(0, 2);
-  for (const p of pts) {
-    L.circleMarker([p.lat, p.lng], {
-      radius: 4, color: "#48e0d1", weight: 2, fillColor: "#0d1011", fillOpacity: 1, interactive: false,
-    }).addTo(measureLayer);
-  }
-  if (endpoints.length === 2) {
-    const [p0, p1] = endpoints;
-    L.polyline([[p0.lat, p0.lng], [p1.lat, p1.lng]], {
-      color: "#48e0d1", weight: 2, opacity: 0.95, dashArray: "6 5", interactive: false, lineCap: "round",
-    }).addTo(measureLayer);
-    const dist = distanceNm(p0, p1);
-    const brg = bearingDeg(p0, p1);
-    const km = dist * 1.852;
-    L.marker([p1.lat, p1.lng], {
-      icon: L.divIcon({
-        className: "measure-label",
-        html: `${dist.toFixed(1)} NM (${km.toFixed(1)} km) · ${Math.round(brg)}°`,
-        iconSize: [1, 1],
-      }),
-      interactive: false,
-      keyboard: false,
-      zIndexOffset: 1100,
-    }).addTo(measureLayer);
-  }
-  measureLayer.addTo(map);
-}
-
-function toggleMeasure() {
-  measureMode.value = !measureMode.value;
-  measurePoints.value = [];
-  measureCursor.value = null;
-  map?.getContainer().classList.toggle("measuring", measureMode.value);
-  drawMeasure();
-}
-
-function onMeasureClick(latlng) {
-  const point = { lat: latlng.lat, lng: latlng.lng };
-  // 0 or 2 existing points => start over with a single new point; 1 => complete the pair.
-  measurePoints.value = measurePoints.value.length === 1
-    ? [measurePoints.value[0], point]
-    : [point];
-  measureCursor.value = null;
-  drawMeasure();
 }
 
 function selectedTrackSeconds() {
@@ -1270,99 +758,6 @@ function trackSegmentColor(point) {
   return altitudeColorFeet(Math.round(alt / 500) * 500);
 }
 
-// A single hex can cover several flights over the track window; split the trace across
-// long tracking gaps (landed / out of range) so we don't draw a straight line bridging
-// hours of missing data.
-const TRACK_GAP_MS = 10 * 60 * 1000;
-
-// Draw one aircraft's track into the current trackLayer: dark casing, then altitude-colored
-// runs on top, split across long tracking gaps. Weights are chunky so the trail reads.
-function drawTrackInto(rawPts) {
-  const pts = rawPts.filter((point) => point.lat != null && point.lon != null);
-  const segments = [];
-  let segment = [];
-  let prevTime = null;
-  for (const point of pts) {
-    const time = Date.parse(point.positionAt);
-    if (segment.length && Number.isFinite(time) && Number.isFinite(prevTime) && time - prevTime > TRACK_GAP_MS) {
-      segments.push(segment);
-      segment = [];
-    }
-    segment.push(point);
-    prevTime = time;
-  }
-  if (segment.length) segments.push(segment);
-
-  for (const segPts of segments) {
-    if (segPts.length < 2) continue;
-    L.polyline(segPts.map((point) => [point.lat, point.lon]), {
-      color: "#071012", opacity: 0.55, weight: 5, interactive: false, lineCap: "round", lineJoin: "round",
-    }).addTo(trackLayer);
-
-    let run = [[segPts[0].lat, segPts[0].lon]];
-    let runColor = trackSegmentColor(segPts[0]);
-    const flush = () => {
-      if (run.length >= 2) {
-        L.polyline(run, {
-          color: runColor, opacity: 0.95, weight: 3, interactive: false, lineCap: "round", lineJoin: "round",
-        }).addTo(trackLayer);
-      }
-    };
-    for (let i = 1; i < segPts.length; i += 1) {
-      const color = trackSegmentColor(segPts[i]);
-      run.push([segPts[i].lat, segPts[i].lon]);
-      if (color !== runColor) {
-        flush();
-        run = [[segPts[i].lat, segPts[i].lon]];
-        runColor = color;
-      }
-    }
-    flush();
-  }
-}
-
-function drawTrack() {
-  if (!map) return;
-  if (trackLayer) trackLayer.remove();
-  trackLayer = L.layerGroup();
-  const seen = new Set();
-  if (selectedHex.value) { drawTrackInto(selectedTrack.value); seen.add(selectedHex.value); }
-  // Pinned aircraft keep their tracks shown too.
-  for (const [hex, points] of pinnedTracks.value) {
-    if (!seen.has(hex)) drawTrackInto(points);
-  }
-  drawPlaybackMarker();
-  trackLayer.addTo(map);
-}
-
-function drawPlaybackMarker() {
-  if (!trackLayer || !selectedTrack.value.length) return;
-  if (playbackMarker) playbackMarker.remove();
-  const latestIndex = selectedTrack.value.length - 1;
-  if (!playbackSpeed.value && playbackIndex.value >= latestIndex) return;
-  const point = selectedTrack.value[Math.min(playbackIndex.value, selectedTrack.value.length - 1)];
-  if (!point || point.lat == null || point.lon == null) return;
-  const item = {
-    ...(selectedAircraft.value || {}),
-    hex: selectedHex.value || point.hex,
-    lat: point.lat,
-    lon: point.lon,
-    altBaro: point.altBaro,
-    altGeom: point.altGeom,
-    gs: point.gs,
-    track: point.track,
-    onGround: point.onGround,
-  };
-  playbackMarker = L.marker([point.lat, point.lon], {
-    icon: markerIcon(item),
-    title: point.positionAt,
-    keyboard: false,
-    interactive: false,
-    zIndexOffset: 900,
-  }).bindTooltip(point.positionAt);
-  playbackMarker.addTo(trackLayer);
-}
-
 function startPlaybackTimer() {
   clearInterval(playbackTimer);
   playbackTimer = null;
@@ -1428,8 +823,7 @@ async function refreshLive() {
 async function refreshCoverage() {
   try {
     coverage.value = (await fetchJson("/api/coverage")) || { areas: [], points: [] };
-    if (view3dActive.value) tac3d?.drawCoverage();
-    else drawCoverage();
+    tac3d?.drawCoverage();
   } catch (err) {
     console.error(err);
   }
@@ -1499,8 +893,7 @@ async function refreshPinnedTracks() {
     try { next.set(hex, await fetchTrackPoints(hex)); } catch (err) { console.error(err); }
   }));
   pinnedTracks.value = next;
-  if (view3dActive.value) tac3d?.dataPass();
-  else drawTrack();
+  tac3d?.dataPass();
 }
 
 async function togglePin(hex) {
@@ -1509,22 +902,15 @@ async function togglePin(hex) {
   else next.add(hex);
   pinned.value = next;
   await refreshPinnedTracks();
-  // Refresh labels (pin state) and the permanent-tooltip / trail rendering.
-  if (view3dActive.value) tac3d?.dataPass();
-  else { upsertMarkers(); drawTrack(); }
+  tac3d?.dataPass();
 }
 
-async function selectAircraft(hex, pan = false) {
+async function selectAircraft(hex) {
   selectedHex.value = hex;
-  // In 3D a click only opens the selected target's data block and stops any previous tracking;
-  // Locate owns camera movement. The 2D map keeps its existing click-to-centre behaviour.
-  const item = selectedAircraft.value;
-  if (pan && item?.lat != null && item?.lon != null) {
-    if (view3dActive.value) tac3d?.panTo(item.lon, item.lat, item.altBaro ?? item.altGeom);
-    else map.setView([item.lat, item.lon], Math.max(map.getZoom(), 8), { animate: true });
-  }
-  if (view3dActive.value) tac3d?.dataPass();
-  else upsertMarkers();
+  // Selection only opens the data block and stops any prior tracking. Locate owns all
+  // intentional camera movement.
+  tac3d?.panTo();
+  tac3d?.dataPass();
   await refreshTrack();
   await nextTick();
 }
@@ -1534,23 +920,17 @@ function clearSelection() {
   selectedTrack.value = [];
   playbackSpeed.value = 0;
   playbackIndex.value = 0;
-  if (playbackMarker) {
-    playbackMarker.remove();
-    playbackMarker = null;
-  }
-  if (view3dActive.value) tac3d?.dataPass();
-  else { upsertMarkers(); drawTrack(); } // drawTrack rebuilds the layer, keeping pinned trails
+  tac3d?.dataPass();
 }
 
-// Clicking a marker toggles selection; clicking a different one switches to it.
+// Clicking a target toggles selection; clicking a different one switches to it.
 function toggleAircraft(hex) {
   if (selectedHex.value === hex) clearSelection();
-  else selectAircraft(hex, true);
+  else selectAircraft(hex);
 }
 
 function onGlobalKeydown(event) {
   if (event.key !== "Escape") return;
-  if (measureMode.value) { toggleMeasure(); return; }
   if (selectedHex.value) clearSelection();
 }
 
@@ -1565,37 +945,23 @@ function browserLocation() {
   });
 }
 
-// With a selected aircraft this is the 3D tracking toggle. Without one, locate the browser's
-// current position (after the normal browser permission prompt) in either map engine.
+// With a selected aircraft this is the tracking toggle. Without one, locate the browser's
+// current position after the normal browser permission prompt.
 async function recenterView() {
   const sel = selectedAircraft.value;
   const hasSel = sel && sel.lat != null && sel.lon != null;
-  if (view3dActive.value) {
-    if (hasSel) {
-      trackingActive.value = tac3d?.flyToView(sel.lon, sel.lat, 9, sel.altBaro ?? sel.altGeom, true) === true;
-      return;
-    }
-  } else if (hasSel) {
-    map.setView([sel.lat, sel.lon], Math.max(map.getZoom(), 9), { animate: true });
+  if (hasSel) {
+    trackingActive.value = tac3d?.toggleTracking(sel.lon, sel.lat, sel.altBaro ?? sel.altGeom) === true;
     return;
   }
   trackingActive.value = false;
   try {
     const here = await browserLocation();
     if (selectedHex.value) return; // selection changed while waiting for the permission/location fix
-    if (view3dActive.value) tac3d?.flyToView(here.lon, here.lat, 12);
-    else map.setView([here.lat, here.lon], Math.max(map.getZoom(), 13), { animate: true });
+    tac3d?.locateBrowser(here.lon, here.lat);
   } catch (error) {
     console.warn("Unable to locate browser position", error);
   }
-}
-
-function applyBaseLayer() {
-  if (!map) return;
-  const next = baseLayers[settings.value.baseLayer] || baseLayers.satellite;
-  if (tileLayer) tileLayer.remove();
-  tileLayer = L.tileLayer(next.url, next.options).addTo(map);
-  tileLayer.bringToBack();
 }
 
 // Playback ghost for the 3D view — same rules as drawPlaybackMarker(): only shown while
@@ -1619,15 +985,11 @@ function getPlaybackGhost() {
   };
 }
 
-// The selected track renders on whichever engine is visible.
 function renderTrackView() {
-  if (view3dActive.value) tac3d?.dataPass();
-  else drawTrack();
+  tac3d?.dataPass();
 }
 
-// The 3D module (and three.js with it) loads on first use only, keeping the 2D bundle
-// unchanged. All app state flows in through these getters/callbacks; the visual identity
-// (altitude colors, data-block text, filters) stays defined here and is reused verbatim.
+// All app state flows into the sole 3D map through these getters and callbacks.
 async function ensureTactical3d() {
   tac3dPromise ??= import("./tactical3d.js").then(({ createTactical3d }) => {
     tac3d = createTactical3d({
@@ -1663,35 +1025,6 @@ async function ensureTactical3d() {
   return tac3dPromise;
 }
 
-async function setView3d(on) {
-  settings.value.view3d = on;
-  if (on) {
-    if (measureMode.value) toggleMeasure(); // measure is 2D-only
-    view3dActive.value = true; // hide the 2D map immediately so there's no 2D→3D flash
-    await ensureTactical3d();
-    if (settings.value.view3d !== true) return; // toggled back off while loading
-    await nextTick();
-    tac3d.setActive(true);
-    tac3d.setCameraFromMap(map.getCenter(), map.getZoom());
-    tac3d.applySettings();
-  } else {
-    view3dActive.value = false;
-    if (tac3d) {
-      const cam = tac3d.getCameraForMap();
-      tac3d.setActive(false);
-      await nextTick();
-      map.invalidateSize();
-      map.setView(cam.center, cam.zoom, { animate: false });
-    }
-    // Leaflet layers were frozen while hidden — bring everything back in sync.
-    upsertMarkers();
-    drawConflicts();
-    drawTrack();
-    drawCoverage();
-    drawAirfields();
-  }
-}
-
 function resetFilters() {
   Object.assign(settings.value, {
     showGround: true,
@@ -1703,18 +1036,13 @@ function resetFilters() {
 }
 
 watch(aircraft, () => {
-  if (view3dActive.value) { tac3d?.dataPass(); return; }
-  upsertMarkers();
-  drawConflicts();
+  tac3d?.dataPass();
 });
 watch(searchQuery, () => {
-  if (view3dActive.value) { tac3d?.dataPass(); return; }
-  upsertMarkers();
+  tac3d?.dataPass();
 });
 watch(hoveredHex, (next, prev) => {
-  if (view3dActive.value) { tac3d?.setHoverClass(prev, next); return; }
-  if (prev && markers.has(prev)) applyMarkerHover(markers.get(prev), prev);
-  if (next && markers.has(next)) applyMarkerHover(markers.get(next), next);
+  tac3d?.setHoverClass(prev, next);
 });
 watch(selectedHistoryMetrics, () => queueHistoryChartRender(), { deep: true });
 watch(selectedTrack, () => queueHistoryChartRender());
@@ -1724,59 +1052,23 @@ watch(playbackIndex, () => {
 });
 
 onMounted(async () => {
-  // When 3D is the default view, hide the 2D map from the very first paint so the app never
-  // flashes 2D before switching to 3D.
-  if (settings.value.view3d) view3dActive.value = true;
-  // Centered on Yuseong IC, Daejeon (same reference point as the 3D scene origin / rings).
-  map = L.map(mapEl.value, { zoomControl: false, attributionControl: false, preferCanvas: true }).setView([36.36599, 127.33113], 7);
-  // Airfield reference markers sit above coverage but below live aircraft.
-  map.createPane("airfields").style.zIndex = 450;
-  L.control.zoom({ position: "bottomright" }).addTo(map);
-  // Re-cull markers to the viewport after a pan or zoom (moveend also fires on zoom).
-  map.on("moveend", () => { upsertMarkers(); drawAirfields(); });
-  // Clicking empty map (coverage is non-interactive, markers stop propagation) deselects,
-  // unless the measure tool is active — then clicks drop range/bearing endpoints.
-  map.on("click", (event) => {
-    if (measureMode.value) { onMeasureClick(event.latlng); return; }
-    if (selectedHex.value) clearSelection();
-  });
-  map.on("mousemove", (event) => {
-    if (measureMode.value && measurePoints.value.length === 1) {
-      measureCursor.value = { lat: event.latlng.lat, lng: event.latlng.lng };
-      drawMeasure();
-    }
-  });
   window.addEventListener("keydown", onGlobalKeydown);
-  applyBaseLayer();
-  drawAirfields();
+  await ensureTactical3d();
+  tac3d.applySettings();
   await refreshLive();
   await refreshCoverage();
-  drawConflicts();
   // Fallback polls in case the SSE stream drops; otherwise live updates are driven by
   // ingest events, and coverage only when a batch actually recorded new track points.
   refreshTimer = setInterval(() => liveRefresher.schedule(0), 10000);
   coverageTimer = setInterval(() => coverageRefresher.schedule(0), 60000);
   clockTimer = setInterval(() => {
     now.value = Date.now();
-    if (view3dActive.value) {
-      // Coast/drop transitions and each data block's age (#s) are time-driven; a dataPass
-      // is cheap (~100 targets) so run it every tick to keep the 3D labels fresh.
-      tac3d?.dataPass();
-      return;
-    }
-    if (hoveredHex.value) patchTooltipAge(markers.get(hoveredHex.value), hoveredHex.value);
-    for (const hex of pinned.value) patchTooltipAge(markers.get(hex), hex); // permanent labels
+    // Coast/drop transitions and each data block's age (#s) are time-driven; a dataPass
+    // is cheap (~100 targets) so run it every tick to keep the labels fresh.
+    tac3d?.dataPass();
   }, 1000);
-  window.addEventListener("click", onPinClick);
   connectEvents();
-  if (settings.value.view3d) setView3d(true);
 });
-
-// Delegated pin-toggle for the 2D Leaflet tooltip pins (the 3D overlay handles its own).
-function onPinClick(event) {
-  const pin = event.target.closest?.(".tt-pin");
-  if (pin?.dataset.hex && !view3dActive.value) togglePin(pin.dataset.hex);
-}
 
 function connectEvents() {
   eventSource?.close();
@@ -1813,20 +1105,17 @@ onUnmounted(() => {
   coverageRefresher.cancel();
   destroyHistoryChart();
   window.removeEventListener("keydown", onGlobalKeydown);
-  window.removeEventListener("click", onPinClick);
   clearTimeout(sseRetryTimer);
   eventSource?.close();
   tac3d?.destroy();
   tac3d = null;
-  map?.remove();
 });
 </script>
 
 <template>
   <main class="shell" :style="shellStyle">
     <section class="map-stage">
-      <div v-show="!view3dActive" ref="mapEl" class="map"></div>
-      <div v-show="view3dActive" ref="map3dEl" class="map map-3d"></div>
+      <div ref="map3dEl" class="map map-3d"></div>
       <div class="topbar">
         <div>
           <div class="brand">Skytrace</div>
@@ -1836,14 +1125,8 @@ onUnmounted(() => {
           </div>
         </div>
         <div class="toolbar">
-          <button class="icon-button" :class="{ active: view3dActive }" title="3D tactical view" @click="setView3d(!settings.view3d)"><Rotate3d :size="18" /></button>
-          <button v-if="!view3dActive" class="icon-button" :class="{ active: measureMode }" title="Measure range/bearing (Esc to exit)" @click="toggleMeasure"><Ruler :size="18" /></button>
-          <button class="icon-button" :class="{ active: view3dActive && trackingActive }" :title="selectedAircraft ? view3dActive ? (trackingActive ? 'Stop tracking' : 'Track selected aircraft') : 'Center on selected aircraft' : 'Go to my location'" @click="recenterView"><LocateFixed :size="18" /></button>
+          <button class="icon-button" :class="{ active: trackingActive }" :title="selectedAircraft ? (trackingActive ? 'Stop tracking' : 'Track selected aircraft') : 'Go to my location'" @click="recenterView"><LocateFixed :size="18" /></button>
         </div>
-      </div>
-      <div v-if="measureMode" class="measure-hint">
-        <Ruler :size="15" />
-        <span>Click two points for range &amp; bearing · Esc to exit</span>
       </div>
       <div class="map-legend" aria-hidden="true">
         <div class="legend-title">Altitude ({{ altitudeLegend.unit }})</div>
@@ -2011,7 +1294,7 @@ onUnmounted(() => {
             v-for="item in filteredAircraft"
             :key="item.hex"
             :class="['aircraft-row', { active: selectedHex === item.hex, hovered: hoveredHex === item.hex, 'is-alert': !!aircraftAlert(item), coasting: isCoasting(item) }]"
-            @click="selectAircraft(item.hex, true)"
+            @click="selectAircraft(item.hex)"
             @mouseenter="setHover(item.hex)"
             @mouseleave="clearHover(item.hex)"
           >
@@ -2025,7 +1308,7 @@ onUnmounted(() => {
       <section :class="['settings-dock', { open: controlsOpen }]">
         <button type="button" class="settings-toggle" @click="controlsOpen = !controlsOpen">
           <span class="settings-toggle-title"><SlidersHorizontal :size="17" /> Filters & display</span>
-          <small>{{ settings.source === "all" ? "all sources" : settings.source }} · {{ settings.units }} · {{ baseLayers[settings.baseLayer]?.label }}</small>
+          <small>{{ settings.source === "all" ? "all sources" : settings.source }} · {{ settings.units }} · 3D terrain</small>
           <ChevronDown :class="['chevron', { open: controlsOpen }]" :size="18" />
         </button>
         <div v-show="controlsOpen" class="settings-body">
@@ -2062,7 +1345,6 @@ onUnmounted(() => {
               <label><input v-model="settings.showGround" type="checkbox" /> Ground</label>
               <label><input v-model="settings.showNonIcao" type="checkbox" /> Non-ICAO</label>
               <label><input v-model="settings.coverage" type="checkbox" /> Coverage</label>
-              <label><input v-model="settings.coverageBands" type="checkbox" :disabled="!settings.coverage" /> By altitude</label>
               <label><input v-model="settings.airfields" type="checkbox" /> Airfields</label>
               <label><input v-model="settings.airfieldsMinor" type="checkbox" :disabled="!settings.airfields" /> Minor fields</label>
               <label><input v-model="settings.proximity" type="checkbox" /> Proximity alerts</label>
@@ -2074,14 +1356,11 @@ onUnmounted(() => {
             <header><Settings :size="17" /><span>Display</span></header>
             <div class="control-grid">
               <label><span>Units</span><select v-model="settings.units"><option value="aero">Aeronautical</option><option value="metric">Metric</option><option value="imperial">Imperial</option></select></label>
-              <label><span>Map</span><select v-model="settings.baseLayer"><option v-for="layer in Object.keys(baseLayers)" :key="layer" :value="layer">{{ baseLayers[layer].label }}</option></select></label>
-              <label><span>Icon scale</span><input v-model.number="settings.iconScale" type="range" min="0.75" max="1.6" step="0.05" /></label>
-              <label v-if="view3dActive"><span>Terrain ×{{ Number(settings.terrainExaggeration).toFixed(1) }}</span><input v-model.number="settings.terrainExaggeration" type="range" min="1" max="4" step="0.1" /></label>
+              <label><span>Terrain ×{{ Number(settings.terrainExaggeration).toFixed(1) }}</span><input v-model.number="settings.terrainExaggeration" type="range" min="1" max="4" step="0.1" /></label>
             </div>
             <div class="toggle-row">
-              <label><input v-model="settings.labels" type="checkbox" /> All labels</label>
               <label><input v-model="settings.flightLevels" type="checkbox" /> Flight levels</label>
-              <label v-if="view3dActive"><input v-model="settings.terrainSatellite" type="checkbox" /> Satellite terrain</label>
+              <label><input v-model="settings.terrainSatellite" type="checkbox" /> Satellite terrain</label>
             </div>
           </section>
         </div>

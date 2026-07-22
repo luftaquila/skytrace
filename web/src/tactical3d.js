@@ -4,8 +4,7 @@
 // (satellite is a toggle), a solid altitude-gradient coverage dome, glTF aircraft with
 // altitude sticks / trails, and HTML data-block popovers with pins.
 //
-// Loaded only via dynamic import from App.vue. All app state/formatting comes through
-// `deps`; the exported factory keeps the API the 2D integration already calls.
+// Loaded via dynamic import from App.vue. All app state and formatting comes through `deps`.
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import mlcontour from "maplibre-contour";
@@ -20,6 +19,7 @@ import { installGlobeCenterElevation } from "./globe-center-elevation.js";
 
 const FT_TO_M = 0.3048;
 const HOME = { lon: 127.33113, lat: 36.36599 }; // Yuseong IC
+const BROWSER_LOCATE_VIEW = { zoom: 8, pitch: 10, bearing: 0 };
 // Satellite via a custom protocol so we can reject Esri's "Map data not yet available" placeholder
 // tile (byte-identical, exactly 2521 bytes) past its coverage — rejecting it makes MapLibre keep the
 // parent tile scaled up (per-location overzoom), instead of a hard global maxzoom cap.
@@ -191,7 +191,6 @@ function makeAirfieldIcon(color) {
 export function createTactical3d({ container, deps }) {
   let exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
   let disposed = false;
-  let running = false;
   let ready = false;
   const contour = ensureContourSource();
   ensureEsriProtocol();
@@ -221,7 +220,7 @@ export function createTactical3d({ container, deps }) {
     // elevation alone. This also avoids recalculateZoomAndCenter fly-aways at very high pitch.
     centerClampedToGround: false,
     pitch: 55,
-    zoom: 6,
+    zoom: 8,
     center: [HOME.lon, HOME.lat],
     style: {
       version: 8,
@@ -556,6 +555,7 @@ export function createTactical3d({ container, deps }) {
   hintEl.className = "t3d-hint";
   hintEl.textContent = "Drag rotate & tilt · Right-drag pan · Scroll zoom";
   container.append(overlayEl, afPinEl, afHoverEl, lockEl, loadingEl, hintEl);
+  setTimeout(() => { hintEl.style.display = "none"; }, 8000);
 
   let hoverHex = null;
   let hoverAf = null;
@@ -597,7 +597,7 @@ export function createTactical3d({ container, deps }) {
       }
       const bank = airborne && Number.isFinite(item.roll) ? Math.max(-45, Math.min(45, item.roll)) : 0;
       const track = Number.isFinite(item.track) ? item.track : 0;
-      const cls = deps.planeSizeScale(item.category); // 0.85 light · 1 · 1.18 heavy (matches 2D)
+      const cls = deps.planeSizeScale(item.category); // 0.85 light · 1 · 1.18 heavy
       // deck maps the nose (+X) to world-Z = -sin(pitch) and the right wing (+Y) to
       // world-Z = cos(pitch)*sin(roll). ADS-B roll>0 = right wing DOWN and climb phi>0 = nose UP,
       // both the opposite sign of what deck needs — so negate both pitch and roll.
@@ -651,8 +651,7 @@ export function createTactical3d({ container, deps }) {
     const hasIdent = list.some((d) => d.spi);
     if (hasIdent && !identBlinkTimer) identBlinkTimer = setInterval(() => { identBlinkOn = !identBlinkOn; buildLayers(); }, 480);
     else if (!hasIdent && identBlinkTimer) { clearInterval(identBlinkTimer); identBlinkTimer = 0; identBlinkOn = false; }
-    // Proximity/collision alert (same STCA data as the 2D map): a red link between each close pair —
-    // in 3D drawn tip-to-tip at altitude — and the involved aircraft reddened.
+    // Proximity/collision alert: draw a red tip-to-tip link at altitude and redden both aircraft.
     const conflicts = deps.getConflicts?.() || [];
     const conflictHexes = new Set();
     for (const p of conflicts) { conflictHexes.add(p.a.hex); conflictHexes.add(p.b.hex); }
@@ -833,7 +832,7 @@ export function createTactical3d({ container, deps }) {
   }
 
   function requestMotionFrame() {
-    if (motionRaf || disposed || !running || !ready || !motionHexes.size) return;
+    if (motionRaf || disposed || !ready || !motionHexes.size) return;
     motionRaf = requestAnimationFrame((now) => {
       motionRaf = 0;
       if (applyMotionFrame(now)) requestMotionFrame();
@@ -1119,22 +1118,7 @@ export function createTactical3d({ container, deps }) {
     }
   }
   function setHoverClass(prev, next) { hoverHex = next; scheduleActive(next); }
-  function setActive(active) {
-    running = active;
-    if (active) { map.resize(); requestMotionFrame(); hintEl.style.display = ""; setTimeout(() => { hintEl.style.display = "none"; }, 8000); }
-    else { followingSelectionHex = null; clearOrbit(); cancelCameraAnimation(); cancelMotionFrame(); hoverHex = null; hoverAf = null; afPinned = null; afPinEl.style.display = "none"; afHoverEl.style.display = "none"; }
-  }
   function resize() { map.resize(); }
-  // 3D sits one zoom level CLOSER than the 2D map (pitch pulls the view back), so the default
-  // isn't too far out. getCameraForMap inverts this so a 2D<->3D round-trip is stable.
-  function setCameraFromMap(center, zoom) {
-    cancelCameraAnimation();
-    freeGrounding = null;
-    orbitAttached = false;
-    orbitZ = 0;
-    applyCameraFrame({ center: [center.lng ?? center.lon, center.lat], zoom: zoom + 1, pitch: 55, elevation: 0 });
-  }
-  function getCameraForMap() { const c = map.getCenter(); return { center: [c.lat, c.lng], zoom: Math.min(18, Math.max(3, Math.round(map.getZoom() - 1))) }; }
   // Aircraft clicks only select/show their data block. If another target was being tracked, release
   // it without changing a single camera component; Locate is the sole owner of tracking start.
   function panTo() {
@@ -1154,18 +1138,22 @@ export function createTactical3d({ container, deps }) {
     updateFollowingCamera(d);
     requestMotionFrame();
   }
-  // Locate is a tracking toggle. Starting preserves the current bearing and pitch, changing only
-  // centre/zoom/elevated pivot; stopping preserves the resulting camera exactly where it is.
-  function flyToView(lon, lat, zoom, altFt, trackAircraft = false) {
-    if (!trackAircraft) {
-      followingSelectionHex = null;
-      clearOrbit();
-      freeGrounding = null;
-      orbitAttached = false;
-      orbitZ = 0;
-      animateCamera({ center: [lon, lat], zoom: Math.max(map.getZoom(), zoom + 1), elevation: 0 }, { duration: 900, easing: EASE_IN_OUT, kind: "locate-browser" });
-      return false;
-    }
+  // Browser location is a broad, near-vertical north-up ground view. It may zoom out, so locating
+  // from a close aircraft view restores geographic context instead of retaining that close zoom.
+  function locateBrowser(lon, lat) {
+    followingSelectionHex = null;
+    clearOrbit();
+    freeGrounding = null;
+    orbitAttached = false;
+    orbitZ = 0;
+    animateCamera(
+      { center: [lon, lat], ...BROWSER_LOCATE_VIEW, elevation: 0 },
+      { duration: 900, easing: EASE_IN_OUT, kind: "locate-browser" },
+    );
+  }
+  // Locate is a tracking toggle for a selected aircraft. Starting preserves the current bearing
+  // and pitch, changing only centre/zoom/elevated pivot; stopping preserves the camera exactly.
+  function toggleTracking(lon, lat, altFt) {
     const selectedHex = deps.getSelectedHex();
     if (!selectedHex) return false;
     if (followActive && selectedHex && followingSelectionHex === selectedHex) {
@@ -1227,7 +1215,5 @@ export function createTactical3d({ container, deps }) {
     refreshSources();
     dataPass();
   });
-  setCameraFromMap({ lat: HOME.lat, lng: HOME.lon }, 7);
-
-  return { setActive, resize, dataPass, drawCoverage, applySettings, setHoverClass, panTo, flyToView, fitAircraft, setCameraFromMap, getCameraForMap, destroy };
+  return { resize, dataPass, drawCoverage, applySettings, setHoverClass, panTo, locateBrowser, toggleTracking, fitAircraft, destroy };
 }

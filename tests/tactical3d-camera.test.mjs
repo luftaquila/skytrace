@@ -33,7 +33,7 @@ test("dead reckoning is limited to selected and pinned aircraft", () => {
 });
 
 test("tracking camera follows the continuously projected target without another follow tween", () => {
-  const followSelected = functionSource("followSelected", "flyToView");
+  const followSelected = functionSource("followSelected", "locateBrowser");
   assert.match(followSelected, /updateFollowingCamera\(d\)/);
   assert.doesNotMatch(followSelected, /animateCamera/);
 
@@ -54,12 +54,20 @@ test("aircraft selection never starts or moves the tracking camera", () => {
 });
 
 test("Locate toggles tracking without changing bearing or pitch", () => {
-  const flyToView = functionSource("flyToView", "fitAircraft");
-  const aircraftBranch = flyToView.slice(flyToView.indexOf("const selectedHex"));
+  const aircraftBranch = functionSource("toggleTracking", "fitAircraft");
   assert.match(aircraftBranch, /followActive && selectedHex && followingSelectionHex === selectedHex/);
   assert.match(aircraftBranch, /kind: "track-start"/);
   assert.match(aircraftBranch, /return true/);
   assert.match(aircraftBranch, /return false/);
   assert.match(aircraftBranch, /\(altFt \?\? 0\)/);
   assert.doesNotMatch(aircraftBranch, /pitch\s*:|bearing\s*:/);
+});
+
+test("browser location restores a broad north-up near-vertical ground view", () => {
+  const locateBrowser = functionSource("locateBrowser", "toggleTracking");
+  assert.match(source, /BROWSER_LOCATE_VIEW = \{ zoom: 8, pitch: 10, bearing: 0 \}/);
+  assert.match(locateBrowser, /\.\.\.BROWSER_LOCATE_VIEW/);
+  assert.match(locateBrowser, /elevation: 0/);
+  assert.match(locateBrowser, /kind: "locate-browser"/);
+  assert.doesNotMatch(locateBrowser, /Math\.max\(map\.getZoom/);
 });

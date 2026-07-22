@@ -535,149 +535,6 @@ select {
   border-top: 1px solid var(--border-soft);
 }
 
-.aircraft-icon {
-  background: transparent;
-  outline: none;
-}
-
-.leaflet-container .aircraft-icon:focus,
-.leaflet-container .aircraft-icon:focus-visible {
-  outline: none;
-  box-shadow: none;
-}
-
-/* The Leaflet marker box is 112x46 to leave room for the callsign label, but that box
-   extends well to the right of the actual glyph. If it stays interactive, hovering the
-   empty label area (or right of the aircraft) spuriously triggers the tooltip. Kill hit
-   testing on the box and re-enable it only on the glyph, so hover tracks the symbol.
-   The .leaflet-marker-icon qualifier outranks Leaflet's .leaflet-interactive rule. */
-.leaflet-marker-icon.aircraft-icon {
-  pointer-events: none;
-}
-
-.aircraft-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  transform: scale(var(--aircraft-scale));
-  transform-origin: 18px 18px;
-  pointer-events: none;
-}
-
-.aircraft-symbol {
-  position: relative;
-  display: inline-grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  pointer-events: auto;
-}
-
-.aircraft-svg {
-  position: relative;
-  z-index: 1;
-  width: 32px;
-  height: 32px;
-  overflow: visible;
-  filter:
-    drop-shadow(0 1px 1px rgb(0 0 0 / 0.9))
-    drop-shadow(0 0 3px rgb(0 0 0 / 0.72));
-  transform-origin: 50% 50%;
-}
-
-.aircraft-body {
-  fill: var(--aircraft-color, var(--accent-2));
-  stroke: #071012;
-  stroke-width: 1.4;
-  stroke-linejoin: round;
-}
-
-.aircraft-highlight,
-.aircraft-detail {
-  fill: none;
-  stroke: rgb(255 255 255 / 0.58);
-  stroke-linecap: round;
-  stroke-width: 1.2;
-}
-
-.aircraft-wheel {
-  fill: #071012;
-  stroke: var(--aircraft-color, var(--accent-2));
-  stroke-width: 1;
-}
-
-.aircraft-label {
-  display: inline-block;
-  max-width: 76px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 3px 5px;
-  border-radius: 4px;
-  border: 1px solid rgb(238 245 244 / 0.12);
-  background: rgb(13 16 17 / 0.78);
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 700;
-  text-shadow: 0 1px 2px #000;
-}
-
-.aircraft-wrap.is-emergency .aircraft-body {
-  stroke: var(--danger);
-  stroke-width: 2.2;
-}
-
-.aircraft-icon.selected .aircraft-body {
-  stroke: var(--accent);
-  stroke-width: 2.2;
-}
-
-/* IDENT (SPI): flash the glyph's outline amber, the way a target flares on an ATC scope
-   when the pilot squawks ident. Just a blinking border — no ring, no glow. */
-.aircraft-wrap.is-ident .aircraft-body {
-  stroke: var(--warning);
-  stroke-width: 2.4;
-  animation: ident-blink 1s step-end infinite;
-}
-
-@keyframes ident-blink {
-  0% { stroke: var(--warning); }
-  50% { stroke: #071012; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .aircraft-wrap.is-ident .aircraft-body {
-    animation: none;
-  }
-}
-
-/* Proximity (STCA): the conflicting targets flash a red outline; the linking line and its
-   separation label are drawn separately as map layers. */
-.aircraft-wrap.is-conflict .aircraft-body {
-  stroke: var(--danger);
-  stroke-width: 2.6;
-  animation: conflict-blink 0.7s step-end infinite;
-}
-
-@keyframes conflict-blink {
-  0% { stroke: var(--danger); }
-  50% { stroke: #ffffff; }
-}
-
-/* Coasting (stale) targets desaturate to grey and fade, so a lost track reads at a glance
-   without vanishing outright. */
-/* Coasting (stale) targets keep their altitude colour but fade, so a lost track reads as
-   "not currently updating" without losing its altitude cue. */
-.aircraft-wrap.is-coasting {
-  opacity: 0.55;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .aircraft-wrap.is-conflict .aircraft-body {
-    animation: none;
-  }
-}
-
 .conflict-label {
   font: 700 10.5px/1.1 system-ui, -apple-system, sans-serif;
   color: #fecdd3;
@@ -685,124 +542,6 @@ select {
   text-shadow: 0 1px 2px #000, 0 0 3px #000;
   transform: translate(8px, -50%);
   pointer-events: none;
-}
-
-.measure-label {
-  font: 700 11px/1.1 system-ui, -apple-system, sans-serif;
-  color: var(--accent);
-  white-space: nowrap;
-  text-shadow: 0 1px 2px #000, 0 0 3px #000;
-  transform: translate(10px, -50%);
-  pointer-events: none;
-}
-
-.measure-hint {
-  position: absolute;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 500;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 12px;
-  border: 1px solid rgb(72 224 209 / 0.4);
-  border-radius: 999px;
-  background: rgb(13 16 17 / 0.9);
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
-  backdrop-filter: blur(8px);
-  pointer-events: none;
-}
-
-.leaflet-container.measuring {
-  cursor: crosshair;
-}
-
-.airfield-icon {
-  background: transparent;
-  outline: none;
-  --af-color: #c3ccd6;
-}
-
-.airfield-icon.kind-large { --af-color: #ffd23f; }
-.airfield-icon.kind-medium { --af-color: #ff9f45; }
-.airfield-icon.kind-small { --af-color: #c3ccd6; }
-.airfield-icon.minor { --af-color: #8b98a5; }
-
-.airfield-wrap {
-  position: relative;
-  line-height: 0;
-  pointer-events: auto;
-}
-
-/* The dot is centred on the geo point (marker anchor is the wrap's origin). */
-.airfield-dot {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 9px;
-  height: 9px;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  background: var(--af-color);
-  border: 1.5px solid #071012;
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.35), 0 1px 3px rgb(0 0 0 / 0.8);
-  transition: transform 0.08s ease-out;
-}
-
-.airfield-icon.kind-large .airfield-dot { width: 11px; height: 11px; }
-.airfield-icon.kind-small .airfield-dot { width: 7px; height: 7px; }
-.airfield-icon.minor .airfield-dot {
-  width: 5px;
-  height: 5px;
-  border-width: 1px;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.7);
-  opacity: 0.85;
-}
-
-.airfield-code {
-  position: absolute;
-  left: 8px;
-  top: 0;
-  transform: translateY(-50%);
-  white-space: nowrap;
-  padding: 1px 4px;
-  border-radius: 4px;
-  border: 1px solid rgb(238 245 244 / 0.12);
-  background: rgb(13 16 17 / 0.72);
-  color: var(--text);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  text-shadow: 0 1px 2px #000;
-}
-
-.airfield-icon.kind-large .airfield-code { font-size: 11px; }
-
-.airfield-wrap:hover .airfield-dot {
-  transform: translate(-50%, -50%) scale(1.3);
-}
-
-.leaflet-tooltip.airfield-tt {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 9px;
-  border: 1px solid rgb(238 245 244 / 0.16);
-  border-radius: 7px;
-  background: rgb(13 16 17 / 0.92);
-  color: var(--text);
-  font-size: 12px;
-  line-height: 1.25;
-  white-space: nowrap;
-  box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
-  backdrop-filter: blur(8px);
-}
-
-.leaflet-tooltip.airfield-tt::before {
-  display: none;
 }
 
 .airfield-tt .af-tt-name {
@@ -1059,15 +798,6 @@ select {
   overflow: auto;
 }
 
-.leaflet-control-attribution {
-  background: rgb(0 0 0 / 0.58);
-  color: #d8f7f1;
-}
-
-.leaflet-control-attribution a {
-  color: var(--accent-2);
-}
-
 .source-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1153,49 +883,8 @@ select {
   border: 1px solid rgb(0 0 0 / 0.4);
 }
 
-/* 2D hover popover shares the 3D data-block look: monospace, teal accent bar, dark glass. */
-.leaflet-tooltip.aircraft-tt {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 4px 9px;
-  border: 0;
-  border-left: 2px solid rgb(72 224 209 / 0.6);
-  border-radius: 4px;
-  background: rgb(5 10 12 / 0.86);
-  color: #9fe8df;
-  font: 600 11px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  white-space: nowrap;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.5);
-  backdrop-filter: blur(6px);
-}
-
-.leaflet-tooltip.aircraft-tt::before {
-  display: none;
-}
-
-.aircraft-tt .tt-l1 {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  color: #eafffb;
-}
-
-.aircraft-tt .tt-l2 {
-  color: #9fe8df;
-  font-variant-numeric: tabular-nums;
-}
-
-.aircraft-tt .tt-age {
-  color: var(--muted);
-  font-weight: 600;
-}
-
 /* Keep the compact update age right-aligned immediately before the pin instead of spending
-   horizontal space on the data row below. Shared by the 2D tooltip and 3D data block. */
+   horizontal space on the data row below. */
 .tt-top-actions {
   display: inline-flex;
   align-items: center;
@@ -1232,11 +921,6 @@ select {
 .tt-pin:hover { opacity: 1; color: var(--accent); }
 .tt-pin.on { color: var(--accent); opacity: 1; }
 .tt-pin.on svg { fill: var(--accent); }
-
-.aircraft-icon.hovered .aircraft-body {
-  stroke: #ffffff;
-  stroke-width: 2.2;
-}
 
 .detail-alert {
   display: flex;
@@ -1412,11 +1096,6 @@ select {
     max-height: none;
   }
 
-  /* Aircraft symbols are oversized relative to a phone viewport — shrink to declutter. */
-  .aircraft-wrap {
-    transform: scale(calc(var(--aircraft-scale) * 0.68));
-  }
-
   /* Reclaim vertical space for the list on phones. */
   .source-chips {
     display: none;
@@ -1563,8 +1242,7 @@ select {
 }
 .t3d-ghost .t3d-block { pointer-events: none; }
 
-/* Airfield hover popover: absolutely positioned in the overlay (not a Leaflet tooltip),
-   reusing the shared .airfield-tt look. */
+/* Airfield hover popover, absolutely positioned in the 3D overlay. */
 .t3d-tt {
   position: absolute;
   left: 0;
@@ -1603,7 +1281,7 @@ select {
   --af-color: #c3ccd6;
 }
 
-/* Grade colours mirror the 2D airfield markers. */
+/* Grade colours distinguish airport classes. */
 .t3d-airfield.kind-large { --af-color: #ffd23f; }
 .t3d-airfield.kind-medium { --af-color: #ff9f45; }
 .t3d-airfield.kind-small { --af-color: #c3ccd6; }
