@@ -9,7 +9,7 @@
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import mlcontour from "maplibre-contour";
-import { WebMercatorViewport } from "@deck.gl/core";
+import { WebMercatorViewport, _GlobeViewport as GlobeViewport } from "@deck.gl/core";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { ScenegraphLayer, SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
@@ -212,9 +212,7 @@ export function createTactical3d({ container, deps }) {
     container,
     attributionControl: false,
     bearingSnap: 0, // never auto-snap the bearing to north (camera moves were rotating it unbidden)
-    maxPitch: 90, // the practical max in mercator — MapLibre hard-clamps pitch to ~90° (the far plane
-    // can't exceed the horizon), so a true bottom view (looking UP, pitch>90) is not possible without
-    // the globe projection. 90 = the lowest, most horizon-level look mercator allows.
+    maxPitch: 150, // globe projection allows pitch > 90° — tilt past vertical for a bottom (look-up) view.
     // Do NOT clamp the map centre's elevation to the terrain. With the default (true) the centre's
     // elevation auto-tracks the terrain under it, so panning/rotating over relief triggers MapLibre's
     // `recalculateZoomAndCenter`, which yanks the centre+zoom to a weird place (the fly-away; MapLibre
@@ -226,6 +224,8 @@ export function createTactical3d({ container, deps }) {
     center: [HOME.lon, HOME.lat],
     style: {
       version: 8,
+      // Globe projection so the camera can tilt past vertical (pitch > 90°) for a bottom view.
+      projection: { type: "globe" },
       glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
       sources: {
         // High maxzoom so deep imagery is used wherever it exists; the esrisat protocol rejects the
@@ -512,13 +512,36 @@ export function createTactical3d({ container, deps }) {
   // from HOME so a SimpleMeshLayer (which reliably renders arbitrary 3D geo meshes) can draw it;
   // the fragment shader maps interpolated altitude to OKLCH colour, while getColor supplies alpha.
   const M_PER_DEG_LON = M_PER_DEG_LAT * Math.cos((HOME.lat * Math.PI) / 180);
+  let coverageMeshSource = null;
+  let cachedCoverageMesh = null;
+
+  function decodeFloat32Base64(encoded) {
+    const binary = atob(encoded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return new Float32Array(bytes.buffer);
+  }
+
   function coverageMesh() {
     if (!deps.getSettings().coverage) return null;
+    const coverage = deps.getCoverage();
+    if (coverage === coverageMeshSource) return cachedCoverageMesh;
+    coverageMeshSource = coverage;
     const positions = [];
     // Metre offset of a ring vertex from HOME (the SimpleMeshLayer anchor).
     const off = (pt, z) => [(pt[0] - HOME.lon) * M_PER_DEG_LON, (pt[1] - HOME.lat) * M_PER_DEG_LAT, z];
     const pushV = (p) => { positions.push(p[0], p[1], p[2]); };
-    for (const area of deps.getCoverage()?.areas || []) {
+    for (const area of coverage?.areas || []) {
+      const observed = area.volumeMesh;
+      if (observed?.encoding === "float32-le-base64" && observed.positions && observed.origin?.length === 2) {
+        const decoded = decodeFloat32Base64(observed.positions);
+        const eastOffset = (observed.origin[0] - HOME.lon) * M_PER_DEG_LON;
+        const northOffset = (observed.origin[1] - HOME.lat) * M_PER_DEG_LAT;
+        for (let i = 0; i < decoded.length; i += 3) {
+          positions.push(decoded[i] + eastOffset, decoded[i + 1] + northOffset, decoded[i + 2]);
+        }
+        continue;
+      }
       const vol = area.volume;
       if (!vol?.layers?.length) continue;
       const levels = [{ feet: 0, ring: vol.layers[0].ring }];
@@ -543,12 +566,16 @@ export function createTactical3d({ container, deps }) {
         }
       }
     }
-    if (!positions.length) return null;
-    return {
+    if (!positions.length) {
+      cachedCoverageMesh = null;
+      return null;
+    }
+    cachedCoverageMesh = {
       attributes: {
         positions: { value: new Float32Array(positions), size: 3 },
       },
     };
+    return cachedCoverageMesh;
   }
 
   // --- HTML data blocks (pinned / selected / hovered), positioned via the deck viewport ---
@@ -730,29 +757,39 @@ export function createTactical3d({ container, deps }) {
     // for framing so the result stays finite — the camera can still tilt past 90° for a bottom view,
     // the aircraft-centring just eases off up there instead of crashing.
     const pEff = Math.min(pitchDeg, 85);
-    const p = (pEff * Math.PI) / 180, b = (bearing * Math.PI) / 180, cosLat = Math.cos((lat * Math.PI) / 180) || 1;
-    // Analytical seed: shift z*tan(pitch) metres in the look direction. Puts the target roughly
-    // on-screen even at high zoom (where the nadir-centred aircraft projects off the top), so the
-    // unproject refinement below starts from a valid on-screen point instead of the sky.
-    const d0 = z * Math.tan(p);
-    let center = [lon + (d0 * Math.sin(b)) / (M_PER_DEG_LAT * cosLat), lat + (d0 * Math.cos(b)) / M_PER_DEG_LAT];
+    const b = (bearing * Math.PI) / 180, cosLat = Math.cos((lat * Math.PI) / 180) || 1;
     const w = map.getCanvas().clientWidth || 1, h = map.getCanvas().clientHeight || 1, cx = w / 2, cy = h / 2;
-    // Refine by moving the centre onto the ground point under the aircraft's screen position. Track
-    // the BEST centre (smallest aircraft-off-centre) and return it, so an ill-conditioned near-horizon
-    // case (very high zoom) can't diverge — it just returns the closest achievable framing.
+    // Match the map's projection so the solve is correct in globe as well as mercator.
+    const VP = map.getProjection?.().type === "globe" ? GlobeViewport : WebMercatorViewport;
+    const project = (c) => {
+      try { return new VP({ width: w, height: h, longitude: c[0], latitude: c[1], zoom, pitch: pEff, bearing }).project([lon, lat, z]); }
+      catch { return null; }
+    };
+    // Analytical seed: shift z*tan(pitch) metres in the look direction so the target starts on-screen.
+    const d0 = z * Math.tan((pEff * Math.PI) / 180);
+    let center = [lon + (d0 * Math.sin(b)) / (M_PER_DEG_LAT * cosLat), lat + (d0 * Math.cos(b)) / M_PER_DEG_LAT];
+    // Newton refinement on the on-screen error: find the centre that projects the target (at its
+    // altitude) to screen centre, via a numerical 2x2 Jacobian d(screen)/d(centre). Projection-
+    // agnostic, so it converges in globe too — the old fixed-point assumed mercator and drifted there.
     let best = center, bestOff = Infinity;
-    for (let i = 0; i < 5; i += 1) {
-      let air, g;
-      try {
-        const vp = new WebMercatorViewport({ width: w, height: h, longitude: center[0], latitude: center[1], zoom, pitch: pEff, bearing });
-        air = vp.project([lon, lat, z]);
-        g = air && Number.isFinite(air[0]) && Number.isFinite(air[1]) ? vp.unproject([air[0], air[1]]) : null;
-      } catch { break; }
+    for (let i = 0; i < 8; i += 1) {
+      const air = project(center);
       if (!air || !Number.isFinite(air[0]) || !Number.isFinite(air[1])) break;
-      const off = Math.hypot(air[0] - cx, air[1] - cy);
+      const ex = air[0] - cx, ey = air[1] - cy, off = Math.hypot(ex, ey);
       if (off < bestOff) { bestOff = off; best = center; }
-      if (off < 4 || !g || !Number.isFinite(g[0]) || !Number.isFinite(g[1]) || Math.abs(g[0] - lon) > 6 || Math.abs(g[1] - lat) > 6) break;
-      center = [g[0], g[1]];
+      if (off < 3) break;
+      const eLng = 0.01 / Math.max(cosLat, 0.2), eLat = 0.01; // ~1 km probes for the Jacobian
+      const ax = project([center[0] + eLng, center[1]]);
+      const ay = project([center[0], center[1] + eLat]);
+      if (!ax || !ay || !Number.isFinite(ax[0]) || !Number.isFinite(ay[0])) break;
+      const j00 = (ax[0] - air[0]) / eLng, j10 = (ax[1] - air[1]) / eLng;
+      const j01 = (ay[0] - air[0]) / eLat, j11 = (ay[1] - air[1]) / eLat;
+      const det = j00 * j11 - j01 * j10;
+      if (!det || !Number.isFinite(det)) break;
+      const dLng = (-j11 * ex + j01 * ey) / det, dLat = (j10 * ex - j00 * ey) / det;
+      if (!Number.isFinite(dLng) || !Number.isFinite(dLat) || Math.abs(dLng) > 8 || Math.abs(dLat) > 8) break;
+      center = [center[0] + dLng, center[1] + dLat];
+      if (Math.abs(center[1] - lat) > 10 || Math.abs(center[0] - lon) > 10) break; // runaway guard
     }
     return [best[0], Math.max(-85, Math.min(85, best[1]))]; // keep latitude valid for setCenter
   }
