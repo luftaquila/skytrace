@@ -26,6 +26,10 @@ const MODEL_URI = `${import.meta.env.BASE_URL}aircraft.glb`;
 const EMPTY_FC = { type: "FeatureCollection", features: [] };
 const M_PER_DEG_LAT = 111320;
 const COV_ANCHOR = [{ position: [127.33113, 36.36599, 0] }]; // dome anchored at HOME (mesh verts are metre offsets)
+// Vertical exaggeration for ALTITUDE (aircraft z, sticks, trails, coverage dome). Independent of the
+// terrain relief exaggeration (which stays on the Terrain × setting) so altitudes read tall & clearly
+// separated over gentler terrain.
+const ALT_EXAGG = 5;
 
 // One shared contour tile source (registers the maplibre-contour protocol once).
 let demSource = null;
@@ -130,7 +134,8 @@ const aircraftGlowShader = {
   name: "aircraftGlow",
   inject: {
     "fs:#main-end": /* glsl */ `
-  fragColor.rgb += fragColor.rgb * 0.5;
+  float glowLum = dot(fragColor.rgb, vec3(0.299, 0.587, 0.114));
+  fragColor.rgb += fragColor.rgb * (0.5 + (1.0 - glowLum) * 0.7);
 `,
   },
 };
@@ -254,6 +259,11 @@ export function createTactical3d({ container, deps }) {
     if (drag.mode === "rotate") {
       map.setBearing(drag.bearing + (e.clientX - drag.x) * 0.35);
       map.setPitch(Math.max(0, Math.min(map.getMaxPitch(), drag.pitch - (e.clientY - drag.y) * 0.25)));
+      // With an aircraft selected, keep IT under the screen centre so rotation/tilt orbits the
+      // aircraft rather than the map's ground centre (which sits ahead of the target at pitch).
+      const selHex = deps.getSelectedHex();
+      const sel = selHex && lastList.find((d) => d.hex === selHex);
+      if (sel) map.setCenter(centerFor(sel.lon, sel.lat, sel.z));
     } else {
       map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0 });
       drag.x = e.clientX; drag.y = e.clientY; // pan is incremental
@@ -342,7 +352,7 @@ export function createTactical3d({ container, deps }) {
       // deck maps the nose (+X) to world-Z = -sin(pitch) and the right wing (+Y) to
       // world-Z = cos(pitch)*sin(roll). ADS-B roll>0 = right wing DOWN and climb phi>0 = nose UP,
       // both the opposite sign of what deck needs — so negate both pitch and roll.
-      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * exagg, airborne, rgb, cls, orientation: [-phi, 90 - track, -bank], coasting: deps.isCoasting(item), item });
+      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * ALT_EXAGG, airborne, rgb, cls, orientation: [-phi, 90 - track, -bank], coasting: deps.isCoasting(item), item });
     }
     return out;
   }
@@ -373,7 +383,7 @@ export function createTactical3d({ container, deps }) {
         lastAlt = altM;
         const c = parseRgb(deps.trackSegmentColor(p));
         const col = [c.r, c.g, c.b];
-        const pt = [p.lon, p.lat, altM * exagg];
+        const pt = [p.lon, p.lat, altM * ALT_EXAGG];
         if (!run || gap || (runColor && (col[0] !== runColor[0] || col[1] !== runColor[1] || col[2] !== runColor[2]))) {
           if (run && run.path.length >= 2) trails.push(run);
           const start = !gap && run && run.path.length ? [run.path[run.path.length - 1]] : [];
@@ -389,7 +399,7 @@ export function createTactical3d({ container, deps }) {
     for (const { hex, points } of deps.getPinnedTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(points); }
 
     const ghost = deps.getPlaybackGhost();
-    const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * exagg, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
+    const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * ALT_EXAGG, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
 
     const covMesh = coverageMesh();
     // Aircraft grouped by size class so per-category size differences survive the pixel clamp
@@ -413,13 +423,13 @@ export function createTactical3d({ container, deps }) {
       // farther one. Aircraft/sticks/trails use depthCompare 'always', so the dome never hides them.
       covMesh && new CoverageMeshLayer({
         id: "coverage-depth", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [0, 0, 0, 0], getScale: [1, 1, exagg], sizeScale: 1, material: covMat, pickable: false,
+        getColor: [0, 0, 0, 0], getScale: [1, 1, ALT_EXAGG], sizeScale: 1, material: covMat, pickable: false,
         // alpha 0 with blending on leaves colour untouched; the point of this pass is the depth write.
         parameters: { depthWriteEnabled: true, depthCompare: "less-equal" },
       }),
       covMesh && new CoverageMeshLayer({
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 58], getScale: [1, 1, exagg], sizeScale: 1, material: covMat, pickable: false,
+        getColor: [255, 255, 255, 58], getScale: [1, 1, ALT_EXAGG], sizeScale: 1, material: covMat, pickable: false,
         parameters: { depthWriteEnabled: false, depthCompare: "less-equal" },
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
@@ -685,8 +695,8 @@ export function createTactical3d({ container, deps }) {
   // Called on select: ease-out focus (fast start, slow settle) to the target, then auto-track it.
   function panTo(lon, lat, altFt) {
     followActive = true;
-    followSettleUntil = performance.now() + 780;
-    map.easeTo({ center: centerFor(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * exagg), duration: 750, easing: EASE_OUT });
+    followSettleUntil = performance.now() + 480;
+    map.easeTo({ center: centerFor(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * ALT_EXAGG), duration: 520, easing: EASE_OUT });
   }
   // Continuously keep the selected aircraft centred (smooth linear glide) until the user drags the
   // map — but not until the focus/locate animation has settled, so its ease-out plays out.
@@ -696,12 +706,20 @@ export function createTactical3d({ container, deps }) {
     if (!selHex) { followActive = false; return; }
     if (performance.now() < followSettleUntil) return;
     const d = lastList.find((x) => x.hex === selHex);
-    if (d) map.easeTo({ center: centerFor(d.lon, d.lat, d.z), duration: 1100, easing: (t) => t });
+    if (!d) return;
+    const target = centerFor(d.lon, d.lat, d.z);
+    const cur = map.getCenter();
+    // Distance-proportional duration with a MIN-SPEED floor: a small position update snaps quickly
+    // (it used to crawl over a fixed 1.1s — the laggy/sluggish feel), a large one is capped so it
+    // still glides. Cuts the follow lag right after a position update.
+    const distDeg = Math.hypot(target[0] - cur.lng, target[1] - cur.lat);
+    const dur = Math.max(90, Math.min(480, distDeg * 3500));
+    map.easeTo({ center: target, duration: dur, easing: (t) => t });
   }
   // Locate button: ONE ease-out easeTo that changes zoom + pan together (centred on the aircraft at
   // altitude via the geometric centre, computed for the TARGET pitch), and resumes tracking.
   function flyToView(lon, lat, zoom, altFt) {
-    const z = altFt != null ? altFt * FT_TO_M * exagg : 0;
+    const z = altFt != null ? altFt * FT_TO_M * ALT_EXAGG : 0;
     if (altFt != null) { followActive = true; followSettleUntil = performance.now() + 980; }
     map.easeTo({ center: centerFor(lon, lat, z, 55, zoom + 1), zoom: zoom + 1, pitch: 55, duration: 900, easing: EASE_OUT });
   }

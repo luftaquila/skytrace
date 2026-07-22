@@ -1495,10 +1495,10 @@ select {
 
 .t3d-block {
   position: absolute;
-  /* Sit clearly to the upper-right of the anchor so the block never lands on top of the aircraft
-     mesh (which is centred on the anchor and grows with zoom) at any camera pitch. */
-  left: 40px;
-  top: -12px;
+  /* Sit entirely to the RIGHT of the anchor, past the aircraft mesh's largest on-screen radius
+     (~40px at max zoom), so the block never overlaps the body at any camera angle/orientation. */
+  left: 48px;
+  top: -16px;
   pointer-events: auto; /* interactive so its pin is clickable and hovering keeps it up */
 }
 
