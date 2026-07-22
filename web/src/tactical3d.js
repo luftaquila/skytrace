@@ -374,25 +374,7 @@ export function createTactical3d({ container, deps }) {
     orbitZ = sel.z;
     applyCameraFrame({ center: [sel.lon, sel.lat], elevation: sel.z });
   }
-  function rebaseOrbitToGround() {
-    const tr = map.transform;
-    // Recalculate center and zoom around the exact current camera position while changing the
-    // elevated aircraft pivot back to ground. Simply tweening elevation to zero visibly flies the
-    // camera to the aircraft's ground projection when selection is cleared.
-    if (typeof tr.getCameraLngLat === "function" && typeof tr.getCameraAltitude === "function" && typeof tr.calculateCenterFromCameraLngLatAlt === "function") {
-      const cameraLngLat = tr.getCameraLngLat();
-      const cameraAltitude = tr.getCameraAltitude();
-      tr.setElevation(0);
-      const groundState = tr.calculateCenterFromCameraLngLatAlt(cameraLngLat, cameraAltitude, tr.bearing, tr.pitch);
-      tr.setCenter(groundState.center);
-      tr.setZoom(groundState.zoom);
-      tr.setElevation(groundState.elevation);
-    } else tr.setElevation(0);
-    if (typeof map._update === "function") map._update(true);
-    else map.triggerRepaint();
-  }
   function clearOrbit() {
-    const elevation = map.transform.elevation || 0;
     const hadOrbit = orbitAttached || orbitZ !== 0 || ["focus", "follow", "locate-aircraft", "wheel-orbit"].includes(cameraAnimation?.kind);
     followActive = false;
     if (!hadOrbit) return;
@@ -400,7 +382,9 @@ export function createTactical3d({ container, deps }) {
     map.stop();
     orbitAttached = false;
     orbitZ = 0;
-    if (Math.abs(elevation) >= 0.5) rebaseOrbitToGround();
+    // Deliberately preserve center, zoom, bearing, pitch AND elevation. The elevated target pivot
+    // simply becomes the free-view pivot. Any attempt to convert it to a ground pivot changes the
+    // globe camera matrix and visibly teleports the view to the aircraft's ground projection.
   }
   function attachOrbit(z) { orbitAttached = true; orbitZ = z; } // orbit → aircraft-centred zoom
   let identBlinkOn = false; // toggled by a timer while any aircraft squawks IDENT (gold body flash)
@@ -439,12 +423,8 @@ export function createTactical3d({ container, deps }) {
     }
   };
   const onUp = () => {
-    const wasPan = drag?.mode === "pan";
     const wasRotate = drag?.mode === "rotate";
     drag = null;
-    if (wasPan && Math.abs(map.transform.elevation || 0) >= 0.5) {
-      rebaseOrbitToGround();
-    }
     if (wasRotate && followActive) followSelected();
   };
   cv.addEventListener("mousedown", onDown);
@@ -964,11 +944,12 @@ export function createTactical3d({ container, deps }) {
   function applySettings() {
     exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
     if (ready) {
+      const currentElevation = map.transform.elevation || 0;
       map.setTerrain({ source: "dem", exaggeration: exagg });
       const selHex = deps.getSelectedHex();
       const sel = orbitAttached && selHex && lastList.find((d) => d.hex === selHex);
       if (sel) focusOnSelected(sel);
-      else applyCameraFrame({ elevation: 0 });
+      else applyCameraFrame({ elevation: currentElevation });
       refreshSources();
       buildLayers();
     }
