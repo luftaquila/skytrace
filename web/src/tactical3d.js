@@ -199,9 +199,10 @@ export function createTactical3d({ container, deps }) {
       const bank = airborne && Number.isFinite(item.roll) ? Math.max(-45, Math.min(45, item.roll)) : 0;
       const track = Number.isFinite(item.track) ? item.track : 0;
       const cls = deps.planeSizeScale(item.category); // 0.85 light · 1 · 1.18 heavy (matches 2D)
-      // deck maps the nose (+X) to world-Z = -sin(pitch), so a climb (phi>0) needs NEGATIVE pitch
-      // to raise the nose. Negate phi so climbing points up and descending points down.
-      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * exagg, airborne, rgb, cls, orientation: [-phi, 90 - track, bank], coasting: deps.isCoasting(item), item });
+      // deck maps the nose (+X) to world-Z = -sin(pitch) and the right wing (+Y) to
+      // world-Z = cos(pitch)*sin(roll). ADS-B roll>0 = right wing DOWN and climb phi>0 = nose UP,
+      // both the opposite sign of what deck needs — so negate both pitch and roll.
+      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * exagg, airborne, rgb, cls, orientation: [-phi, 90 - track, -bank], coasting: deps.isCoasting(item), item });
     }
     return out;
   }
@@ -262,15 +263,23 @@ export function createTactical3d({ container, deps }) {
       pickable: false, parameters: { depthCompare: "always" },
     }));
 
+    const covMat = { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] };
     const layers = [
+      // Coverage dome in TWO passes so its translucency is drawn exactly once per pixel (no
+      // front+back / overlapping-band stacking into brighter/white triangles). Pass 1 writes only
+      // depth (nearest surface); pass 2 colours only the fragments at that nearest depth.
+      // depthWrite alone can't fix it — a nearer triangle drawn later still blends over an earlier
+      // farther one. Aircraft/sticks/trails use depthCompare 'always', so the dome never hides them.
+      covMesh && new SimpleMeshLayer({
+        id: "coverage-depth", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
+        getColor: [0, 0, 0, 0], sizeScale: 1, material: covMat, pickable: false,
+        // alpha 0 with blending on leaves colour untouched; the point of this pass is the depth write.
+        parameters: { depthWriteEnabled: true, depthCompare: "less-equal" },
+      }),
       covMesh && new SimpleMeshLayer({
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 60], sizeScale: 1,
-        material: { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] },
-        // The dome WRITES depth (depthCompare less-equal) so only the nearest surface draws at each
-        // pixel — translucency can't stack front+back (or overlapping bands) into brighter/white
-        // triangles. Aircraft/sticks/trails use depthCompare 'always', so the dome never hides them.
-        pickable: false, parameters: { depthWriteEnabled: true, depthCompare: "less-equal" },
+        getColor: [255, 255, 255, 78], sizeScale: 1, material: covMat, pickable: false,
+        parameters: { depthWriteEnabled: false, depthCompare: "less-equal" },
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
       // Trail: a single crisp altitude-gradient line (no glow/casing). billboard:true keeps the
@@ -499,32 +508,30 @@ export function createTactical3d({ container, deps }) {
     return [0, 0];
   }
   const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3); // fast start, slow settle
-  // Called on select: smoothly focus the target (at altitude, ease-out) and start auto-tracking it.
+  let followSettleUntil = 0; // suspend follow until the focus/locate animation has settled
+  // Called on select: ease-out focus (fast start, slow settle) to the target, then auto-track it.
   function panTo(lon, lat, altFt) {
     followActive = true;
     followOffset = altOffset(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * exagg);
+    followSettleUntil = performance.now() + 780;
     map.easeTo({ center: [lon, lat], offset: followOffset, duration: 750, easing: EASE_OUT });
   }
-  // Keep the selected aircraft centred until the user drags the map. Only re-centres (ease-out)
-  // once it has drifted off-centre, and never while a focus animation is still settling — so the
-  // select/locate move plays out its ease-out instead of being overridden into a constant glide.
+  // Continuously keep the selected aircraft centred (smooth linear glide, stable cached offset)
+  // until the user drags the map — but not until the focus/locate animation has settled, so its
+  // ease-out plays out instead of being overridden.
   function followSelected() {
-    if (!followActive || map.isEasing()) return;
+    if (!followActive) return;
     const selHex = deps.getSelectedHex();
     if (!selHex) { followActive = false; return; }
+    if (performance.now() < followSettleUntil) return;
     const d = lastList.find((x) => x.hex === selHex);
-    const vp = overlay._deck?.getViewports?.()[0];
-    if (!d || !vp) return;
-    const air = vp.project([d.lon, d.lat, d.z]);
-    if (!air || !Number.isFinite(air[0])) return;
-    const cx = map.getCanvas().clientWidth / 2, cy = map.getCanvas().clientHeight / 2;
-    if (Math.hypot(air[0] - cx, air[1] - cy) > 30) map.easeTo({ center: [d.lon, d.lat], offset: followOffset, duration: 650, easing: EASE_OUT });
+    if (d) map.easeTo({ center: [d.lon, d.lat], offset: followOffset, duration: 1100, easing: (t) => t });
   }
-  // Locate button: fly to the aircraft's ground point at the target zoom, then let follow re-centre
-  // it at altitude (offset depends on the target zoom, refreshed by the zoomend handler below).
+  // Locate button: ease-out fly to the aircraft's ground point at the target zoom, then let follow
+  // re-centre it at altitude (offset refreshed by the zoomend handler below).
   function flyToView(lon, lat, zoom, altFt) {
     map.flyTo({ center: [lon, lat], zoom: zoom + 1, pitch: 55, duration: 900 });
-    if (altFt != null) followActive = true;
+    if (altFt != null) { followActive = true; followSettleUntil = performance.now() + 950; }
   }
   // Offset depends on zoom, so refresh it after the user (or a locate fly) changes zoom.
   map.on("zoomend", () => { if (!followActive) return; const d = lastList.find((x) => x.hex === deps.getSelectedHex()); if (d) followOffset = altOffset(d.lon, d.lat, d.z); });
