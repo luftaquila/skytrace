@@ -122,29 +122,22 @@ class CoverageMeshLayer extends SimpleMeshLayer {
 // PBR world normal (pbr_vNormal) and the view direction (project.cameraPosition − pbr_vPosition).
 // Grazing edges (normal ⟂ view) light up, so the target reads as a luminous contact — a real glow
 // with NO extra geometry and NO second draw (just a few fragment ops on the existing model).
-// The deck `project` UBO (with cameraPosition) lives only in the VERTEX stage, so compute the view
-// vector there and pass it to the fragment as a varying; the world normal (pbr_vNormal) is already a
-// fragment varying under PBR. Rim = 1 − |N·V|, raised to a power, added in the fragment's own colour.
-const aircraftRimGlowShader = {
-  name: "aircraftRimGlow",
+// Whole-volume self-glow: a soft, UNIFORM emissive added in the fragment's OWN colour across the
+// entire model (not a fresnel rim — an edge-only glow reads as a silly bright outline). It lifts the
+// whole aircraft so it looks gently luminous against the dark scene while keeping its hue (additive
+// of its own colour, not a wash toward white).
+const aircraftGlowShader = {
+  name: "aircraftGlow",
   inject: {
-    "vs:#decl": /* glsl */ `out vec3 vGlowView;`,
-    "vs:#main-end": /* glsl */ `vGlowView = project.cameraPosition - geometry.position.xyz;`,
-    "fs:#decl": /* glsl */ `in vec3 vGlowView;`,
     "fs:#main-end": /* glsl */ `
-#if defined(LIGHTING_PBR) && defined(HAS_NORMALS)
-  vec3 rimN = normalize(pbr_vNormal);
-  vec3 rimV = normalize(vGlowView);
-  float rim = pow(clamp(1.0 - abs(dot(rimN, rimV)), 0.0, 1.0), 2.2);
-  fragColor.rgb += fragColor.rgb * rim * 0.9;
-#endif
+  fragColor.rgb += fragColor.rgb * 0.5;
 `,
   },
 };
 class GlowScenegraphLayer extends ScenegraphLayer {
   getShaders() {
     const shaders = super.getShaders();
-    return { ...shaders, modules: [...(shaders.modules || []), aircraftRimGlowShader] };
+    return { ...shaders, modules: [...(shaders.modules || []), aircraftGlowShader] };
   }
 }
 
@@ -198,6 +191,12 @@ export function createTactical3d({ container, deps }) {
     attributionControl: false,
     bearingSnap: 0, // never auto-snap the bearing to north (camera moves were rotating it unbidden)
     maxPitch: 85, // essentially flat-to-the-horizon (MapLibre's practical max before looking underground)
+    // Do NOT clamp the map centre's elevation to the terrain. With the default (true) the centre's
+    // elevation auto-tracks the terrain under it, so panning/rotating over relief triggers MapLibre's
+    // `recalculateZoomAndCenter`, which yanks the centre+zoom to a weird place (the fly-away; MapLibre
+    // bug #2937, unfixed). With false the centre stays at sea level and is never recalculated, so the
+    // camera no longer teleports on rotate/pan/zoom over terrain. (Docs also recommend false for high pitch.)
+    centerClampedToGround: false,
     pitch: 55,
     zoom: 6,
     center: [HOME.lon, HOME.lat],
@@ -231,18 +230,39 @@ export function createTactical3d({ container, deps }) {
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6 },
     },
   });
-  // Use MapLibre's NATIVE drag handlers (left-drag pans, right-drag / Ctrl+left rotates & tilts).
-  // They are terrain-aware — the camera elevation is frozen for the duration of the gesture and
-  // reconciled once at the end — so the camera never dives into the terrain mid-gesture and there is
-  // no "flies to a weird coordinate" lurch. A hand-rolled panBy/setBearing loop bypassed that path,
-  // which is what caused the jumps. Suppress the browser context menu so right-drag rotate is clean.
+  // Swapped mouse drag (per request): LEFT-drag rotates & tilts, RIGHT-drag pans. MapLibre has no
+  // button-swap option in this release, so drive both by hand off the canvas mouse events. This is
+  // safe over terrain ONLY because centerClampedToGround:false (above) disables MapLibre's
+  // centre-elevation recalculation — the source of the old "centre flies to a weird place" lurch.
+  map.dragPan.disable();
+  map.dragRotate.disable();
   map.touchZoomRotate.enableRotation();
-  map.getCanvas().addEventListener("contextmenu", (e) => e.preventDefault());
+  const cv = map.getCanvas();
+  cv.addEventListener("contextmenu", (e) => e.preventDefault());
+  let drag = null;
+  let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
   let followActive = false; // camera tracks the selected aircraft until the user drags/rotates it
-  // A user-initiated drag / rotate / tilt (originalEvent present) hands control back to the user and
-  // stops auto-follow. Zoom is intentionally excluded so tracking survives a zoom. Our own follow
-  // easeTo and panTo/flyToView are programmatic (no originalEvent) and never trip this.
-  for (const ev of ["dragstart", "rotatestart", "pitchstart"]) map.on(ev, (e) => { if (e.originalEvent) followActive = false; });
+  const onDown = (e) => {
+    dragMoved = false;
+    followActive = false; // any manual drag/rotate stops auto-tracking
+    if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
+    else if (e.button === 2) drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
+  };
+  const onMove = (e) => {
+    if (!drag) return;
+    if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 3) dragMoved = true;
+    if (drag.mode === "rotate") {
+      map.setBearing(drag.bearing + (e.clientX - drag.x) * 0.35);
+      map.setPitch(Math.max(0, Math.min(map.getMaxPitch(), drag.pitch - (e.clientY - drag.y) * 0.25)));
+    } else {
+      map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0 });
+      drag.x = e.clientX; drag.y = e.clientY; // pan is incremental
+    }
+  };
+  const onUp = () => { drag = null; };
+  cv.addEventListener("mousedown", onDown);
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
   // Generate the tactical airfield glyph icons on demand (per class colour).
   map.on("styleimagemissing", (e) => {
     const color = AF_ICON_COLORS[e.id];
@@ -275,7 +295,7 @@ export function createTactical3d({ container, deps }) {
   loadingEl.textContent = "LOADING TERRAIN…";
   const hintEl = document.createElement("div");
   hintEl.className = "t3d-hint";
-  hintEl.textContent = "Drag pan · Right/Ctrl-drag rotate & tilt · Scroll zoom";
+  hintEl.textContent = "Drag rotate & tilt · Right-drag pan · Scroll zoom";
   container.append(overlayEl, afPinEl, afHoverEl, lockEl, loadingEl, hintEl);
 
   let hoverHex = null;
@@ -536,7 +556,7 @@ export function createTactical3d({ container, deps }) {
   });
   map.on("mouseleave", AF_LAYERS, () => { hoverAf = null; if (!hoverHex) map.getCanvas().style.cursor = ""; afHoverEl.style.display = "none"; });
   map.on("click", (e) => {
-    // MapLibre only fires "click" for a genuine click (a drag is a separate gesture), so no drag guard.
+    if (dragMoved) { dragMoved = false; return; } // ignore the click that trails a rotate/pan drag
     // Aircraft: pick synchronously off MapLibre's (immediate) click instead of deck's onClick,
     // which waits ~300ms to disambiguate single- vs double-click — that lag was the select delay.
     const hit = overlay._deck?.pickObject?.({ x: e.point.x, y: e.point.y, radius: 18, layerIds: ["hit"] });
@@ -688,6 +708,8 @@ export function createTactical3d({ container, deps }) {
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {
     disposed = true;
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
     try { map.removeControl(overlay); } catch { /* gone */ }
     map.remove();
     for (const el of [overlayEl, afPinEl, afHoverEl, lockEl, loadingEl, hintEl]) el.remove();
