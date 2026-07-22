@@ -7,6 +7,7 @@
 // It reproduces the old deck look on purpose: per-class baked geometry, TRUE altitude colour,
 // the whole-volume self-glow formula, near-constant on-screen size, and IDENT-gold / conflict-pink.
 import { AIRCRAFT_GEOMETRY } from "./aircraft-geometry.js";
+import { aircraftPixelSize } from "./aircraft-size.js";
 
 const DEG = Math.PI / 180;
 
@@ -326,9 +327,10 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
           Math.hypot(ny[0] - o[0], ny[1] - o[1]),
           Math.hypot(uz[0] - o[0], uz[1] - o[1]),
         ) || 1e-6;
-        const worldPx = mesh.span * 130 * ppm;                 // sizeScale (metres) — smaller than before
+        const worldPx = mesh.span * 130 * ppm;
         const clsMul = d.clsMul || 1;
-        const px = Math.min(Math.max(worldPx, 34 * clsMul), 48 * clsMul); // ~0.7x the old 48–68 px clamp
+        const px = aircraftPixelSize({ worldPixels: worldPx, classMultiplier: clsMul, selected: d.selected, zoom: map.getZoom() });
+        d.screenPx = px; // lets the HTML target-lock follow the selected model's actual footprint
         const s = px / (mesh.span * ppm);
         // attitude() orients the model in Z-up ENU; ENU_TO_FRAME re-expresses it in the frame's Y-up
         // basis so the aircraft sits upright (not tipped 90° onto a wingtip).

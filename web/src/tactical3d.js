@@ -705,7 +705,7 @@ export function createTactical3d({ container, deps }) {
       const conflict = conflictHexes.has(d.hex);
       const cls = d.cls < 0.95 ? "small" : d.cls < 1.1 ? "medium" : "large";
       const [r, g, b] = gold ? [255, 215, 0] : conflict ? [251, 113, 133] : [d.rgb.r, d.rgb.g, d.rgb.b];
-      return { hex: d.hex, lon: d.lon, lat: d.lat, z: d.z, r, g, b, a: d.coasting ? 150 : 255, pitch: d.orientation[0], yaw: d.orientation[1], roll: d.orientation[2], cls, clsMul: d.cls };
+      return { hex: d.hex, lon: d.lon, lat: d.lat, z: d.z, r, g, b, a: d.coasting ? 150 : 255, pitch: d.orientation[0], yaw: d.orientation[1], roll: d.orientation[2], cls, clsMul: d.cls, selected: d.hex === selHex };
     });
     aircraftRenderByHex = new Map(aircraftRenderList.map((d) => [d.hex, d]));
     // Sticks (aircraft→ground), altitude-gradient trails, and conflict links as line segments; the
@@ -951,7 +951,17 @@ export function createTactical3d({ container, deps }) {
     // Position the tactical target-lock on the selected aircraft.
     const sel = selHex && lastList.find((d) => d.hex === selHex);
     const lp = sel && project(sel.lon, sel.lat, sel.z);
-    if (lp) { lockEl.style.display = ""; lockEl.style.transform = `translate3d(${lp[0].toFixed(1)}px, ${lp[1].toFixed(1)}px, 0) translate(-50%, -50%)`; }
+    if (lp) {
+      const modelPixels = aircraftRenderByHex.get(selHex)?.screenPx || 48;
+      const lockPixels = Math.round(Math.max(62, Math.min(116, modelPixels + 14)));
+      const lockSvg = lockEl.firstElementChild;
+      if (lockSvg && lockSvg.getAttribute("width") !== String(lockPixels)) {
+        lockSvg.setAttribute("width", String(lockPixels));
+        lockSvg.setAttribute("height", String(lockPixels));
+      }
+      lockEl.style.display = "";
+      lockEl.style.transform = `translate3d(${lp[0].toFixed(1)}px, ${lp[1].toFixed(1)}px, 0) translate(-50%, -50%)`;
+    }
     else lockEl.style.display = "none";
   }
 
