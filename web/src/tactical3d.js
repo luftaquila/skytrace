@@ -340,6 +340,14 @@ export function createTactical3d({ container, deps }) {
     map.transform.setCenter(new maplibregl.LngLat(sel.lon, sel.lat));
     map.transform.setElevation(sel.z);
   });
+  // Hold the orbit centre elevation through EASES (fly-in select/locate, follow glide) and drags:
+  // every camera op resets the centre elevation to the terrain, so re-apply it via the transform on
+  // each move. Transform-level (not map.setElevation) so it does NOT cancel the in-flight ease — the
+  // aircraft then glides smoothly to centre instead of snapping. Guarded so it never loops. (Only
+  // effective at zoom ≥ ~12.5, where the centre elevation is honoured — select/locate fly in to there.)
+  map.on("move", () => {
+    if (orbitAttached && orbitZ && Math.abs((map.transform.elevation || 0) - orbitZ) > 1) map.transform.setElevation(orbitZ);
+  });
   // Generate the tactical airfield glyph icons on demand (per class colour).
   map.on("styleimagemissing", (e) => {
     const color = AF_ICON_COLORS[e.id];
@@ -875,22 +883,17 @@ export function createTactical3d({ container, deps }) {
   }
   const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3); // fast start, slow settle
   let followSettleUntil = 0; // suspend follow until the focus/locate animation has settled
-  // apply the orbit centre elevation once a fly-in settles (easeTo resets it to the terrain each frame)
-  function applyOrbitOnSettle(z) {
-    map.once("moveend", () => { if (orbitAttached && orbitZ === z) { map.transform.setElevation(z); map.triggerRepaint(); } });
-  }
-  // Select: smooth ease-out fly IN to the aircraft, framing it AT altitude. Flies to zoom ≥ 12.5 where
-  // the centre-elevation orbit is exact (below that MapLibre ignores the centre elevation), then
-  // auto-tracks. Zooms in only if currently zoomed out.
+  // Select: smooth ease-out fly IN to the aircraft, framing it AT altitude — the move handler holds
+  // the centre elevation through the ease so the aircraft GLIDES to centre (no snap). Flies to zoom
+  // ≥ 12.5, where the centre-elevation orbit is exact; then auto-tracks. Zooms in only if zoomed out.
   function panTo(lon, lat, altFt) {
     const z = (altFt != null ? altFt * FT_TO_M : 0) * ALT_EXAGG;
     followActive = true; orbitAttached = true; orbitZ = z;
-    followSettleUntil = performance.now() + 760;
+    followSettleUntil = performance.now() + 720;
     map.easeTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 12.5), duration: 640, easing: EASE_OUT });
-    applyOrbitOnSettle(z);
   }
-  // Auto-track the selected aircraft (centred at altitude) until the user drags. Instant re-centre —
-  // at the flown-in zoom the jet moves so little per pass that the terrain barely nudges.
+  // Auto-track the selected aircraft — a short eased glide (the move handler keeps it centred at
+  // altitude), so tracking is smooth, not tick-tick.
   function followSelected() {
     if (!followActive) return;
     const selHex = deps.getSelectedHex();
@@ -898,17 +901,16 @@ export function createTactical3d({ container, deps }) {
     if (performance.now() < followSettleUntil) return; // let the fly-in settle first
     const d = lastList.find((x) => x.hex === selHex);
     if (!d) return;
-    orbitAttached = true;
-    focusOnSelected(d);
+    orbitAttached = true; orbitZ = d.z;
+    map.easeTo({ center: [d.lon, d.lat], duration: 260, easing: (t) => t });
   }
   // Locate button: ease-out fly to the aircraft, zoom + pitch, framed at altitude; resumes tracking.
   function flyToView(lon, lat, zoom, altFt) {
     if (altFt == null) { clearOrbit(); followActive = false; map.easeTo({ center: [lon, lat], zoom: zoom + 1, pitch: 55, duration: 900, easing: EASE_OUT }); return; }
     const z = altFt * FT_TO_M * ALT_EXAGG;
     followActive = true; orbitAttached = true; orbitZ = z;
-    followSettleUntil = performance.now() + 1100;
+    followSettleUntil = performance.now() + 1000;
     map.easeTo({ center: [lon, lat], zoom: Math.max(zoom + 1, 12.5), pitch: 55, duration: 900, easing: EASE_OUT });
-    applyOrbitOnSettle(z);
   }
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {
