@@ -26,10 +26,6 @@ const MODEL_URI = `${import.meta.env.BASE_URL}aircraft.glb`;
 const EMPTY_FC = { type: "FeatureCollection", features: [] };
 const M_PER_DEG_LAT = 111320;
 const COV_ANCHOR = [{ position: [127.33113, 36.36599, 0] }]; // dome anchored at HOME (mesh verts are metre offsets)
-// Additive-blend parameters (luma v9 WebGPU-style keys) for the aircraft glow twin: srcAlpha·src + dst,
-// so the glow ADDS light to whatever is behind it (a self-glow, not a brightness lift). depthWrite off
-// + depthCompare always keeps it from occluding anything and from being hidden by the dome/terrain.
-const GLOW_PARAMS = { depthCompare: "always", depthWriteEnabled: false, blend: true, blendColorOperation: "add", blendColorSrcFactor: "src-alpha", blendColorDstFactor: "one", blendAlphaOperation: "add", blendAlphaSrcFactor: "one", blendAlphaDstFactor: "one" };
 
 // One shared contour tile source (registers the maplibre-contour protocol once).
 let demSource = null;
@@ -106,7 +102,7 @@ vec3 coverageAltitudeColor(float altitudeFt) {
   float t = clamp(altitudeFt / 40000.0, 0.0, 1.0);
   // Preserve the existing low-orange to high-violet meaning while keeping
   // perceptual lightness and chroma constant throughout the sweep.
-  return coverageOklchToSrgb(0.72, 0.12, mix(50.0, 300.0, t));
+  return coverageOklchToSrgb(0.72, 0.18, mix(50.0, 300.0, t));
 }
 `,
     "fs:#main-end": /* glsl */ `
@@ -119,6 +115,36 @@ class CoverageMeshLayer extends SimpleMeshLayer {
   getShaders() {
     const shaders = super.getShaders();
     return { ...shaders, modules: [...(shaders.modules || []), coverageAltitudeShader] };
+  }
+}
+
+// Aircraft self-glow: a fresnel RIM added in the target's OWN colour, computed per fragment from the
+// PBR world normal (pbr_vNormal) and the view direction (project.cameraPosition − pbr_vPosition).
+// Grazing edges (normal ⟂ view) light up, so the target reads as a luminous contact — a real glow
+// with NO extra geometry and NO second draw (just a few fragment ops on the existing model).
+// The deck `project` UBO (with cameraPosition) lives only in the VERTEX stage, so compute the view
+// vector there and pass it to the fragment as a varying; the world normal (pbr_vNormal) is already a
+// fragment varying under PBR. Rim = 1 − |N·V|, raised to a power, added in the fragment's own colour.
+const aircraftRimGlowShader = {
+  name: "aircraftRimGlow",
+  inject: {
+    "vs:#decl": /* glsl */ `out vec3 vGlowView;`,
+    "vs:#main-end": /* glsl */ `vGlowView = project.cameraPosition - geometry.position.xyz;`,
+    "fs:#decl": /* glsl */ `in vec3 vGlowView;`,
+    "fs:#main-end": /* glsl */ `
+#if defined(LIGHTING_PBR) && defined(HAS_NORMALS)
+  vec3 rimN = normalize(pbr_vNormal);
+  vec3 rimV = normalize(vGlowView);
+  float rim = pow(clamp(1.0 - abs(dot(rimN, rimV)), 0.0, 1.0), 2.2);
+  fragColor.rgb += fragColor.rgb * rim * 0.9;
+#endif
+`,
+  },
+};
+class GlowScenegraphLayer extends ScenegraphLayer {
+  getShaders() {
+    const shaders = super.getShaders();
+    return { ...shaders, modules: [...(shaders.modules || []), aircraftRimGlowShader] };
   }
 }
 
@@ -220,6 +246,15 @@ export function createTactical3d({ container, deps }) {
   let drag = null;
   let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
   let followActive = false; // camera tracks the selected aircraft until the user drags the map
+  // Auto-follow must yield to the USER on ANY manual camera gesture, whatever the input device.
+  // Mouse rotate/tilt/pan is our own drag (handled in onDown below); trackpad two-finger, touch
+  // pinch/rotate, wheel zoom and keyboard rotate/pitch/zoom come in through MapLibre's own handlers,
+  // so stop following on those too. Otherwise follow re-centres the target on the next data pass
+  // WHILE the user is rotating OR zooming, and at high tilt that re-frame yanks the ground far across
+  // the screen — the "flies to a weird coordinate" the user was seeing. e.originalEvent is set only
+  // for real user gestures; our own follow easeTo (centre only) and panTo/flyToView (programmatic)
+  // fire these without originalEvent, so this never cancels follow spuriously.
+  for (const ev of ["rotatestart", "pitchstart", "zoomstart", "dragstart", "boxzoomstart"]) map.on(ev, (e) => { if (e.originalEvent) followActive = false; });
   const onCtx = (e) => e.preventDefault();
   const onDown = (e) => {
     dragMoved = false;
@@ -314,7 +349,7 @@ export function createTactical3d({ container, deps }) {
       if (airborne) {
         const vs = item.baroRate ?? item.geomRate;
         const gs = (item.gs ?? 0) * 0.514444;
-        if (vs != null && gs > 5) phi = (Math.atan2(vs * 0.00508, gs) * 3 * 180) / Math.PI;
+        if (vs != null && gs > 5) phi = (Math.atan2(vs * 0.00508, gs) * 5 * 180) / Math.PI;
         phi = Math.max(-40, Math.min(40, phi));
       }
       const bank = airborne && Number.isFinite(item.roll) ? Math.max(-45, Math.min(45, item.roll)) : 0;
@@ -374,29 +409,16 @@ export function createTactical3d({ container, deps }) {
 
     const covMesh = coverageMesh();
     // Aircraft grouped by size class so per-category size differences survive the pixel clamp
-    // (constant on-screen size per class). Each target keeps its TRUE altitude colour (no brightness
-    // lift) and gets a soft additive GLOW twin behind it — a slightly larger, unlit, additively-blended
-    // copy of the model in the target's own colour — so it reads as a luminous contact, a subtle
-    // self-glow rather than a brightened blob or a background ring.
+    // (constant on-screen size per class). One solid glTF model per target in its TRUE altitude
+    // colour, with a per-fragment fresnel rim self-glow (GlowScenegraphLayer) — no extra geometry.
     const byCls = new Map();
     for (const d of list) { const g = byCls.get(d.cls) || []; g.push(d); byCls.set(d.cls, g); }
-    const glowLayers = [];
-    const solidLayers = [];
-    for (const [cls, data] of byCls.entries()) {
-      const sMin = Math.round(48 * cls), sMax = Math.round(68 * cls);
-      glowLayers.push(new ScenegraphLayer({
-        id: `aircraft-glow-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 55 : 105],
-        sizeScale: 185 * 1.12, sizeMinPixels: Math.round(sMin * 1.12), sizeMaxPixels: Math.round(sMax * 1.12),
-        pickable: false, parameters: GLOW_PARAMS,
-      }));
-      solidLayers.push(new ScenegraphLayer({
-        id: `aircraft-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255],
-        sizeScale: 185, sizeMinPixels: sMin, sizeMaxPixels: sMax, _lighting: "pbr",
-        pickable: false, parameters: { depthCompare: "always" },
-      }));
-    }
+    const aircraftLayers = [...byCls.entries()].map(([cls, data]) => new GlowScenegraphLayer({
+      id: `aircraft-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
+      getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255],
+      sizeScale: 185, sizeMinPixels: Math.round(48 * cls), sizeMaxPixels: Math.round(68 * cls), _lighting: "pbr",
+      pickable: false, parameters: { depthCompare: "always" },
+    }));
 
     const covMat = { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] };
     const layers = [
@@ -423,8 +445,7 @@ export function createTactical3d({ container, deps }) {
       new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
       // Small dot at each stick's ground foot (the old view had these).
       new ScatterplotLayer({ id: "ground-dots", data: sticks, getPosition: (d) => d.target, radiusUnits: "pixels", getRadius: 3, radiusMinPixels: 2.5, radiusMaxPixels: 4, filled: true, stroked: false, getFillColor: (d) => d.color, parameters: { depthCompare: "always" } }),
-      ...glowLayers,
-      ...solidLayers,
+      ...aircraftLayers,
       ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 150, sizeMinPixels: 38, sizeMaxPixels: 54, parameters: { depthCompare: "always" } }),
       // Invisible, generous click/hover target (like the old hit sphere): a constant ~80px disc
       // per aircraft — bigger than the model — so selecting never needs pixel-perfect aim.
