@@ -978,32 +978,23 @@ function drawCoverage() {
   coverageLayer.addTo(map);
 }
 
-// Runways grouped by owning airport ICAO, for the airport popover.
-const runwaysByIcao = (() => {
-  const m = new Map();
-  for (const r of RUNWAYS) {
-    if (!m.has(r.icao)) m.set(r.icao, []);
-    m.get(r.icao).push(r);
-  }
-  return m;
-})();
-
 function airfieldTooltip(field) {
   const codes = [field.icao, field.iata].filter(Boolean).join(" · ");
   const meta = [codes, field.city].filter(Boolean).join(" — ");
-  const rwys = field.icao ? runwaysByIcao.get(field.icao) || [] : [];
-  const rwHtml = rwys.length
-    ? `<span class="af-tt-rwys">${rwys
-        .map((r) => `<span class="af-tt-rw"><b>${escapeHtml(r.ident)}</b><span>${r.len.toLocaleString()} ft</span></span>`)
-        .join("")}</span>`
-    : "";
+  const runwayRows = field.runways.length
+    ? field.runways.map((runway) => {
+        const ends = runway.ends || "Direction unknown";
+        const length = runway.lengthM == null ? "Length unknown" : `${numberFormatter(0).format(runway.lengthM)} m`;
+        return `<span class="af-tt-runway"><span>${escapeHtml(ends)}</span><span>${escapeHtml(length)}</span></span>`;
+      }).join("")
+    : '<span class="af-tt-runway-empty">Data unavailable</span>';
   return `<span class="af-tt-name">${escapeHtml(field.name)}</span>`
     + (meta ? `<span class="af-tt-meta">${escapeHtml(meta)}</span>` : "")
-    + rwHtml;
+    + `<span class="af-tt-runways"><span class="af-tt-runway-title">Runways</span>${runwayRows}</span>`;
 }
 
-function airfieldIcon(field, minor) {
-  const label = minor ? "" : `<span class="airfield-code">${escapeHtml(field.code)}</span>`;
+function airfieldIcon(field, minor, showLabel = true) {
+  const label = !minor && showLabel ? `<span class="airfield-code">${escapeHtml(field.code)}</span>` : "";
   return L.divIcon({
     className: `airfield-icon kind-${field.kind}${minor ? " minor" : ""}`,
     html: `<span class="airfield-wrap"><span class="airfield-dot"></span>${label}</span>`,
@@ -1046,13 +1037,25 @@ function drawAirfields() {
         interactive: false, lineJoin: "miter",
       }).addTo(airfieldLayer);
     }
+    // The worldwide dataset (~48k) is progressively disclosed by airport size and culled to the
+    // viewport, so the 2D map never spawns tens of thousands of DOM markers: large always, medium
+    // from z5, small/minor from z7. Labels only appear once zoomed in (z6+).
+    const zoom = map.getZoom();
+    const bounds = map.getBounds().pad(0.15);
+    const south = bounds.getSouth(), north = bounds.getNorth(), west = bounds.getWest(), east = bounds.getEast();
     for (const field of AIRFIELDS) {
       const minor = isMinorAirfield(field);
       // Uncoded minor strips (military helipads, emergency runways) are hidden
       // unless explicitly enabled, to keep the coded airfields legible.
       if (minor && !settings.value.airfieldsMinor) continue;
+      if ((field.kind === "medium" && zoom < 5) || ((field.kind === "small" || minor) && zoom < 7)) continue;
+      if (field.lat < south || field.lat > north) continue;
+      const lonVisible = (field.lon >= west && field.lon <= east)
+        || (field.lon + 360 >= west && field.lon + 360 <= east)
+        || (field.lon - 360 >= west && field.lon - 360 <= east);
+      if (!lonVisible) continue;
       L.marker([field.lat, field.lon], {
-        icon: airfieldIcon(field, minor),
+        icon: airfieldIcon(field, minor, zoom >= 6),
         pane: "airfields",
         keyboard: false,
         zIndexOffset: -1000,
@@ -1707,7 +1710,7 @@ onMounted(async () => {
   map.createPane("airfields").style.zIndex = 450;
   L.control.zoom({ position: "bottomright" }).addTo(map);
   // Re-cull markers to the viewport after a pan or zoom (moveend also fires on zoom).
-  map.on("moveend", upsertMarkers);
+  map.on("moveend", () => { upsertMarkers(); drawAirfields(); });
   // Clicking empty map (coverage is non-interactive, markers stop propagation) deselects,
   // unless the measure tool is active — then clicks drop range/bearing endpoints.
   map.on("click", (event) => {

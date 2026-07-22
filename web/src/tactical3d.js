@@ -26,6 +26,10 @@ const MODEL_URI = `${import.meta.env.BASE_URL}aircraft.glb`;
 const EMPTY_FC = { type: "FeatureCollection", features: [] };
 const M_PER_DEG_LAT = 111320;
 const COV_ANCHOR = [{ position: [127.33113, 36.36599, 0] }]; // dome anchored at HOME (mesh verts are metre offsets)
+// Additive-blend parameters (luma v9 WebGPU-style keys) for the aircraft glow twin: srcAlpha·src + dst,
+// so the glow ADDS light to whatever is behind it (a self-glow, not a brightness lift). depthWrite off
+// + depthCompare always keeps it from occluding anything and from being hidden by the dome/terrain.
+const GLOW_PARAMS = { depthCompare: "always", depthWriteEnabled: false, blend: true, blendColorOperation: "add", blendColorSrcFactor: "src-alpha", blendColorDstFactor: "one", blendAlphaOperation: "add", blendAlphaSrcFactor: "one", blendAlphaDstFactor: "one" };
 
 // One shared contour tile source (registers the maplibre-contour protocol once).
 let demSource = null;
@@ -52,6 +56,70 @@ function parseRgb(css) {
   const hex = css.replace("#", "");
   const n = hex.length === 3 ? hex.split("").map((c) => c + c).join("") : hex;
   return { r: parseInt(n.slice(0, 2), 16), g: parseInt(n.slice(2, 4), 16), b: parseInt(n.slice(4, 6), 16) };
+}
+
+// The coverage shell uses its own perceptually uniform altitude palette. Colour is
+// calculated per fragment from interpolated altitude instead of interpolating a few
+// sRGB vertex colours, which avoids the apparent cyan-to-blue brightness cliff.
+const coverageAltitudeShader = {
+  name: "coverageAltitude",
+  inject: {
+    "vs:#decl": /* glsl */ `
+out float coverageAltitudeFt;
+`,
+    "vs:#main-end": /* glsl */ `
+coverageAltitudeFt = max(positions.z / 0.3048, 0.0);
+`,
+    "fs:#decl": /* glsl */ `
+in float coverageAltitudeFt;
+
+float coverageLinearToSrgb(float value) {
+  value = max(value, 0.0);
+  return value <= 0.0031308
+    ? value * 12.92
+    : 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
+vec3 coverageOklchToSrgb(float lightness, float chroma, float hueDegrees) {
+  float hue = radians(hueDegrees);
+  float a = chroma * cos(hue);
+  float b = chroma * sin(hue);
+  float lRoot = lightness + 0.3963377774 * a + 0.2158037573 * b;
+  float mRoot = lightness - 0.1055613458 * a - 0.0638541728 * b;
+  float sRoot = lightness - 0.0894841775 * a - 1.2914855480 * b;
+  float l = lRoot * lRoot * lRoot;
+  float m = mRoot * mRoot * mRoot;
+  float s = sRoot * sRoot * sRoot;
+  vec3 linearRgb = vec3(
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+  );
+  return clamp(vec3(
+    coverageLinearToSrgb(linearRgb.r),
+    coverageLinearToSrgb(linearRgb.g),
+    coverageLinearToSrgb(linearRgb.b)
+  ), 0.0, 1.0);
+}
+
+vec3 coverageAltitudeColor(float altitudeFt) {
+  float t = clamp(altitudeFt / 40000.0, 0.0, 1.0);
+  // Preserve the existing low-orange to high-violet meaning while keeping
+  // perceptual lightness and chroma constant throughout the sweep.
+  return coverageOklchToSrgb(0.72, 0.12, mix(50.0, 300.0, t));
+}
+`,
+    "fs:#main-end": /* glsl */ `
+fragColor.rgb = coverageAltitudeColor(coverageAltitudeFt);
+`,
+  },
+};
+
+class CoverageMeshLayer extends SimpleMeshLayer {
+  getShaders() {
+    const shaders = super.getShaders();
+    return { ...shaders, modules: [...(shaders.modules || []), coverageAltitudeShader] };
+  }
 }
 
 // Tactical airfield glyph (aeronautical style): a glowing ring with crossed runways and a core,
@@ -84,6 +152,19 @@ export function createTactical3d({ container, deps }) {
   let ready = false;
   const contour = ensureContourSource();
 
+  // Shared airfield symbol layout/paint. Split into per-class layers (below) so the worldwide
+  // dataset (~48k) declutters by zoom: large always, medium from z5, small from z7. allow-overlap
+  // is off so MapLibre thins out overlapping icons instead of drawing tens of thousands at once.
+  const afLayout = {
+    "icon-image": ["case", ["get", "minor"], "af-minor", ["match", ["get", "kind"], "large", "af-large", "medium", "af-medium", "af-small"]],
+    "icon-size": ["case", ["get", "minor"], 0.5, ["match", ["get", "kind"], "large", 0.92, "medium", 0.76, 0.62]],
+    "icon-allow-overlap": false, "icon-optional": false,
+    "text-field": ["case", ["get", "minor"], "", ["get", "code"]],
+    "text-font": ["Open Sans Regular"], "text-size": ["match", ["get", "kind"], "large", 12, 11],
+    "text-letter-spacing": 0.08, "text-offset": [0, 1.15], "text-anchor": "top", "text-optional": true,
+  };
+  const afPaint = { "text-color": "#8ff0e4", "text-halo-color": "#04211f", "text-halo-width": 1.7, "text-halo-blur": 0.6 };
+
   // --- MapLibre map (mercator so the deck.gl overlay aligns). Dark tactical terrain by
   // default; satellite is a toggle. -------------------------------------------------------
   const map = new maplibregl.Map({
@@ -113,17 +194,12 @@ export function createTactical3d({ container, deps }) {
         { id: "contour-line", type: "line", source: "contours", "source-layer": "contours", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "level"], 1, 0.4, 0.16], "line-width": ["match", ["get", "level"], 1, 1.1, 0.6], "line-blur": 0.6 } },
         { id: "rings-line", type: "line", source: "rings", filter: ["==", ["get", "kind"], "ring"], paint: { "line-color": "#48e0d1", "line-opacity": 0.5, "line-width": 1.3, "line-blur": 1.2 } },
         // Tactical airfield: an aeronautical glyph icon (ring + crossed runways, class colour/size,
-        // constant screen size) with the code below it. One symbol layer, hit-testable for hover/click.
-        { id: "airfield-icon", type: "symbol", source: "airfields",
-          layout: {
-            "icon-image": ["case", ["get", "minor"], "af-minor", ["match", ["get", "kind"], "large", "af-large", "medium", "af-medium", "af-small"]],
-            "icon-size": ["case", ["get", "minor"], 0.5, ["match", ["get", "kind"], "large", 0.92, "medium", 0.76, 0.62]],
-            "icon-allow-overlap": true,
-            "text-field": ["case", ["get", "minor"], "", ["get", "code"]],
-            "text-font": ["Open Sans Regular"], "text-size": ["match", ["get", "kind"], "large", 12, 11],
-            "text-letter-spacing": 0.08, "text-offset": [0, 1.15], "text-anchor": "top", "text-optional": true,
-          },
-          paint: { "text-color": "#8ff0e4", "text-halo-color": "#04211f", "text-halo-width": 1.7, "text-halo-blur": 0.6 } },
+        // constant screen size) with the code below it. Split into three per-class layers so the
+        // worldwide dataset declutters by zoom (large always, medium from z5, small/minor from z7)
+        // and MapLibre gives placement priority to the biggest airports. Hit-testable for hover/click.
+        { id: "airfield-large", type: "symbol", source: "airfields", minzoom: 0, filter: ["all", ["!", ["get", "minor"]], ["==", ["get", "kind"], "large"]], layout: { ...afLayout }, paint: { ...afPaint } },
+        { id: "airfield-medium", type: "symbol", source: "airfields", minzoom: 5, filter: ["all", ["!", ["get", "minor"]], ["==", ["get", "kind"], "medium"]], layout: { ...afLayout }, paint: { ...afPaint } },
+        { id: "airfield-small", type: "symbol", source: "airfields", minzoom: 7, filter: ["any", ["get", "minor"], ["==", ["get", "kind"], "small"]], layout: { ...afLayout }, paint: { ...afPaint } },
         { id: "ring-label", type: "symbol", source: "rings", filter: ["in", ["get", "kind"], ["literal", ["ringlabel", "compass"]]], layout: { "text-field": ["get", "label"], "text-font": ["Open Sans Regular"], "text-size": ["case", ["==", ["get", "kind"], "compass"], 15, 11], "text-allow-overlap": true }, paint: { "text-color": "#7fe6da", "text-opacity": ["case", ["==", ["get", "kind"], "compass"], 0.85, 0.55], "text-halo-color": "#050a0c", "text-halo-width": 1.2 } },
       ],
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6 },
@@ -182,9 +258,14 @@ export function createTactical3d({ container, deps }) {
   // --- DOM overlay: data-block popovers + pins (exact old styling), airfield popover ------
   const overlayEl = document.createElement("div");
   overlayEl.className = "t3d-overlay";
-  const afTooltipEl = document.createElement("div");
-  afTooltipEl.className = "t3d-tt airfield-tt";
-  afTooltipEl.style.display = "none";
+  // Two airfield popovers: one PINNED by a click (stays put) and one that follows the HOVERED
+  // airfield. Kept separate so hovering other airfields still shows their popover while one is pinned.
+  const afPinEl = document.createElement("div");
+  afPinEl.className = "t3d-tt airfield-tt";
+  afPinEl.style.display = "none";
+  const afHoverEl = document.createElement("div");
+  afHoverEl.className = "t3d-tt airfield-tt";
+  afHoverEl.style.display = "none";
   // Tactical target-lock reticle (HUD corner brackets) around the selected aircraft.
   const lockEl = document.createElement("div");
   lockEl.className = "t3d-lock";
@@ -196,7 +277,7 @@ export function createTactical3d({ container, deps }) {
   const hintEl = document.createElement("div");
   hintEl.className = "t3d-hint";
   hintEl.textContent = "Drag rotate · Ctrl/right-drag tilt · Scroll zoom";
-  container.append(overlayEl, afTooltipEl, lockEl, loadingEl, hintEl);
+  container.append(overlayEl, afPinEl, afHoverEl, lockEl, loadingEl, hintEl);
 
   let hoverHex = null;
   let hoverAf = null;
@@ -293,17 +374,29 @@ export function createTactical3d({ container, deps }) {
 
     const covMesh = coverageMesh();
     // Aircraft grouped by size class so per-category size differences survive the pixel clamp
-    // (constant on-screen size per class). Colours are brightened toward white so the target reads
-    // as a bright contact against the (translucent) coverage — no outline/ring, just luminance.
+    // (constant on-screen size per class). Each target keeps its TRUE altitude colour (no brightness
+    // lift) and gets a soft additive GLOW twin behind it — a slightly larger, unlit, additively-blended
+    // copy of the model in the target's own colour — so it reads as a luminous contact, a subtle
+    // self-glow rather than a brightened blob or a background ring.
     const byCls = new Map();
     for (const d of list) { const g = byCls.get(d.cls) || []; g.push(d); byCls.set(d.cls, g); }
-    const bright = (v) => Math.round(v + (255 - v) * 0.34);
-    const aircraftLayers = [...byCls.entries()].map(([cls, data]) => new ScenegraphLayer({
-      id: `aircraft-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-      getColor: (d) => [bright(d.rgb.r), bright(d.rgb.g), bright(d.rgb.b), d.coasting ? 150 : 255],
-      sizeScale: 185, sizeMinPixels: Math.round(48 * cls), sizeMaxPixels: Math.round(68 * cls), _lighting: "pbr",
-      pickable: false, parameters: { depthCompare: "always" },
-    }));
+    const glowLayers = [];
+    const solidLayers = [];
+    for (const [cls, data] of byCls.entries()) {
+      const sMin = Math.round(48 * cls), sMax = Math.round(68 * cls);
+      glowLayers.push(new ScenegraphLayer({
+        id: `aircraft-glow-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
+        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 55 : 105],
+        sizeScale: 185 * 1.12, sizeMinPixels: Math.round(sMin * 1.12), sizeMaxPixels: Math.round(sMax * 1.12),
+        pickable: false, parameters: GLOW_PARAMS,
+      }));
+      solidLayers.push(new ScenegraphLayer({
+        id: `aircraft-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
+        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255],
+        sizeScale: 185, sizeMinPixels: sMin, sizeMaxPixels: sMax, _lighting: "pbr",
+        pickable: false, parameters: { depthCompare: "always" },
+      }));
+    }
 
     const covMat = { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] };
     const layers = [
@@ -312,15 +405,15 @@ export function createTactical3d({ container, deps }) {
       // depth (nearest surface); pass 2 colours only the fragments at that nearest depth.
       // depthWrite alone can't fix it — a nearer triangle drawn later still blends over an earlier
       // farther one. Aircraft/sticks/trails use depthCompare 'always', so the dome never hides them.
-      covMesh && new SimpleMeshLayer({
+      covMesh && new CoverageMeshLayer({
         id: "coverage-depth", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [0, 0, 0, 0], sizeScale: 1, material: covMat, pickable: false,
+        getColor: [0, 0, 0, 0], getScale: [1, 1, exagg], sizeScale: 1, material: covMat, pickable: false,
         // alpha 0 with blending on leaves colour untouched; the point of this pass is the depth write.
         parameters: { depthWriteEnabled: true, depthCompare: "less-equal" },
       }),
-      covMesh && new SimpleMeshLayer({
+      covMesh && new CoverageMeshLayer({
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 58], sizeScale: 1, material: covMat, pickable: false,
+        getColor: [255, 255, 255, 58], getScale: [1, 1, exagg], sizeScale: 1, material: covMat, pickable: false,
         parameters: { depthWriteEnabled: false, depthCompare: "less-equal" },
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
@@ -330,7 +423,8 @@ export function createTactical3d({ container, deps }) {
       new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
       // Small dot at each stick's ground foot (the old view had these).
       new ScatterplotLayer({ id: "ground-dots", data: sticks, getPosition: (d) => d.target, radiusUnits: "pixels", getRadius: 3, radiusMinPixels: 2.5, radiusMaxPixels: 4, filled: true, stroked: false, getFillColor: (d) => d.color, parameters: { depthCompare: "always" } }),
-      ...aircraftLayers,
+      ...glowLayers,
+      ...solidLayers,
       ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 150, sizeMinPixels: 38, sizeMaxPixels: 54, parameters: { depthCompare: "always" } }),
       // Invisible, generous click/hover target (like the old hit sphere): a constant ~80px disc
       // per aircraft — bigger than the model — so selecting never needs pixel-perfect aim.
@@ -346,15 +440,14 @@ export function createTactical3d({ container, deps }) {
   // Solid altitude-gradient reception dome: skin the server's per-altitude rings into a single
   // translucent triangle mesh (a real 3D volume, not a wireframe). Built in local metre offsets
   // from HOME so a SimpleMeshLayer (which reliably renders arbitrary 3D geo meshes) can draw it;
-  // per-vertex colour carries the altitude gradient, the layer's getColor alpha the translucency.
+  // the fragment shader maps interpolated altitude to OKLCH colour, while getColor supplies alpha.
   const M_PER_DEG_LON = M_PER_DEG_LAT * Math.cos((HOME.lat * Math.PI) / 180);
   function coverageMesh() {
     if (!deps.getSettings().coverage) return null;
     const positions = [];
-    const colors = [];
     // Metre offset of a ring vertex from HOME (the SimpleMeshLayer anchor).
     const off = (pt, z) => [(pt[0] - HOME.lon) * M_PER_DEG_LON, (pt[1] - HOME.lat) * M_PER_DEG_LAT, z];
-    const pushV = (p, c) => { positions.push(p[0], p[1], p[2]); colors.push(c.r / 255, c.g / 255, c.b / 255); };
+    const pushV = (p) => { positions.push(p[0], p[1], p[2]); };
     for (const area of deps.getCoverage()?.areas || []) {
       const vol = area.volume;
       if (!vol?.layers?.length) continue;
@@ -362,8 +455,9 @@ export function createTactical3d({ container, deps }) {
       for (const l of vol.layers) levels.push({ feet: l.midAltitude, ring: l.ring });
       const N = Math.min(...levels.map((lv) => lv.ring.length)) - 1; // azimuth samples (ring closes)
       if (N < 3) continue;
-      const zc = levels.map((lv) => lv.feet * FT_TO_M * exagg);
-      const cc = levels.map((lv) => parseRgb(deps.altitudeColorFeet(lv.feet)));
+      // Keep raw altitude in the mesh. CoverageMeshLayer applies visual exaggeration through
+      // getScale, leaving the shader with the true altitude for its per-fragment colour lookup.
+      const zc = levels.map((lv) => lv.feet * FT_TO_M);
       // Skin each altitude band into two triangles per azimuth cell (non-indexed triangle list).
       for (let l = 0; l < levels.length - 1; l += 1) {
         const r0 = levels[l].ring;
@@ -374,8 +468,8 @@ export function createTactical3d({ container, deps }) {
           const p01 = off(r0[a2], zc[l]);
           const p10 = off(r1[a], zc[l + 1]);
           const p11 = off(r1[a2], zc[l + 1]);
-          pushV(p00, cc[l]); pushV(p01, cc[l]); pushV(p11, cc[l + 1]);
-          pushV(p00, cc[l]); pushV(p11, cc[l + 1]); pushV(p10, cc[l + 1]);
+          pushV(p00); pushV(p01); pushV(p11);
+          pushV(p00); pushV(p11); pushV(p10);
         }
       }
     }
@@ -383,7 +477,6 @@ export function createTactical3d({ container, deps }) {
     return {
       attributes: {
         positions: { value: new Float32Array(positions), size: 3 },
-        colors: { value: new Float32Array(colors), size: 3 },
       },
     };
   }
@@ -437,16 +530,26 @@ export function createTactical3d({ container, deps }) {
   }
   const airfieldByKey = new Map();
   let afPinned = null; // airfield popover pinned by a click; stays until a click elsewhere
-  const AF_LAYERS = ["airfield-icon"]; // one symbol layer (icon + label) — hover/click on either
-  const activeAf = () => afPinned || hoverAf?.field || null;
-  function showAf(field) { afTooltipEl.innerHTML = deps.airfieldTooltip(field); afTooltipEl.style.display = ""; positionAfTooltip(); }
-  function positionAfTooltip() { const f = activeAf(); if (!f) return; const p = map.project([f.lon, f.lat]); afTooltipEl.style.transform = `translate3d(${p.x.toFixed(1)}px, ${(p.y - 12).toFixed(1)}px, 0) translate(-50%, -100%)`; }
-  map.on("render", () => { positionAfTooltip(); syncBlocks(); });
+  const AF_LAYERS = ["airfield-large", "airfield-medium", "airfield-small"]; // the three per-class symbol layers — hover/click on any
+  function positionAf(el, field) { if (!field) return; const p = map.project([field.lon, field.lat]); el.style.transform = `translate3d(${p.x.toFixed(1)}px, ${(p.y - 12).toFixed(1)}px, 0) translate(-50%, -100%)`; }
+  function showPinned(field) { afPinned = field; afPinEl.innerHTML = deps.airfieldTooltip(field); afPinEl.style.display = ""; positionAf(afPinEl, field); if (hoverAf?.field === field) afHoverEl.style.display = "none"; }
+  function clearPinned() { afPinned = null; afPinEl.style.display = "none"; }
+  map.on("render", () => {
+    if (afPinned) positionAf(afPinEl, afPinned);
+    if (hoverAf?.field && hoverAf.field !== afPinned) positionAf(afHoverEl, hoverAf.field);
+    syncBlocks();
+  });
   map.on("mousemove", AF_LAYERS, (e) => {
     const field = airfieldByKey.get(e.features?.[0]?.properties?.key);
-    if (field && field !== hoverAf?.field) { hoverAf = { field }; map.getCanvas().style.cursor = "pointer"; if (!afPinned) showAf(field); }
+    if (field && field !== hoverAf?.field) {
+      hoverAf = { field };
+      map.getCanvas().style.cursor = "pointer";
+      // The hover popover shows any airfield EXCEPT the one already pinned (its own popover stays up).
+      if (field !== afPinned) { afHoverEl.innerHTML = deps.airfieldTooltip(field); afHoverEl.style.display = ""; positionAf(afHoverEl, field); }
+      else afHoverEl.style.display = "none";
+    }
   });
-  map.on("mouseleave", AF_LAYERS, () => { hoverAf = null; if (!hoverHex) map.getCanvas().style.cursor = ""; if (!afPinned) afTooltipEl.style.display = "none"; });
+  map.on("mouseleave", AF_LAYERS, () => { hoverAf = null; if (!hoverHex) map.getCanvas().style.cursor = ""; afHoverEl.style.display = "none"; });
   map.on("click", (e) => {
     if (dragMoved) { dragMoved = false; return; }
     // Aircraft: pick synchronously off MapLibre's (immediate) click instead of deck's onClick,
@@ -454,8 +557,8 @@ export function createTactical3d({ container, deps }) {
     const hit = overlay._deck?.pickObject?.({ x: e.point.x, y: e.point.y, radius: 18, layerIds: ["hit"] });
     if (hit?.object?.hex) { deps.onSelect(hit.object.hex); return; }
     const field = airfieldByKey.get(map.queryRenderedFeatures(e.point, { layers: AF_LAYERS })[0]?.properties?.key);
-    if (field) { afPinned = field; showAf(field); return; } // clicking an airfield pins its popover
-    if (afPinned) { afPinned = null; afTooltipEl.style.display = "none"; } // click elsewhere clears it
+    if (field) { showPinned(field); return; } // clicking an airfield pins its popover
+    if (afPinned) clearPinned(); // click elsewhere clears it
     deps.onMapClick();
   });
 
@@ -528,7 +631,7 @@ export function createTactical3d({ container, deps }) {
   function setActive(active) {
     running = active;
     if (active) { map.resize(); hintEl.style.display = ""; setTimeout(() => { hintEl.style.display = "none"; }, 8000); }
-    else { hoverHex = null; hoverAf = null; afTooltipEl.style.display = "none"; }
+    else { hoverHex = null; hoverAf = null; afPinned = null; afPinEl.style.display = "none"; afHoverEl.style.display = "none"; }
   }
   function resize() { map.resize(); }
   // 3D sits one zoom level CLOSER than the 2D map (pitch pulls the view back), so the default
@@ -604,7 +707,7 @@ export function createTactical3d({ container, deps }) {
     window.removeEventListener("mouseup", onUp);
     try { map.removeControl(overlay); } catch { /* gone */ }
     map.remove();
-    for (const el of [overlayEl, afTooltipEl, lockEl, loadingEl, hintEl]) el.remove();
+    for (const el of [overlayEl, afPinEl, afHoverEl, lockEl, loadingEl, hintEl]) el.remove();
   }
 
   const hideLoading = () => { loadingEl.style.display = "none"; };

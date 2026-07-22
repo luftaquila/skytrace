@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 // Regenerate web/src/airfields.js from OurAirports open data (public domain).
 //
-//   node scripts/build-airfields.mjs [path/to/airports.csv]
+//   node scripts/build-airfields.mjs [path/to/airports.csv] [path/to/runways.csv]
 //
-// With no argument the current dataset is fetched from OurAirports. Keeps only
-// KR large/medium/small airports, drops rows outside the Korea bounding box
-// (removes mislabeled foreign coordinates), and deduplicates near-identical
-// points, keeping the entry with the richest identifier.
+// With no arguments the current datasets are fetched from OurAirports. The
+// generated overlay contains every open large/medium/small airport worldwide,
+// its official ICAO/IATA codes, map coordinate, and every usable published open
+// runway entry.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SOURCE_URL = "https://davidmegginson.github.io/ourairports-data/airports.csv";
+const AIRPORTS_SOURCE_URL = "https://davidmegginson.github.io/ourairports-data/airports.csv";
+const RUNWAYS_SOURCE_URL = "https://davidmegginson.github.io/ourairports-data/runways.csv";
 const OUT = path.resolve(fileURLToPath(new URL("../web/src/airfields.js", import.meta.url)));
 const KEEP_TYPES = new Set(["large_airport", "medium_airport", "small_airport"]);
 
@@ -34,91 +35,83 @@ function parseCsv(text) {
   return rows;
 }
 
-// South Korea bounding box (incl. Jeju, Ulleung, offshore).
-const inKorea = (lat, lon) => lat >= 32.8 && lat <= 38.9 && lon >= 124.0 && lon <= 132.2;
-const isRealIcao = (s) => /^RK[A-Z]{2}$/.test(s || "");
-
-async function loadCsv() {
-  const arg = process.argv[2];
-  if (arg) return fs.readFileSync(arg, "utf8");
-  const res = await fetch(SOURCE_URL);
-  if (!res.ok) throw new Error(`fetch ${SOURCE_URL} -> ${res.status}`);
-  return res.text();
+async function loadCsv(file, url) {
+  if (file) return fs.readFileSync(file, "utf8");
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`fetch ${url} -> ${response.status}`);
+  return response.text();
 }
 
-const rows = parseCsv(await loadCsv());
-const idx = Object.fromEntries(rows[0].map((h, i) => [h, i]));
+const [airportText, runwayText] = await Promise.all([
+  loadCsv(process.argv[2], AIRPORTS_SOURCE_URL),
+  loadCsv(process.argv[3], RUNWAYS_SOURCE_URL),
+]);
+const airportRows = parseCsv(airportText);
+const runwayRows = parseCsv(runwayText);
+const airportIndex = Object.fromEntries(airportRows[0].map((heading, index) => [heading, index]));
+const runwayIndex = Object.fromEntries(runwayRows[0].map((heading, index) => [heading, index]));
 
-const parsed = [];
-for (let r = 1; r < rows.length; r += 1) {
-  const row = rows[r];
-  if (!row || row.length < rows[0].length) continue;
-  if (row[idx.iso_country] !== "KR") continue;
-  if (!KEEP_TYPES.has(row[idx.type])) continue;
-  const lat = Number.parseFloat(row[idx.latitude_deg]);
-  const lon = Number.parseFloat(row[idx.longitude_deg]);
-  if (!Number.isFinite(lat) || !Number.isFinite(lon) || !inKorea(lat, lon)) continue;
-  const ident = row[idx.ident];
-  const icaoRaw = row[idx.icao_code] || ident;
-  const icao = isRealIcao(icaoRaw) ? icaoRaw : null;
-  const iata = row[idx.iata_code] || null;
-  parsed.push({
-    ident,
+const runwaysByAirport = new Map();
+for (let r = 1; r < runwayRows.length; r += 1) {
+  const row = runwayRows[r];
+  if (!row || row.length < runwayRows[0].length || row[runwayIndex.closed] === "1") continue;
+  const airportIdent = row[runwayIndex.airport_ident];
+  if (!airportIdent) continue;
+  const ends = [row[runwayIndex.le_ident], row[runwayIndex.he_ident]].filter(Boolean).join("/") || null;
+  const lengthFeet = Number.parseFloat(row[runwayIndex.length_ft]);
+  const lengthM = Number.isFinite(lengthFeet) ? Math.round(lengthFeet * 0.3048) : null;
+  if (!ends && lengthM == null) continue;
+  const runways = runwaysByAirport.get(airportIdent) || [];
+  runways.push({ ends, lengthM });
+  runwaysByAirport.set(airportIdent, runways);
+}
+
+const airfields = [];
+for (let r = 1; r < airportRows.length; r += 1) {
+  const row = airportRows[r];
+  if (!row || row.length < airportRows[0].length || !KEEP_TYPES.has(row[airportIndex.type])) continue;
+  const lat = Number.parseFloat(row[airportIndex.latitude_deg]);
+  const lon = Number.parseFloat(row[airportIndex.longitude_deg]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
+  const ident = row[airportIndex.ident];
+  const icao = row[airportIndex.icao_code] || null;
+  const iata = row[airportIndex.iata_code] || null;
+  const runways = runwaysByAirport.get(ident) || [];
+  runways.sort((a, b) => (b.lengthM ?? -1) - (a.lengthM ?? -1) || (a.ends || "").localeCompare(b.ends || ""));
+  airfields.push({
+    code: iata || icao || ident,
     icao,
     iata,
-    code: iata || icao || ident,
-    name: row[idx.name],
-    kind: row[idx.type].replace("_airport", ""),
-    city: row[idx.municipality] || null,
+    name: row[airportIndex.name],
+    kind: row[airportIndex.type].replace("_airport", ""),
+    city: row[airportIndex.municipality] || null,
     lat: Math.round(lat * 1e5) / 1e5,
     lon: Math.round(lon * 1e5) / 1e5,
+    runways,
   });
 }
 
-// Dedup near-identical points (~500 m), keeping the richest identifier.
-const rank = (a) => (a.iata ? 3 : 0) + (a.icao ? 2 : 0) + ({ large: 1, medium: 1, small: 0 }[a.kind] || 0);
-const kept = [];
-for (const a of [...parsed].sort((x, y) => rank(y) - rank(x))) {
-  if (kept.some((b) => Math.abs(b.lat - a.lat) < 0.005 && Math.abs(b.lon - a.lon) < 0.005)) continue;
-  kept.push(a);
-}
+const kindOrder = { large: 0, medium: 1, small: 2 };
+airfields.sort((a, b) => (kindOrder[a.kind] - kindOrder[b.kind]) || a.code.localeCompare(b.code));
 
-const order = { large: 0, medium: 1, small: 2 };
-kept.sort((a, b) => (order[a.kind] - order[b.kind]) || a.code.localeCompare(b.code));
-
-const lines = kept.map((a) => {
-  const o = { code: a.code, icao: a.icao, iata: a.iata, name: a.name, kind: a.kind, city: a.city, lat: a.lat, lon: a.lon };
-  return "  " + JSON.stringify(o).replace(/"([a-zA-Z]+)":/g, "$1: ").replace(/,(\S)/g, ", $1");
+const lines = airfields.map((airfield) => {
+  // Compact tuples keep the checked-in global dataset and its browser payload
+  // substantially smaller than repeating object keys for every airport/runway.
+  const tuple = [
+    airfield.code,
+    airfield.icao,
+    airfield.iata,
+    airfield.name,
+    airfield.kind[0],
+    airfield.city,
+    airfield.lat,
+    airfield.lon,
+    airfield.runways.map((runway) => [runway.ends, runway.lengthM]),
+  ];
+  return `  ${JSON.stringify(tuple)}`;
 });
 
-const out = `// South Korean airfields — location and codes for the map reference overlay.
-// Source: OurAirports open data (public domain), filtered to iso_country=KR,
-// types large/medium/small_airport, cleaned to the Korea bounding box and
-// deduplicated by proximity. \`icao\`/\`iata\` are null when no official code
-// exists (military helipads, emergency strips); such fields have minor=true.
-// Regenerate with scripts/build-airfields.mjs if the source data changes.
-
-/**
- * @typedef {Object} Airfield
- * @property {string} code   Best display code: IATA, else ICAO, else raw ident.
- * @property {?string} icao  Official ICAO code (RKxx) or null.
- * @property {?string} iata  Official IATA code or null.
- * @property {string} name
- * @property {"large"|"medium"|"small"} kind
- * @property {?string} city
- * @property {number} lat
- * @property {number} lon
- */
-
-/** @type {Airfield[]} */
-export const AIRFIELDS = [
-${lines.join(",\n")},
-];
-
-/** True for fields with no official ICAO/IATA code (minor military/emergency strips). */
-export const isMinorAirfield = (a) => !a.icao && !a.iata;
-`;
+const out = `// Worldwide airports and runways for the map reference overlay.\n// Source: OurAirports open data (public domain), filtered to open\n// large/medium/small airports. Regenerate with scripts/build-airfields.mjs.\n\n/**\n * @typedef {Object} Runway\n * @property {?string} ends Reciprocal runway identifiers, for example 16L/34R.\n * @property {?number} lengthM Published runway length, rounded to metres.\n */\n\n/**\n * @typedef {Object} Airfield\n * @property {string} code Best display code: IATA, else ICAO, else OurAirports ident.\n * @property {?string} icao Official ICAO code or null.\n * @property {?string} iata Official IATA code or null.\n * @property {string} name\n * @property {"large"|"medium"|"small"} kind\n * @property {?string} city\n * @property {number} lat\n * @property {number} lon\n * @property {Runway[]} runways All published open runways.\n */\n\nconst DATA = [\n${lines.join(",\n")}\n];\n\nconst KINDS = { l: "large", m: "medium", s: "small" };\n\n/** @type {Airfield[]} */\nexport const AIRFIELDS = DATA.map(([code, icao, iata, name, kind, city, lat, lon, runways]) => ({\n  code,\n  icao,\n  iata,\n  name,\n  kind: KINDS[kind],\n  city,\n  lat,\n  lon,\n  runways: runways.map(([ends, lengthM]) => ({ ends, lengthM })),\n}));\n\n/** True for fields with no official ICAO/IATA code. */\nexport const isMinorAirfield = (airfield) => !airfield.icao && !airfield.iata;\n`;
 
 fs.writeFileSync(OUT, out);
-const byKind = kept.reduce((m, a) => ((m[a.kind] = (m[a.kind] || 0) + 1), m), {});
-console.log(`wrote ${OUT}: ${kept.length} airfields`, byKind);
+console.log(`Wrote ${airfields.length} airports and ${airfields.reduce((sum, airfield) => sum + airfield.runways.length, 0)} runways to ${OUT}`);

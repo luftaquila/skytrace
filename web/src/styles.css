@@ -814,31 +814,32 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
-.airfield-tt .af-tt-rwys {
+.airfield-tt .af-tt-runways {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   margin-top: 4px;
   padding-top: 4px;
   border-top: 1px solid rgb(238 245 244 / 0.12);
+  font-variant-numeric: tabular-nums;
 }
 
-.airfield-tt .af-tt-rw {
+.airfield-tt .af-tt-runway-title {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.airfield-tt .af-tt-runway {
   display: flex;
   justify-content: space-between;
-  gap: 14px;
-  font: 600 11px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  color: #9fe8df;
+  gap: 18px;
 }
 
-.airfield-tt .af-tt-rw b {
-  color: var(--text);
-  font-weight: 800;
-}
-
-.airfield-tt .af-tt-rw span {
+.airfield-tt .af-tt-runway-empty {
   color: var(--muted);
-  font-variant-numeric: tabular-nums;
 }
 
 .history-panel {
@@ -1494,8 +1495,10 @@ select {
 
 .t3d-block {
   position: absolute;
-  left: 14px;
-  top: 10px;
+  /* Sit clearly to the upper-right of the anchor so the block never lands on top of the aircraft
+     mesh (which is centred on the anchor and grows with zoom) at any camera pitch. */
+  left: 40px;
+  top: -12px;
   pointer-events: auto; /* interactive so its pin is clickable and hovering keeps it up */
 }
 
