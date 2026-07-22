@@ -19,3 +19,20 @@ export function currentTrackRun(points, gapMs = TRACK_BREAK_MS) {
 
   return positioned.slice(start);
 }
+
+function pointKey(point) {
+  if (Number.isSafeInteger(point?.id)) return `id:${point.id}`;
+  return [point?.positionAt, point?.lat, point?.lon, point?.altBaro, point?.altGeom].join("|");
+}
+
+export function mergeTrackPoints(current, incoming, historic = false) {
+  const merged = new Map();
+  for (const point of [...(current || []), ...(incoming || [])]) {
+    if (hasPosition(point)) merged.set(pointKey(point), point);
+  }
+  const sorted = [...merged.values()].sort((a, b) => {
+    const timeDelta = Date.parse(a.positionAt) - Date.parse(b.positionAt);
+    return timeDelta || (Number(a.id) || 0) - (Number(b.id) || 0);
+  });
+  return historic ? sorted : currentTrackRun(sorted);
+}

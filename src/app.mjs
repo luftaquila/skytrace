@@ -11,6 +11,7 @@ import {
   trackToKml,
 } from "./ingest.mjs";
 import { sanitizeReceiverId } from "./normalize-readsb.mjs";
+import { queryAircraftTracks } from "./track-query.mjs";
 
 function bearerToken(req) {
   const header = req.get("authorization") || "";
@@ -41,6 +42,22 @@ export function createApp({ db, config, sseHub }) {
 
   app.get("/api/events", (req, res) => {
     sseHub.add(req, res);
+  });
+
+  app.post("/api/aircraft/tracks", (req, res) => {
+    const requests = Array.isArray(req.body?.aircraft) ? req.body.aircraft : [];
+    if (requests.length > 250) {
+      res.status(400).json({ ok: false, error: "too many aircraft; maximum is 250" });
+      return;
+    }
+    res.json(queryAircraftTracks(db, requests, {
+      from: parseDateQuery(req.body?.from),
+      to: parseDateQuery(req.body?.to),
+      historic: req.body?.historic === true,
+      limit: config.maxTrackQueryPoints,
+      maxAircraft: 250,
+      now: new Date().toISOString(),
+    }));
   });
 
   app.post("/api/ingest/readsb", asyncRoute(async (req, res) => {

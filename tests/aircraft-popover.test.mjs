@@ -25,14 +25,22 @@ test("aircraft popovers place update age immediately before the pin", () => {
   assert.match(css, /\.tt-top-actions \.tt-age\s*\{[^}]*text-align:\s*right/s);
 });
 
-test("aircraft popovers expose historic trails as an opt-in setting", () => {
+test("historic and all-aircraft trails are display settings, not popover controls", () => {
   const source = between("function datablockHtml(", "function airfieldTooltip(");
+  const refresh = between("async function refreshAllAircraftTracks(", "async function refreshTrackRange(");
   assert.match(app, /historicTracks:\s*false/);
-  assert.match(source, /tt-historic-toggle/);
-  assert.match(source, />Historic<\/label>/);
-  assert.match(source, /selectedHex\.value === item\.hex \|\| pinned\.value\.has\(item\.hex\)/);
+  assert.match(app, /allAircraftTracks:\s*false/);
+  assert.doesNotMatch(source, /historic|tt-historic/i);
+  assert.match(app, /v-model="settings\.historicTracks"[^>]*\/> Historic/);
+  assert.match(app, /v-model="settings\.allAircraftTracks"[^>]*\/> All aircraft trails/);
   assert.match(tactical, /historicTracks \? allPoints : currentTrackRun\(allPoints\)/);
-  assert.match(tactical, /setHistoricTracks\(historic\.checked\)/);
+  assert.match(tactical, /deps\.getAllAircraftTracks\(\)/);
+  assert.doesNotMatch(tactical, /tt-historic-toggle|setHistoricTracks/);
+  assert.match(refresh, /if \(!settings\.value\.allAircraftTracks\)/);
+  assert.match(refresh, /index \+= 250/);
+  assert.match(refresh, /afterId: previousCursors\.get\(hex\) \?\? null/);
+  assert.match(refresh, /mergeTrackPoints\(current, track\?\.points \|\| \[\], settings\.value\.historicTracks\)/);
+  assert.match(refresh, /method: "POST"/);
 });
 
 test("Locate uses browser geolocation only when no aircraft is selected", () => {
@@ -52,4 +60,20 @@ test("the application has one 3D map and no Leaflet or view-switch path", () => 
   assert.doesNotMatch(app, /from "leaflet"|mapEl|view3dActive|setView3d|measureMode|baseLayers|coverageBands/);
   assert.doesNotMatch(css, /leaflet|aircraft-wrap|aircraft-icon|measure-hint/i);
   assert.doesNotMatch(tactical, /setCameraFromMap|getCameraForMap|flyToView/);
+});
+
+test("free wheel zoom follows the cursor while aircraft tracking keeps its orbit", () => {
+  const start = tactical.indexOf("function freeWheelCameraTarget(");
+  const end = tactical.indexOf("cv.addEventListener(\"wheel\"", start);
+  assert.notEqual(start, -1, "free wheel target helper must exist");
+  assert.notEqual(end, -1, "wheel listener must follow the target helper");
+  const source = tactical.slice(start, end);
+
+  assert.match(source, /new maplibregl\.Point\(e\.clientX - rect\.left, e\.clientY - rect\.top\)/);
+  assert.match(source, /map\.transform\.clone\(\)/);
+  assert.match(source, /isPointOnMapSurface\(around\)/);
+  assert.match(source, /handleMapControlsRollPitchBearingZoom\(deltas, tr\)/);
+  assert.match(source, /handleMapControlsPan\(deltas, tr, preZoomAroundLoc\)/);
+  assert.match(source, /if \(orbitAttached\)[\s\S]*center: \[sel\.lon, sel\.lat\]/);
+  assert.match(source, /freeWheelCameraTarget\(e, z, elevation\)/);
 });

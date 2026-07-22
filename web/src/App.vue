@@ -19,6 +19,7 @@ import {
   X,
 } from "@lucide/vue";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
+import { mergeTrackPoints } from "./track-runs.js";
 
 const SETTINGS_KEY = "skytrace.settings.v3";
 const DEFAULT_SETTINGS = {
@@ -37,6 +38,7 @@ const DEFAULT_SETTINGS = {
   terrainExaggeration: 2,
   terrainSatellite: true,
   historicTracks: false,
+  allAircraftTracks: false,
 };
 
 function loadSettings() {
@@ -64,6 +66,7 @@ const selectedTrack = ref([]);
 // selection. pinnedTracks caches each pinned hex's track points.
 const pinned = ref(new Set());
 const pinnedTracks = ref(new Map());
+const allTrackCache = ref(new Map());
 const search = ref("");
 const sortKey = ref("callsign");
 const tracklogOpen = ref(false);
@@ -124,6 +127,8 @@ let sseRetryTimer;
 let playbackTimer;
 let tac3d;
 let tac3dPromise;
+let allTrackCursors = new Map();
+let allTrackRequestVersion = 0;
 
 watch(settings, (value) => {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(value));
@@ -229,6 +234,30 @@ const LIST_LIMIT = 600;
 const filteredAircraft = computed(() =>
   sortAircraft(aircraft.value.filter(passesFilters), sortKey.value).slice(0, LIST_LIMIT),
 );
+
+// Unlike the capped sidebar list, this is the exact filtered aircraft set rendered by the 3D map.
+// It is also the request set for the bulk trail API, so hidden targets never consume bandwidth.
+const trailAircraftHexes = computed(() => aircraft.value
+  .filter((item) => item.lat != null && item.lon != null && passesFilters(item) && !isDropped(item))
+  .map((item) => item.hex)
+  .sort());
+const trailFilterKey = computed(() => [
+  searchQuery.value,
+  settings.value.showGround,
+  settings.value.showNonIcao,
+  settings.value.source,
+  settings.value.altMin,
+  settings.value.altMax,
+  settings.value.coastDrop,
+].join("|"));
+
+watch(() => settings.value.allAircraftTracks, (enabled) => {
+  if (enabled) refreshAllAircraftTracks({ reset: true });
+  else clearAllTrackCache();
+});
+watch(() => settings.value.historicTracks, () => refreshAllAircraftTracks({ reset: true }));
+watch(trailFilterKey, () => refreshAllAircraftTracks());
+watch(trackHours, () => refreshTrackRange());
 
 function sortAircraft(rows, key) {
   const arr = [...rows];
@@ -619,16 +648,8 @@ function pinIcon(hex) {
 
 // Tactical data block beside each 3D target: callsign + pin over the shared status line.
 function datablockHtml(item) {
-  const showsTrack = selectedHex.value === item.hex || pinned.value.has(item.hex);
-  const historic = showsTrack
-    ? `<label class="tt-historic" title="Show disconnected previous flights"><input class="tt-historic-toggle" type="checkbox"${settings.value.historicTracks ? " checked" : ""} />Historic</label>`
-    : "";
   return `<span class="t3d-datablock"><span class="db-top"><b>${escapeHtml(formatFlight(item))}</b><span class="tt-top-actions"><span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>${pinIcon(item.hex)}</span></span>`
-    + `<span>${targetLine(item, true)}</span>${historic}</span>`;
-}
-
-function setHistoricTracks(enabled) {
-  settings.value.historicTracks = enabled;
+    + `<span>${targetLine(item, true)}</span></span>`;
 }
 
 function airfieldTooltip(field) {
@@ -793,10 +814,76 @@ function setPlaybackSpeed(speed) {
   setHistoryChartCursor();
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
+async function fetchJson(url, init = {}) {
+  const response = await fetch(url, { cache: "no-store", ...init });
   if (!response.ok) throw new Error(`${url} returned ${response.status}`);
   return response.json();
+}
+
+function clearAllTrackCache() {
+  allTrackRequestVersion += 1;
+  allTrackCursors = new Map();
+  if (allTrackCache.value.size) allTrackCache.value = new Map();
+  tac3d?.dataPass();
+}
+
+async function refreshAllAircraftTracks({ reset = false } = {}) {
+  if (!settings.value.allAircraftTracks) {
+    if (allTrackCache.value.size || allTrackCursors.size) clearAllTrackCache();
+    return;
+  }
+
+  const hexes = trailAircraftHexes.value;
+  if (!hexes.length) {
+    clearAllTrackCache();
+    return;
+  }
+
+  const requestVersion = ++allTrackRequestVersion;
+  const previousTracks = reset ? new Map() : allTrackCache.value;
+  const previousCursors = reset ? new Map() : allTrackCursors;
+  const to = new Date();
+  const from = new Date(to.getTime() - trackHours.value * 60 * 60 * 1000);
+
+  try {
+    const chunks = [];
+    for (let index = 0; index < hexes.length; index += 250) chunks.push(hexes.slice(index, index + 250));
+    const results = await Promise.all(chunks.map((chunk) => fetchJson("/api/aircraft/tracks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        aircraft: chunk.map((hex) => ({ hex, afterId: previousCursors.get(hex) ?? null })),
+        from: from.toISOString(),
+        to: to.toISOString(),
+        historic: settings.value.historicTracks,
+      }),
+    })));
+    if (requestVersion !== allTrackRequestVersion || !settings.value.allAircraftTracks) return;
+
+    const returned = new Map(results.flatMap((result) => result.tracks || []).map((track) => [track.hex, track]));
+    const nextTracks = new Map();
+    const nextCursors = new Map();
+    for (const hex of hexes) {
+      const track = returned.get(hex);
+      const current = reset ? [] : (previousTracks.get(hex) || []);
+      nextTracks.set(hex, mergeTrackPoints(current, track?.points || [], settings.value.historicTracks));
+      const cursor = track?.cursorId ?? previousCursors.get(hex);
+      if (cursor != null) nextCursors.set(hex, cursor);
+    }
+    allTrackCache.value = nextTracks;
+    allTrackCursors = nextCursors;
+    tac3d?.dataPass();
+  } catch (error) {
+    if (requestVersion === allTrackRequestVersion) console.error(error);
+  }
+}
+
+async function refreshTrackRange() {
+  await Promise.all([
+    selectedHex.value ? refreshTrack() : null,
+    refreshPinnedTracks(),
+    refreshAllAircraftTracks({ reset: true }),
+  ]);
 }
 
 async function refreshLive() {
@@ -817,8 +904,11 @@ async function refreshLive() {
     }, 0);
     lastUpdated.value = lastSeen ? new Date(lastSeen).toISOString() : null;
     status.value = "online";
-    if (selectedHex.value) await refreshTrack(false);
-    await refreshPinnedTracks();
+    await Promise.all([
+      selectedHex.value ? refreshTrack(false) : null,
+      refreshPinnedTracks(),
+      refreshAllAircraftTracks(),
+    ]);
   } catch (err) {
     status.value = "offline";
     console.error(err);
@@ -1013,8 +1103,8 @@ async function ensureTactical3d() {
         getSettings: () => settings.value,
         getPinned: () => pinned.value,
         getPinnedTracks: () => [...pinnedTracks.value].map(([hex, points]) => ({ hex, points })),
+        getAllAircraftTracks: () => [...allTrackCache.value].map(([hex, points]) => ({ hex, points })),
         togglePin,
-        setHistoricTracks,
         datablockHtml,
         airfieldTooltip,
         passesFilters,
@@ -1207,7 +1297,7 @@ onUnmounted(() => {
           <div class="history-panel">
             <label class="select-row">
               <span>History</span>
-              <select v-model.number="trackHours" @change="refreshTrack">
+              <select v-model.number="trackHours">
                 <option :value="1">1h</option>
                 <option :value="6">6h</option>
                 <option :value="24">24h</option>
@@ -1371,6 +1461,8 @@ onUnmounted(() => {
             <div class="toggle-row">
               <label><input v-model="settings.flightLevels" type="checkbox" /> Flight levels</label>
               <label><input v-model="settings.terrainSatellite" type="checkbox" /> Satellite terrain</label>
+              <label><input v-model="settings.historicTracks" type="checkbox" /> Historic</label>
+              <label><input v-model="settings.allAircraftTracks" type="checkbox" /> All aircraft trails</label>
             </div>
           </section>
         </div>

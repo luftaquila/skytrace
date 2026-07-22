@@ -447,9 +447,31 @@ export function createTactical3d({ container, deps }) {
   cv.addEventListener("mousedown", onDown);
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
-  // Zoom around the aircraft while attached, otherwise around the current view center. Repeated
-  // wheel events retarget one short camera tween. Native cursor-anchored globe zoom is intentionally
-  // disabled because it can rotate/teleport the center to a distant surface point at high pitch.
+  // Ask MapLibre's projection-specific camera helper for the same cursor-anchored target its native
+  // wheel handler would produce. In globe mode this includes its horizon/pole heuristics, avoiding
+  // the distant-center jumps caused by calling setLocationAtPoint directly at a steep pitch.
+  function freeWheelCameraTarget(e, zoom, elevation) {
+    const rect = cv.getBoundingClientRect();
+    let around = new maplibregl.Point(e.clientX - rect.left, e.clientY - rect.top);
+    const tr = map.transform.clone();
+    if (map.cameraHelper.useGlobeControls && !tr.isPointOnMapSurface(around)) around = tr.centerPoint;
+    const preZoomAroundLoc = tr.screenPointToLocation(around);
+    const deltas = {
+      panDelta: undefined,
+      zoomDelta: zoom - tr.zoom,
+      bearingDelta: undefined,
+      pitchDelta: undefined,
+      rollDelta: undefined,
+      around,
+    };
+    map.cameraHelper.handleMapControlsRollPitchBearingZoom(deltas, tr);
+    map.cameraHelper.handleMapControlsPan(deltas, tr, preZoomAroundLoc);
+    tr.setElevation(elevation);
+    return { center: tr.center, zoom: tr.zoom, elevation };
+  }
+
+  // Zoom around the aircraft while attached, otherwise towards the mouse cursor. Repeated wheel
+  // events retarget one short camera tween, so zoom stays responsive without snapping.
   const onWheel = (e) => {
     e.preventDefault();
     const step = (e.deltaMode === 1 ? e.deltaY * 0.04 : e.deltaY * 0.0018);
@@ -473,7 +495,7 @@ export function createTactical3d({ container, deps }) {
         })
         : (map.transform.elevation || 0);
       animateCamera(
-        { zoom: z, elevation },
+        freeWheelCameraTarget(e, z, elevation),
         {
           duration: 150,
           easing: EASE_OUT,
@@ -575,14 +597,6 @@ export function createTactical3d({ container, deps }) {
     const pin = e.target.closest(".tt-pin");
     const hex = pin?.closest(".t3d-block")?.dataset.hex;
     if (hex) { e.stopPropagation(); deps.togglePin(hex); buildLayers(); syncBlocks(); }
-  });
-  overlayEl.addEventListener("change", (e) => {
-    const historic = e.target.closest(".tt-historic-toggle");
-    if (!historic) return;
-    e.stopPropagation();
-    deps.setHistoricTracks(historic.checked);
-    buildLayers();
-    syncBlocks();
   });
   overlayEl.addEventListener("wheel", (e) => { e.preventDefault(); map.getCanvas().dispatchEvent(new WheelEvent("wheel", { deltaY: e.deltaY, deltaX: e.deltaX, clientX: e.clientX, clientY: e.clientY, cancelable: true })); }, { passive: false });
 
@@ -704,6 +718,7 @@ export function createTactical3d({ container, deps }) {
     const selTrack = deps.getSelectedTrack();
     if (selHex && selTrack.length) { addTrail(selHex, selTrack); seen.add(selHex); }
     for (const { hex, points } of deps.getPinnedTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(hex, points); }
+    for (const { hex, points } of deps.getAllAircraftTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(hex, points); }
 
     const ghost = deps.getPlaybackGhost();
     const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * ALT_EXAGG, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
