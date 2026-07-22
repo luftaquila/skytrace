@@ -14,6 +14,7 @@ import { MapboxOverlay } from "@deck.gl/mapbox";
 import { ScenegraphLayer, SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
+import { createAircraftLayer } from "./aircraft-layer.js";
 
 const FT_TO_M = 0.3048;
 const HOME = { lon: 127.33113, lat: 36.36599 }; // Yuseong IC
@@ -319,7 +320,15 @@ export function createTactical3d({ container, deps }) {
   // forgiving (on top of the invisible hit disc) — no pixel-perfect aim on the small model.
   const overlay = new MapboxOverlay({ interleaved: true, pickingRadius: 16, layers: [] });
   map.addControl(overlay);
-  if (typeof window !== "undefined" && window.__T3D_DEBUG) { window.__t3dMap = map; window.__t3dOverlay = overlay; window.__WMV = WebMercatorViewport; }
+  // Aircraft are drawn by a MapLibre custom WebGL layer (NOT deck) so they follow the map's real
+  // camera — rotating & tilting with the globe, incl. pitch > 90° (bottom view). buildLayers keeps
+  // `aircraftRenderList` in sync; the layer just reads it each frame.
+  let aircraftRenderList = [];
+  let aircraftSegments = []; // sticks + trails + conflict links, as {a,b,color,widthPx}
+  let aircraftDots = [];     // stick ground feet, as {p,color,sizePx}
+  let aircraftCoverage = null; // coverage dome mesh: {positions, anchor, altExagg}
+  const aircraftLayer = createAircraftLayer({ getData: () => aircraftRenderList, getSegments: () => aircraftSegments, getDots: () => aircraftDots, getCoverage: () => aircraftCoverage });
+  if (typeof window !== "undefined" && window.__T3D_DEBUG) { window.__t3dMap = map; window.__t3dOverlay = overlay; window.__WMV = WebMercatorViewport; window.__t3dAircraftLayer = aircraftLayer; }
 
   // --- DOM overlay: data-block popovers + pins (exact old styling), airfield popover ------
   const overlayEl = document.createElement("div");
@@ -457,15 +466,28 @@ export function createTactical3d({ container, deps }) {
     // Aircraft grouped by size class so per-category size differences survive the pixel clamp
     // (constant on-screen size per class). One solid glTF model per target in its TRUE altitude
     // colour, with a per-fragment fresnel rim self-glow (GlowScenegraphLayer) — no extra geometry.
-    const byCls = new Map();
-    for (const d of list) { const g = byCls.get(d.cls) || []; g.push(d); byCls.set(d.cls, g); }
-    const aircraftLayers = [...byCls.entries()].map(([cls, data]) => new GlowScenegraphLayer({
-      id: `aircraft-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-      getColor: (d) => (d.spi && identBlinkOn) ? [255, 215, 0, 255] : conflictHexes.has(d.hex) ? [251, 113, 133, 255] : [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255],
-      updateTriggers: { getColor: `${identBlinkOn}|${[...conflictHexes].sort().join(",")}` },
-      sizeScale: 185, sizeMinPixels: Math.round(48 * cls), sizeMaxPixels: Math.round(68 * cls), _lighting: "pbr",
-      pickable: false, parameters: { depthCompare: "always" },
-    }));
+    // Aircraft render list for the MapLibre custom WebGL layer (drawn with the map's real camera,
+    // so it rotates/tilts with the globe incl. pitch > 90°). Colour resolves exactly as the old deck
+    // getColor did: IDENT gold flash > conflict pink > true altitude colour (coasting = 150 alpha).
+    aircraftRenderList = list.map((d) => {
+      const gold = d.spi && identBlinkOn;
+      const conflict = conflictHexes.has(d.hex);
+      const cls = d.cls < 0.95 ? "small" : d.cls < 1.1 ? "medium" : "large";
+      const [r, g, b] = gold ? [255, 215, 0] : conflict ? [251, 113, 133] : [d.rgb.r, d.rgb.g, d.rgb.b];
+      return { lon: d.lon, lat: d.lat, z: d.z, r, g, b, a: d.coasting ? 150 : 255, pitch: d.orientation[0], yaw: d.orientation[1], roll: d.orientation[2], cls, clsMul: d.cls };
+    });
+    // Sticks (aircraft→ground), altitude-gradient trails, and conflict links as line segments; the
+    // stick ground feet as dots — all drawn by the custom layer (widths/colours match the old deck).
+    const segs = [];
+    for (const s of sticks) segs.push({ a: s.source, b: s.target, color: s.color, widthPx: 1.6 });
+    for (const t of trails) for (let i = 0; i + 1 < t.path.length; i += 1) segs.push({ a: t.path[i], b: t.path[i + 1], color: [t.color[0], t.color[1], t.color[2], 255], widthPx: 2.1 });
+    for (const c of conflictLines) segs.push({ a: c.source, b: c.target, color: [251, 113, 133, 235], widthPx: 2.6 });
+    aircraftSegments = segs;
+    aircraftDots = sticks.map((s) => ({ p: s.target, color: s.color, sizePx: 3 }));
+    aircraftCoverage = covMesh ? { positions: covMesh.attributes.positions.value, anchor: [HOME.lon, HOME.lat], altExagg: ALT_EXAGG } : null;
+    // Playback ghost (a dim, semi-transparent aircraft at the replayed position).
+    for (const g of ghostData) aircraftRenderList.push({ lon: g.lon, lat: g.lat, z: g.z, r: g.rgb.r, g: g.rgb.g, b: g.rgb.b, a: 150, pitch: g.orientation[0], yaw: g.orientation[1], roll: g.orientation[2], cls: "medium", clsMul: 1 });
+    if (ready) map.triggerRepaint();
 
     const covMat = { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] };
     const layers = [
@@ -494,15 +516,13 @@ export function createTactical3d({ container, deps }) {
       new ScatterplotLayer({ id: "ground-dots", data: sticks, getPosition: (d) => d.target, radiusUnits: "pixels", getRadius: 3, radiusMinPixels: 2.5, radiusMaxPixels: 4, filled: true, stroked: false, getFillColor: (d) => d.color, parameters: { depthCompare: "always" } }),
       // Collision/proximity alert link between each conflicting pair (red, over everything).
       conflictLines.length && new LineLayer({ id: "conflicts", data: conflictLines, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: [251, 113, 133, 235], widthUnits: "pixels", getWidth: 2.6, widthMinPixels: 2, parameters: { depthCompare: "always" } }),
-      ...aircraftLayers,
       ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 150, sizeMinPixels: 38, sizeMaxPixels: 54, parameters: { depthCompare: "always" } }),
-      // Invisible, generous click/hover target (like the old hit sphere): a constant ~80px disc
-      // per aircraft — bigger than the model — so selecting never needs pixel-perfect aim.
-      new ScatterplotLayer({
-        id: "hit", data: list, getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 40, radiusMinPixels: 40, radiusMaxPixels: 40,
-        filled: true, stroked: false, getFillColor: [0, 0, 0, 0], pickable: true, onHover: onAircraftHover, parameters: { depthCompare: "always" },
-      }),
-    ].filter(Boolean);
+    ].filter(Boolean)
+      // ALL of these deck object layers freeze on screen in globe (deck's GlobeView has no bearing/
+      // pitch — official limitation), so they are drawn by the MapLibre custom WebGL layer instead
+      // (aircraft, sticks, trails, conflict links, ground dots, coverage dome). Picking/hover is a CPU
+      // projection (pickAircraftAt). The deck overlay renders nothing while in globe.
+      .filter((l) => !["trails", "sticks", "ground-dots", "conflicts", "coverage", "coverage-depth", "hit", "ghost"].includes(l.id));
     overlay.setProps({ layers });
     syncBlocks();
   }
@@ -578,15 +598,12 @@ export function createTactical3d({ container, deps }) {
     return cachedCoverageMesh;
   }
 
-  // --- HTML data blocks (pinned / selected / hovered), positioned via the deck viewport ---
+  // --- HTML data blocks (pinned / selected / hovered) — positioned with the SAME map matrix the
+  // custom aircraft layer draws with, so they track the aircraft in globe (rotate/tilt/pitch>90).
+  // The old deck-viewport project froze in globe. Returns null when behind the camera (cw<=0).
   function project(lon, lat, z) {
-    try {
-      // getViewports() asserts if deck isn't sized/ready yet (early renders) — treat as "not placeable".
-      const vp = overlay._deck?.getViewports?.()[0];
-      if (!vp) return null;
-      const p = vp.project([lon, lat, z]);
-      return p && Number.isFinite(p[0]) ? p : null;
-    } catch { return null; }
+    const p = aircraftLayer.project(lon, lat, z);
+    return p && Number.isFinite(p[0]) && p[2] > 0 ? p : null;
   }
   function syncBlocks() {
     if (!ready) return;
@@ -627,9 +644,18 @@ export function createTactical3d({ container, deps }) {
   }
 
   // --- Interaction ------------------------------------------------------------------------
-  function onAircraftHover(info) {
-    const hex = info.object?.hex || null;
-    if (hex !== hoverHex) { hoverHex = hex; deps.onHover(hex); map.getCanvas().style.cursor = hex ? "pointer" : ""; scheduleActive(hex); }
+  // Pick the nearest aircraft to a screen point using the SAME globe-correct projection the models
+  // are drawn with (deck's pickObject froze in globe). ~40px tolerance, like the old invisible disc.
+  function pickAircraftAt(x, y, radius = 40) {
+    let best = null;
+    let bestD = radius;
+    for (const d of lastList) {
+      const p = project(d.lon, d.lat, d.z);
+      if (!p) continue;
+      const dist = Math.hypot(p[0] - x, p[1] - y);
+      if (dist < bestD) { bestD = dist; best = d; }
+    }
+    return best;
   }
   const airfieldByKey = new Map();
   let afPinned = null; // airfield popover pinned by a click; stays until a click elsewhere
@@ -657,12 +683,19 @@ export function createTactical3d({ container, deps }) {
     if (dragMoved) { dragMoved = false; return; } // ignore the click that trails a rotate/pan drag
     // Aircraft: pick synchronously off MapLibre's (immediate) click instead of deck's onClick,
     // which waits ~300ms to disambiguate single- vs double-click — that lag was the select delay.
-    const hit = overlay._deck?.pickObject?.({ x: e.point.x, y: e.point.y, radius: 18, layerIds: ["hit"] });
-    if (hit?.object?.hex) { deps.onSelect(hit.object.hex); return; }
+    const hit = pickAircraftAt(e.point.x, e.point.y, 40);
+    if (hit) { deps.onSelect(hit.hex); return; }
     const field = airfieldByKey.get(map.queryRenderedFeatures(e.point, { layers: AF_LAYERS })[0]?.properties?.key);
     if (field) { showPinned(field); return; } // clicking an airfield pins its popover
     if (afPinned) clearPinned(); // click elsewhere clears it
     deps.onMapClick();
+  });
+  // Aircraft hover (cursor + hovered highlight) via the same CPU pick — deck's onHover froze in globe.
+  map.on("mousemove", (e) => {
+    const hex = pickAircraftAt(e.point.x, e.point.y, 40)?.hex || null;
+    if (hex !== hoverHex) { hoverHex = hex; deps.onHover(hex); scheduleActive(hex); }
+    if (hex) map.getCanvas().style.cursor = "pointer";
+    else if (!hoverAf) map.getCanvas().style.cursor = "";
   });
 
   // --- Native GeoJSON sources -------------------------------------------------------------
@@ -756,14 +789,29 @@ export function createTactical3d({ container, deps }) {
     // unproject runs off the globe → invalid latitude that setCenter rejects). Clamp the pitch used
     // for framing so the result stays finite — the camera can still tilt past 90° for a bottom view,
     // the aircraft-centring just eases off up there instead of crashing.
-    const pEff = Math.min(pitchDeg, 85);
+    const pEff = Math.min(pitchDeg, 85); // used only for the analytic seed (tan blows up past 90°)
     const b = (bearing * Math.PI) / 180, cosLat = Math.cos((lat * Math.PI) / 180) || 1;
     const w = map.getCanvas().clientWidth || 1, h = map.getCanvas().clientHeight || 1, cx = w / 2, cy = h / 2;
-    // Match the map's projection so the solve is correct in globe as well as mercator.
-    const VP = map.getProjection?.().type === "globe" ? GlobeViewport : WebMercatorViewport;
+    // Project the target through the MAP'S OWN matrix (deck's GlobeViewport ignores bearing/pitch, so
+    // the old solve was wrong in globe). Clone the transform, drop in each candidate centre, and read
+    // mainMatrix · getMatrixForModel — correct in globe AND at pitch > 90° (needed to frame a target
+    // for the bottom/look-up view).
+    const tf = map.transform.clone();
+    // Frame as if pitch ≤ 88: past ~90° "target at screen centre" is degenerate (the ground centre
+    // runs behind the camera). Solving at 88 gives a stable centre; the real higher pitch then just
+    // slides the target up the screen (still framed) for the look-up/bottom view.
+    tf.setBearing(bearing); tf.setPitch(Math.min(pitchDeg, 88)); tf.setZoom(zoom);
     const project = (c) => {
-      try { return new VP({ width: w, height: h, longitude: c[0], latitude: c[1], zoom, pitch: pEff, bearing }).project([lon, lat, z]); }
-      catch { return null; }
+      try {
+        tf.setCenter(new maplibregl.LngLat(c[0], Math.max(-85, Math.min(85, c[1]))));
+        const m = tf.getProjectionData({ overscaledTileID: null, applyGlobeMatrix: true }).mainMatrix;
+        const M = tf.getMatrixForModel([lon, lat], z); // target's local frame; its origin is column 3
+        const cw = m[3] * M[12] + m[7] * M[13] + m[11] * M[14] + m[15] * M[15];
+        if (!(cw > 0)) return null; // behind the camera
+        const cxp = m[0] * M[12] + m[4] * M[13] + m[8] * M[14] + m[12] * M[15];
+        const cyp = m[1] * M[12] + m[5] * M[13] + m[9] * M[14] + m[13] * M[15];
+        return [((cxp / cw) * 0.5 + 0.5) * w, (1 - ((cyp / cw) * 0.5 + 0.5)) * h];
+      } catch { return null; }
     };
     // Analytical seed: shift z*tan(pitch) metres in the look direction so the target starts on-screen.
     const d0 = z * Math.tan((pEff * Math.PI) / 180);
@@ -791,6 +839,11 @@ export function createTactical3d({ container, deps }) {
       center = [center[0] + dLng, center[1] + dLat];
       if (Math.abs(center[1] - lat) > 10 || Math.abs(center[0] - lon) > 10) break; // runaway guard
     }
+    // If the solve never brought the target near screen centre (steep/bottom pitch, where "target at
+    // centre" is degenerate), DON'T move — leave the camera put so the target stays where it is on
+    // screen (visible) instead of teleporting behind the camera on a bad far seed.
+    const cur = map.getCenter();
+    if (!Number.isFinite(bestOff) || bestOff > Math.min(w, h) * 0.5) return [cur.lng, cur.lat];
     return [best[0], Math.max(-85, Math.min(85, best[1]))]; // keep latitude valid for setCenter
   }
   const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3); // fast start, slow settle
@@ -845,6 +898,7 @@ export function createTactical3d({ container, deps }) {
     if (disposed || ready) return;
     ready = true;
     map.setTerrain({ source: "dem", exaggeration: exagg });
+    if (!map.getLayer(aircraftLayer.id)) map.addLayer(aircraftLayer);
     hideLoading();
     refreshSources();
     buildLayers();
