@@ -257,11 +257,11 @@ export function createTactical3d({ container, deps }) {
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6, "atmosphere-blend": 0 },
     },
   });
-  // MapLibre's globe camera omits center elevation from its vertical-perspective matrix. Patch that
-  // missing camera term once, before any terrain/camera operation, so terrain, coverage, trails and
-  // aircraft all orbit the same real 3D point at every zoom (including the globe transition range).
-  const globeCenterElevationInstalled = installGlobeCenterElevation(map.transform);
-  if (!globeCenterElevationInstalled) throw new Error("MapLibre globe center-elevation adapter could not be installed");
+  // MapLibre deliberately constructs Map with a temporary MercatorTransform and replaces it with a
+  // GlobeTransform while parsing the style. Installing against map.transform here would therefore
+  // fail and, more importantly, must never abort creation of the satellite/trail/coverage layers.
+  // Install after style.load, before the first terrain/camera operation.
+  let globeCenterElevationInstalled = false;
   // Swapped mouse drag (per request): LEFT-drag rotates & tilts, RIGHT-drag pans. MapLibre has no
   // button-swap option in this release, so drive both by hand off the canvas mouse events.
   map.dragPan.disable();
@@ -1002,7 +1002,16 @@ export function createTactical3d({ container, deps }) {
   // (which also waits on terrain/imagery tiles and can hang on a slow network — leaving the view
   // stuck on "LOADING TERRAIN"). Sources are declared by style.load, so setTerrain works here.
   map.on("style.load", () => {
-    if (disposed || ready) return;
+    if (disposed) return;
+    if (!globeCenterElevationInstalled) {
+      globeCenterElevationInstalled = installGlobeCenterElevation(map.transform);
+      if (!globeCenterElevationInstalled) {
+        // Degrade only the elevated orbit pivot. A MapLibre internals change must never blank the
+        // satellite map, aircraft, trails, or coverage volume again.
+        console.error("Skytrace globe center-elevation adapter unavailable; continuing with the standard globe camera");
+      }
+    }
+    if (ready) return;
     ready = true;
     map.setTerrain({ source: "dem", exaggeration: exagg });
     // setTerrain seeds center elevation from the DEM even with centerClampedToGround:false.
