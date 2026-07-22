@@ -1165,7 +1165,7 @@ export function createTactical3d({ container, deps }) {
     followingSelectionHex = selectedHex;
     setFollowActive(true); attachOrbit(z);
     animateCamera(
-      { center: [lon, lat], zoom: Math.max(map.getZoom(), zoom + 1, 10.5), elevation: z },
+      { center: [lon, lat], zoom: Math.max(map.getZoom(), 10.5), elevation: z },
       { duration: 900, easing: EASE_OUT, kind: "track-start", onComplete: followSelected },
     );
     return true;

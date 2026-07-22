@@ -60,6 +60,8 @@ test("Locate toggles tracking without changing bearing or pitch", () => {
   assert.match(aircraftBranch, /return true/);
   assert.match(aircraftBranch, /return false/);
   assert.match(aircraftBranch, /\(altFt \?\? 0\)/);
+  assert.match(aircraftBranch, /zoom: Math\.max\(map\.getZoom\(\), 10\.5\)/);
+  assert.doesNotMatch(aircraftBranch, /\bzoom\s*\+/);
   assert.doesNotMatch(aircraftBranch, /pitch\s*:|bearing\s*:/);
 });
 
