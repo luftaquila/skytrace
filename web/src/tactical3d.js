@@ -14,6 +14,7 @@ import { ScenegraphLayer, SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 import { createAircraftLayer } from "./aircraft-layer.js";
+import { freeViewElevationForZoom } from "./camera-grounding.js";
 import { installGlobeCenterElevation } from "./globe-center-elevation.js";
 
 const FT_TO_M = 0.3048;
@@ -283,6 +284,7 @@ export function createTactical3d({ container, deps }) {
   let orbitAttached = false; // rotate/zoom re-centre on the selected aircraft ONLY while attached; a
   // free pan (right-drag) detaches so rotate/zoom then pivot on the current view, not teleport back.
   let cameraAnimation = null;
+  let freeGrounding = null; // released elevated pivot, lowered only while the user zooms in
 
   const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3);
   const EASE_IN_OUT = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
@@ -374,19 +376,26 @@ export function createTactical3d({ container, deps }) {
     orbitZ = sel.z;
     applyCameraFrame({ center: [sel.lon, sel.lat], elevation: sel.z });
   }
+  function beginFreeGrounding() {
+    const elevation = Math.max(0, map.transform.elevation || 0);
+    if (!freeGrounding && elevation >= 0.5) {
+      freeGrounding = { anchorElevation: elevation, anchorZoom: map.getZoom() };
+    }
+  }
   function clearOrbit() {
     const hadOrbit = orbitAttached || orbitZ !== 0 || ["focus", "follow", "locate-aircraft", "wheel-orbit"].includes(cameraAnimation?.kind);
     followActive = false;
     if (!hadOrbit) return;
     cancelCameraAnimation();
     map.stop();
+    beginFreeGrounding();
     orbitAttached = false;
     orbitZ = 0;
     // Deliberately preserve center, zoom, bearing, pitch AND elevation. The elevated target pivot
     // simply becomes the free-view pivot. Any attempt to convert it to a ground pivot changes the
     // globe camera matrix and visibly teleports the view to the aircraft's ground projection.
   }
-  function attachOrbit(z) { orbitAttached = true; orbitZ = z; } // orbit → aircraft-centred zoom
+  function attachOrbit(z) { freeGrounding = null; orbitAttached = true; orbitZ = z; } // orbit → aircraft-centred zoom
   let identBlinkOn = false; // toggled by a timer while any aircraft squawks IDENT (gold body flash)
   let identBlinkTimer = 0;
   const onDown = (e) => {
@@ -399,6 +408,7 @@ export function createTactical3d({ container, deps }) {
       // A free pan intentionally detaches tracking. Rotation does not: it keeps orbiting and
       // following the selected aircraft while only changing bearing/pitch.
       followActive = false;
+      beginFreeGrounding();
       orbitAttached = false;
       orbitZ = 0;
       drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
@@ -445,7 +455,25 @@ export function createTactical3d({ container, deps }) {
       orbitZ = sel.z;
       animateCamera({ center: [sel.lon, sel.lat], zoom: z, elevation: sel.z }, { duration: 150, easing: EASE_OUT, kind: "wheel-orbit" });
     } else {
-      animateCamera({ zoom: z }, { duration: 150, easing: EASE_OUT, kind: "wheel-free" });
+      beginFreeGrounding();
+      const grounding = freeGrounding;
+      const elevation = grounding
+        ? freeViewElevationForZoom({
+          ...grounding,
+          currentElevation: map.transform.elevation || 0,
+          targetZoom: z,
+          maxZoom: map.getMaxZoom(),
+        })
+        : (map.transform.elevation || 0);
+      animateCamera(
+        { zoom: z, elevation },
+        {
+          duration: 150,
+          easing: EASE_OUT,
+          kind: "wheel-free",
+          onComplete: () => { if (elevation === 0 && freeGrounding === grounding) freeGrounding = null; },
+        },
+      );
     }
   };
   cv.addEventListener("wheel", onWheel, { passive: false });
@@ -965,6 +993,7 @@ export function createTactical3d({ container, deps }) {
   // isn't too far out. getCameraForMap inverts this so a 2D<->3D round-trip is stable.
   function setCameraFromMap(center, zoom) {
     cancelCameraAnimation();
+    freeGrounding = null;
     orbitAttached = false;
     orbitZ = 0;
     applyCameraFrame({ center: [center.lng ?? center.lon, center.lat], zoom: zoom + 1, pitch: 55, elevation: 0 });
@@ -1003,6 +1032,7 @@ export function createTactical3d({ container, deps }) {
   // Locate button: ease-out fly to the aircraft, zoom + pitch, framed at altitude; resumes tracking.
   function flyToView(lon, lat, zoom, altFt) {
     if (altFt == null) {
+      freeGrounding = null;
       orbitAttached = false;
       orbitZ = 0;
       followActive = false;
