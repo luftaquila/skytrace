@@ -16,6 +16,7 @@ import { createAircraftLayer } from "./aircraft-layer.js";
 import { createAircraftMotionTracker } from "./aircraft-motion.js";
 import { freeViewElevationForZoom } from "./camera-grounding.js";
 import { installGlobeCenterElevation } from "./globe-center-elevation.js";
+import { currentTrackRun } from "./track-runs.js";
 
 const FT_TO_M = 0.3048;
 const HOME = { lon: 127.33113, lat: 36.36599 }; // Yuseong IC
@@ -575,6 +576,14 @@ export function createTactical3d({ container, deps }) {
     const hex = pin?.closest(".t3d-block")?.dataset.hex;
     if (hex) { e.stopPropagation(); deps.togglePin(hex); buildLayers(); syncBlocks(); }
   });
+  overlayEl.addEventListener("change", (e) => {
+    const historic = e.target.closest(".tt-historic-toggle");
+    if (!historic) return;
+    e.stopPropagation();
+    deps.setHistoricTracks(historic.checked);
+    buildLayers();
+    syncBlocks();
+  });
   overlayEl.addEventListener("wheel", (e) => { e.preventDefault(); map.getCanvas().dispatchEvent(new WheelEvent("wheel", { deltaY: e.deltaY, deltaX: e.deltaX, clientX: e.clientX, clientY: e.clientY, cancelable: true })); }, { passive: false });
 
   // --- Derived render data ----------------------------------------------------------------
@@ -665,7 +674,8 @@ export function createTactical3d({ container, deps }) {
     const trails = [];
     const trailAnchors = new Map();
     const seen = new Set();
-    const addTrail = (hex, pts) => {
+    const addTrail = (hex, allPoints) => {
+      const pts = deps.getSettings().historicTracks ? allPoints : currentTrackRun(allPoints);
       let run = null;
       let runColor = null;
       let prevT = null;

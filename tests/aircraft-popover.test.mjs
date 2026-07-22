@@ -25,6 +25,16 @@ test("aircraft popovers place update age immediately before the pin", () => {
   assert.match(css, /\.tt-top-actions \.tt-age\s*\{[^}]*text-align:\s*right/s);
 });
 
+test("aircraft popovers expose historic trails as an opt-in setting", () => {
+  const source = between("function datablockHtml(", "function airfieldTooltip(");
+  assert.match(app, /historicTracks:\s*false/);
+  assert.match(source, /tt-historic-toggle/);
+  assert.match(source, />Historic<\/label>/);
+  assert.match(source, /selectedHex\.value === item\.hex \|\| pinned\.value\.has\(item\.hex\)/);
+  assert.match(tactical, /historicTracks \? allPoints : currentTrackRun\(allPoints\)/);
+  assert.match(tactical, /setHistoricTracks\(historic\.checked\)/);
+});
+
 test("Locate uses browser geolocation only when no aircraft is selected", () => {
   const recenter = between("async function recenterView(", "function getPlaybackGhost(");
   assert.match(recenter, /if \(hasSel\)/);

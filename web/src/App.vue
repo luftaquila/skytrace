@@ -36,6 +36,7 @@ const DEFAULT_SETTINGS = {
   proximity: true,
   terrainExaggeration: 2,
   terrainSatellite: true,
+  historicTracks: false,
 };
 
 function loadSettings() {
@@ -618,8 +619,16 @@ function pinIcon(hex) {
 
 // Tactical data block beside each 3D target: callsign + pin over the shared status line.
 function datablockHtml(item) {
+  const showsTrack = selectedHex.value === item.hex || pinned.value.has(item.hex);
+  const historic = showsTrack
+    ? `<label class="tt-historic" title="Show disconnected previous flights"><input class="tt-historic-toggle" type="checkbox"${settings.value.historicTracks ? " checked" : ""} />Historic</label>`
+    : "";
   return `<span class="t3d-datablock"><span class="db-top"><b>${escapeHtml(formatFlight(item))}</b><span class="tt-top-actions"><span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>${pinIcon(item.hex)}</span></span>`
-    + `<span>${targetLine(item, true)}</span></span>`;
+    + `<span>${targetLine(item, true)}</span>${historic}</span>`;
+}
+
+function setHistoricTracks(enabled) {
+  settings.value.historicTracks = enabled;
 }
 
 function airfieldTooltip(field) {
@@ -1005,6 +1014,7 @@ async function ensureTactical3d() {
         getPinned: () => pinned.value,
         getPinnedTracks: () => [...pinnedTracks.value].map(([hex, points]) => ({ hex, points })),
         togglePin,
+        setHistoricTracks,
         datablockHtml,
         airfieldTooltip,
         passesFilters,
