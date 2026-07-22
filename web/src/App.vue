@@ -1626,6 +1626,7 @@ async function ensureTactical3d() {
         altitudeColor,
         altitudeColorFeet,
         trackSegmentColor,
+        planeSizeScale,
         onSelect: toggleAircraft,
         onHover: (hex) => { hoveredHex.value = hex; },
         onMapClick: () => { if (selectedHex.value) clearSelection(); },

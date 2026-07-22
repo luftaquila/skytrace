@@ -193,7 +193,8 @@ export function createTactical3d({ container, deps }) {
       }
       const bank = airborne && Number.isFinite(item.roll) ? Math.max(-45, Math.min(45, item.roll)) : 0;
       const track = Number.isFinite(item.track) ? item.track : 0;
-      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * exagg, airborne, rgb, orientation: [phi, 90 - track, bank], coasting: deps.isCoasting(item), item });
+      const cls = deps.planeSizeScale(item.category); // 0.85 light · 1 · 1.18 heavy (matches 2D)
+      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * exagg, airborne, rgb, cls, orientation: [phi, 90 - track, bank], coasting: deps.isCoasting(item), item });
     }
     return out;
   }
@@ -243,15 +244,27 @@ export function createTactical3d({ container, deps }) {
     const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * exagg, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
 
     const covMesh = coverageMesh();
+    const selObj = list.find((d) => d.hex === selHex);
+    // Aircraft grouped by size class so per-category size differences survive the pixel clamp
+    // (constant on-screen size per class); one ScenegraphLayer per distinct class.
+    const byCls = new Map();
+    for (const d of list) { const g = byCls.get(d.cls) || []; g.push(d); byCls.set(d.cls, g); }
+    const aircraftLayers = [...byCls.entries()].map(([cls, data]) => new ScenegraphLayer({
+      id: `aircraft-${cls}`, data, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
+      getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255],
+      sizeScale: 185, sizeMinPixels: Math.round(48 * cls), sizeMaxPixels: Math.round(68 * cls), _lighting: "pbr",
+      pickable: false, parameters: { depthCompare: "always" },
+    }));
 
     const layers = [
       covMesh && new SimpleMeshLayer({
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 30], sizeScale: 1,
+        getColor: [255, 255, 255, 46], sizeScale: 1,
         material: { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] },
         // deck 9 / luma v9 pipeline params (WebGPU-style keys). The dome must not WRITE depth,
-        // or it occludes every target drawn after it; it is still depth-tested against terrain.
-        pickable: false, parameters: { depthWriteEnabled: false },
+        // or it occludes targets drawn after it. cullMode 'back' draws only the near shell so the
+        // translucency doesn't stack front+back into brighter (whiter) overlapping triangles.
+        pickable: false, parameters: { depthWriteEnabled: false, cullMode: "back" },
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
       // Trail: a single crisp altitude-gradient line (no glow/casing). billboard:true keeps the
@@ -260,11 +273,12 @@ export function createTactical3d({ container, deps }) {
       new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
       // Small dot at each stick's ground foot (the old view had these).
       new ScatterplotLayer({ id: "ground-dots", data: sticks, getPosition: (d) => d.target, radiusUnits: "pixels", getRadius: 3, radiusMinPixels: 2.5, radiusMaxPixels: 4, filled: true, stroked: false, getFillColor: (d) => d.color, parameters: { depthCompare: "always" } }),
-      new ScenegraphLayer({
-        id: "aircraft", data: list, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation,
-        getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, d.coasting ? 150 : 255], sizeScale: 185, sizeMinPixels: 48, sizeMaxPixels: 68, _lighting: "pbr",
-        pickable: false, parameters: { depthCompare: "always" },
+      // Selection highlight: a glowing teal reticle ring around the selected aircraft.
+      selObj && new ScatterplotLayer({
+        id: "selection", data: [selObj], getPosition: (d) => [d.lon, d.lat, d.z], radiusUnits: "pixels", getRadius: 30, radiusMinPixels: 30, radiusMaxPixels: 30,
+        filled: false, stroked: true, getLineColor: [120, 240, 220, 235], lineWidthUnits: "pixels", getLineWidth: 2.4, parameters: { depthCompare: "always" },
       }),
+      ...aircraftLayers,
       ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 150, sizeMinPixels: 38, sizeMaxPixels: 54, parameters: { depthCompare: "always" } }),
       // Invisible, generous click/hover target (like the old hit sphere): a constant ~80px disc
       // per aircraft — bigger than the model — so selecting never needs pixel-perfect aim.
@@ -465,44 +479,42 @@ export function createTactical3d({ container, deps }) {
   // isn't too far out. getCameraForMap inverts this so a 2D<->3D round-trip is stable.
   function setCameraFromMap(center, zoom) { map.jumpTo({ center: [center.lng ?? center.lon, center.lat], zoom: zoom + 1, pitch: 55 }); }
   function getCameraForMap() { const c = map.getCenter(); return { center: [c.lat, c.lng], zoom: Math.min(18, Math.max(3, Math.round(map.getZoom() - 1))) }; }
-  // Centre the AIRCRAFT (at its altitude) on screen, not its ground point: project the target's
-  // elevated point and its ground point and pass the screen delta as the easeTo offset. Zoom/
-  // pitch are unchanged here so the delta stays valid through the move.
-  function centerOn(lon, lat, z, duration) {
-    let offset = [0, 0];
+  // Screen-space lift of an altitude point above its ground point (for centring the aircraft,
+  // not its nadir). Cached as followOffset so follow uses a STABLE offset — recomputing it from
+  // a mid-animation camera every tick is what made the view oscillate.
+  let followOffset = [0, 0];
+  function altOffset(lon, lat, z) {
     const vp = overlay._deck?.getViewports?.()[0];
     if (vp && z > 0) {
       const air = vp.project([lon, lat, z]);
       const gnd = vp.project([lon, lat, 0]);
-      if (air && gnd) offset = [gnd[0] - air[0], gnd[1] - air[1]];
+      if (air && gnd) return [gnd[0] - air[0], gnd[1] - air[1]];
     }
-    map.easeTo({ center: [lon, lat], offset, duration });
+    return [0, 0];
   }
-  // Called on select: snap quickly to the target and start auto-tracking it.
-  function panTo(lon, lat, altFt) { followActive = true; centerOn(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * exagg, 350); }
-  // Keep the selected aircraft centred each data pass until the user drags the map. Uses an
-  // instant panBy (no easeTo) so overlapping animations can't make the view oscillate; skipped
-  // while a select/locate animation is still running.
+  // Called on select: smoothly focus the target (at altitude) and start auto-tracking it.
+  function panTo(lon, lat, altFt) {
+    followActive = true;
+    followOffset = altOffset(lon, lat, (altFt != null ? altFt * FT_TO_M : 0) * exagg);
+    map.easeTo({ center: [lon, lat], offset: followOffset, duration: 500 });
+  }
+  // Smoothly keep the selected aircraft centred each data pass (linear glide, stable offset) until
+  // the user drags the map.
   function followSelected() {
-    if (!followActive || map.isEasing()) return;
+    if (!followActive) return;
     const selHex = deps.getSelectedHex();
     if (!selHex) { followActive = false; return; }
     const d = lastList.find((x) => x.hex === selHex);
-    const vp = overlay._deck?.getViewports?.()[0];
-    if (!d || !vp) return;
-    const air = vp.project([d.lon, d.lat, d.z]);
-    if (!air || !Number.isFinite(air[0])) return;
-    const cx = map.getCanvas().clientWidth / 2;
-    const cy = map.getCanvas().clientHeight / 2;
-    const dx = air[0] - cx, dy = air[1] - cy;
-    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) map.panBy([dx, dy], { animate: false });
+    if (d) map.easeTo({ center: [d.lon, d.lat], offset: followOffset, duration: 900, easing: (t) => t });
   }
   // Locate button: fly to the aircraft's ground point at the target zoom, then let follow re-centre
-  // it at altitude (offset depends on the target zoom, so hand off rather than compute it here).
+  // it at altitude (offset depends on the target zoom, refreshed by the zoomend handler below).
   function flyToView(lon, lat, zoom, altFt) {
     map.flyTo({ center: [lon, lat], zoom: zoom + 1, pitch: 55, duration: 900 });
     if (altFt != null) followActive = true;
   }
+  // Offset depends on zoom, so refresh it after the user (or a locate fly) changes zoom.
+  map.on("zoomend", () => { if (!followActive) return; const d = lastList.find((x) => x.hex === deps.getSelectedHex()); if (d) followOffset = altOffset(d.lon, d.lat, d.z); });
   function fitAircraft(points) { if (!points.length) return; const b = new maplibregl.LngLatBounds(); for (const p of points) b.extend([p.lon, p.lat]); map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900 }); }
   function destroy() {
     disposed = true;
