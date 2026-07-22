@@ -14,6 +14,7 @@ import { ScenegraphLayer, SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 import { createAircraftLayer } from "./aircraft-layer.js";
+import { createAircraftMotionTracker } from "./aircraft-motion.js";
 import { freeViewElevationForZoom } from "./camera-grounding.js";
 import { installGlobeCenterElevation } from "./globe-center-elevation.js";
 
@@ -502,6 +503,12 @@ export function createTactical3d({ container, deps }) {
   let aircraftSegments = []; // sticks + trails + conflict links, as {a,b,color,widthPx}
   let aircraftDots = [];     // stick ground feet, as {p,color,sizePx}
   let aircraftCoverage = null; // coverage dome mesh: {positions, anchor, altExagg}
+  const motionTracker = createAircraftMotionTracker();
+  let motionHexes = new Set();
+  let motionRaf = 0;
+  let aircraftRenderByHex = new Map();
+  let motionStickByHex = new Map();
+  let motionTrailByHex = new Map();
   const aircraftLayer = createAircraftLayer({ getData: () => aircraftRenderList, getSegments: () => aircraftSegments, getDots: () => aircraftDots, getCoverage: () => aircraftCoverage });
   if (typeof window !== "undefined" && window.__T3D_DEBUG) {
     window.__t3dMap = map;
@@ -588,9 +595,33 @@ export function createTactical3d({ container, deps }) {
       // deck maps the nose (+X) to world-Z = -sin(pitch) and the right wing (+Y) to
       // world-Z = cos(pitch)*sin(roll). ADS-B roll>0 = right wing DOWN and climb phi>0 = nose UP,
       // both the opposite sign of what deck needs — so negate both pitch and roll.
-      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z: altM * ALT_EXAGG, airborne, rgb, cls, orientation: [-phi, 90 - track, -bank], coasting: deps.isCoasting(item), spi: !!item.spi, item });
+      const z = altM * ALT_EXAGG;
+      const motion = {
+        lon: item.lon,
+        lat: item.lat,
+        z,
+        gs: item.gs,
+        track: Number.isFinite(item.track) ? item.track : null,
+        trackRate: item.trackRate,
+        roll: bank,
+        pitch: phi,
+        verticalSpeed: airborne ? (item.baroRate ?? item.geomRate ?? 0) * 0.00508 * ALT_EXAGG : 0,
+        onGround: !airborne,
+        // The clock-driven dataPass runs every second. Only a genuinely new receiver sample may
+        // reset the extrapolation clock or start a correction toward a new observed position.
+        key: [item.positionAt, item.observedAt, item.lon, item.lat, z, item.gs, item.track, item.trackRate, bank, item.baroRate, item.geomRate].join("|"),
+      };
+      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z, airborne, rgb, cls, orientation: [-phi, 90 - track, -bank], motion, coasting: deps.isCoasting(item), spi: !!item.spi, item });
     }
     return out;
+  }
+
+  function applyMotionState(target, state) {
+    if (!state) return;
+    target.lon = state.lon;
+    target.lat = state.lat;
+    target.z = state.z;
+    target.orientation = [-state.pitch, 90 - state.track, -state.roll];
   }
 
   // --- deck layers ------------------------------------------------------------------------
@@ -598,14 +629,22 @@ export function createTactical3d({ container, deps }) {
   function buildLayers() {
     if (!ready) return;
     const list = aircraftList();
+    const selHex = deps.getSelectedHex();
+    const requestedMotion = new Set(deps.getPinned());
+    if (selHex) requestedMotion.add(selHex);
+    motionHexes = new Set(list.filter((d) => requestedMotion.has(d.hex)).map((d) => d.hex));
+    motionTracker.retain(motionHexes);
+    const motionNow = performance.now();
+    for (const d of list) {
+      if (!motionHexes.has(d.hex)) continue;
+      applyMotionState(d, motionTracker.observe(d.hex, d.motion, motionNow));
+    }
     lastList = list;
     // IDENT (SPI): flash the whole body gold. Run a blink toggle only while some aircraft squawks
     // ident (rare/brief); each toggle rebuilds so the aircraft getColor re-evaluates.
     const hasIdent = list.some((d) => d.spi);
     if (hasIdent && !identBlinkTimer) identBlinkTimer = setInterval(() => { identBlinkOn = !identBlinkOn; buildLayers(); }, 480);
     else if (!hasIdent && identBlinkTimer) { clearInterval(identBlinkTimer); identBlinkTimer = 0; identBlinkOn = false; }
-    const selHex = deps.getSelectedHex();
-
     // Proximity/collision alert (same STCA data as the 2D map): a red link between each close pair —
     // in 3D drawn tip-to-tip at altitude — and the involved aircraft reddened.
     const conflicts = deps.getConflicts?.() || [];
@@ -616,11 +655,12 @@ export function createTactical3d({ container, deps }) {
       target: [p.b.lon, p.b.lat, ((p.b.altBaro ?? p.b.altGeom) || 0) * FT_TO_M * ALT_EXAGG],
     }));
 
-    const sticks = list.filter((d) => d.airborne).map((d) => ({ source: [d.lon, d.lat, d.z], target: [d.lon, d.lat, 0], color: [d.rgb.r, d.rgb.g, d.rgb.b, 200] }));
+    const sticks = list.filter((d) => d.airborne).map((d) => ({ hex: d.hex, source: [d.lon, d.lat, d.z], target: [d.lon, d.lat, 0], color: [d.rgb.r, d.rgb.g, d.rgb.b, 200] }));
 
     const trails = [];
+    const trailAnchors = new Map();
     const seen = new Set();
-    const addTrail = (pts) => {
+    const addTrail = (hex, pts) => {
       let run = null;
       let runColor = null;
       let prevT = null;
@@ -635,6 +675,7 @@ export function createTactical3d({ container, deps }) {
         const c = parseRgb(deps.trackSegmentColor(p));
         const col = [c.r, c.g, c.b];
         const pt = [p.lon, p.lat, altM * ALT_EXAGG];
+        trailAnchors.set(hex, { point: pt, color: col });
         if (!run || gap || (runColor && (col[0] !== runColor[0] || col[1] !== runColor[1] || col[2] !== runColor[2]))) {
           if (run && run.path.length >= 2) trails.push(run);
           const start = !gap && run && run.path.length ? [run.path[run.path.length - 1]] : [];
@@ -646,8 +687,8 @@ export function createTactical3d({ container, deps }) {
       if (run && run.path.length >= 2) trails.push(run);
     };
     const selTrack = deps.getSelectedTrack();
-    if (selHex && selTrack.length) { addTrail(selTrack); seen.add(selHex); }
-    for (const { hex, points } of deps.getPinnedTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(points); }
+    if (selHex && selTrack.length) { addTrail(selHex, selTrack); seen.add(selHex); }
+    for (const { hex, points } of deps.getPinnedTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(hex, points); }
 
     const ghost = deps.getPlaybackGhost();
     const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * ALT_EXAGG, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
@@ -664,13 +705,31 @@ export function createTactical3d({ container, deps }) {
       const conflict = conflictHexes.has(d.hex);
       const cls = d.cls < 0.95 ? "small" : d.cls < 1.1 ? "medium" : "large";
       const [r, g, b] = gold ? [255, 215, 0] : conflict ? [251, 113, 133] : [d.rgb.r, d.rgb.g, d.rgb.b];
-      return { lon: d.lon, lat: d.lat, z: d.z, r, g, b, a: d.coasting ? 150 : 255, pitch: d.orientation[0], yaw: d.orientation[1], roll: d.orientation[2], cls, clsMul: d.cls };
+      return { hex: d.hex, lon: d.lon, lat: d.lat, z: d.z, r, g, b, a: d.coasting ? 150 : 255, pitch: d.orientation[0], yaw: d.orientation[1], roll: d.orientation[2], cls, clsMul: d.cls };
     });
+    aircraftRenderByHex = new Map(aircraftRenderList.map((d) => [d.hex, d]));
     // Sticks (aircraft→ground), altitude-gradient trails, and conflict links as line segments; the
     // stick ground feet as dots — all drawn by the custom layer (widths/colours match the old deck).
     const segs = [];
-    for (const s of sticks) segs.push({ a: s.source, b: s.target, color: s.color, widthPx: 1.6 });
+    motionStickByHex = new Map();
+    for (const s of sticks) {
+      const segment = { a: s.source, b: s.target, color: s.color, widthPx: 1.6 };
+      segs.push(segment);
+      if (motionHexes.has(s.hex)) motionStickByHex.set(s.hex, segment);
+    }
     for (const t of trails) for (let i = 0; i + 1 < t.path.length; i += 1) segs.push({ a: t.path[i], b: t.path[i + 1], color: [t.color[0], t.color[1], t.color[2], 255], widthPx: 2.1 });
+    // The stored trail remains authoritative. Add only one transient final segment from its latest
+    // real point to the screen-space dead-reckoned target, then mutate that endpoint each frame.
+    motionTrailByHex = new Map();
+    for (const d of list) {
+      if (!motionHexes.has(d.hex)) continue;
+      const anchor = trailAnchors.get(d.hex);
+      const a = anchor?.point || [d.motion.lon, d.motion.lat, d.motion.z];
+      const color = anchor?.color || [d.rgb.r, d.rgb.g, d.rgb.b];
+      const segment = { a, b: [d.lon, d.lat, d.z], color: [...color, 255], widthPx: 2.1 };
+      segs.push(segment);
+      motionTrailByHex.set(d.hex, segment);
+    }
     for (const c of conflictLines) segs.push({ a: c.source, b: c.target, color: [251, 113, 133, 235], widthPx: 2.6 });
     aircraftSegments = segs;
     aircraftDots = sticks.map((s) => ({ p: s.target, color: s.color, sizePx: 3 }));
@@ -678,6 +737,7 @@ export function createTactical3d({ container, deps }) {
     // Playback ghost (a dim, semi-transparent aircraft at the replayed position).
     for (const g of ghostData) aircraftRenderList.push({ lon: g.lon, lat: g.lat, z: g.z, r: g.rgb.r, g: g.rgb.g, b: g.rgb.b, a: 150, pitch: g.orientation[0], yaw: g.orientation[1], roll: g.orientation[2], cls: "medium", clsMul: 1 });
     if (ready) map.triggerRepaint();
+    requestMotionFrame();
 
     const covMat = { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] };
     const layers = [
@@ -715,6 +775,68 @@ export function createTactical3d({ container, deps }) {
       .filter((l) => !["trails", "sticks", "ground-dots", "conflicts", "coverage", "coverage-depth", "hit", "ghost"].includes(l.id));
     overlay.setProps({ layers });
     syncBlocks();
+  }
+
+  function updateFollowingCamera(target) {
+    if (!followActive || !orbitAttached || !target) return false;
+    orbitZ = target.z;
+    // Selection fly-in and wheel zoom own the camera timeline. Retarget their shared endpoint as
+    // the aircraft advances instead of starting a competing animation on every display frame.
+    if (["focus", "locate-aircraft", "wheel-orbit"].includes(cameraAnimation?.kind)) {
+      cameraAnimation.end.center = new maplibregl.LngLat(target.lon, target.lat);
+      cameraAnimation.end.elevation = target.z;
+      return false;
+    }
+    if (!cameraAnimation) {
+      focusOnSelected(target);
+      return true;
+    }
+    return false;
+  }
+
+  function applyMotionFrame(now) {
+    let animateAgain = false;
+    for (const d of lastList) {
+      if (!motionHexes.has(d.hex)) continue;
+      const state = motionTracker.sample(d.hex, now);
+      if (!state) continue;
+      applyMotionState(d, state);
+      const rendered = aircraftRenderByHex.get(d.hex);
+      if (rendered) {
+        rendered.lon = d.lon;
+        rendered.lat = d.lat;
+        rendered.z = d.z;
+        rendered.pitch = d.orientation[0];
+        rendered.yaw = d.orientation[1];
+        rendered.roll = d.orientation[2];
+      }
+      const stick = motionStickByHex.get(d.hex);
+      if (stick) {
+        stick.a[0] = d.lon; stick.a[1] = d.lat; stick.a[2] = d.z;
+        stick.b[0] = d.lon; stick.b[1] = d.lat;
+      }
+      const trail = motionTrailByHex.get(d.hex);
+      if (trail) { trail.b[0] = d.lon; trail.b[1] = d.lat; trail.b[2] = d.z; }
+      if (motionTracker.isAnimating(d.hex, now)) animateAgain = true;
+    }
+    const selectedHex = deps.getSelectedHex();
+    const selected = selectedHex && lastList.find((d) => d.hex === selectedHex);
+    const cameraUpdated = updateFollowingCamera(selected);
+    if (!cameraUpdated && ready) map.triggerRepaint();
+    return animateAgain;
+  }
+
+  function requestMotionFrame() {
+    if (motionRaf || disposed || !running || !ready || !motionHexes.size) return;
+    motionRaf = requestAnimationFrame((now) => {
+      motionRaf = 0;
+      if (applyMotionFrame(now)) requestMotionFrame();
+    });
+  }
+
+  function cancelMotionFrame() {
+    if (motionRaf) cancelAnimationFrame(motionRaf);
+    motionRaf = 0;
   }
 
   // Solid altitude-gradient reception dome: skin the server's per-altitude rings into a single
@@ -985,8 +1107,8 @@ export function createTactical3d({ container, deps }) {
   function setHoverClass(prev, next) { hoverHex = next; scheduleActive(next); }
   function setActive(active) {
     running = active;
-    if (active) { map.resize(); hintEl.style.display = ""; setTimeout(() => { hintEl.style.display = "none"; }, 8000); }
-    else { cancelCameraAnimation(); hoverHex = null; hoverAf = null; afPinned = null; afPinEl.style.display = "none"; afHoverEl.style.display = "none"; }
+    if (active) { map.resize(); requestMotionFrame(); hintEl.style.display = ""; setTimeout(() => { hintEl.style.display = "none"; }, 8000); }
+    else { cancelCameraAnimation(); cancelMotionFrame(); hoverHex = null; hoverAf = null; afPinned = null; afPinEl.style.display = "none"; afHoverEl.style.display = "none"; }
   }
   function resize() { map.resize(); }
   // 3D sits one zoom level CLOSER than the 2D map (pitch pulls the view back), so the default
@@ -1014,20 +1136,18 @@ export function createTactical3d({ container, deps }) {
     followingSelectionHex = deps.getSelectedHex();
     beginSelectionFocus(lon, lat, z);
   }
-  // Auto-track with an interruptible glide. New receiver samples retarget from the current in-flight
-  // frame, so sparse feed ticks never appear as position jumps.
+  // The aircraft itself now absorbs sparse receiver ticks through the motion tracker. Once selection
+  // fly-in finishes, keep the camera on that continuously moving visual target instead of layering a
+  // second 600 ms follow animation on top of the correction.
   function followSelected() {
     if (!followActive) return;
     const selHex = deps.getSelectedHex();
     if (!selHex) { followActive = false; clearOrbit(); return; }
-    // Position updates received during the initial fly-in are picked up by its completion callback.
-    if (["focus", "locate-aircraft"].includes(cameraAnimation?.kind)) return;
     const d = lastList.find((x) => x.hex === selHex);
     if (!d) return;
     attachOrbit(d.z);
-    const center = map.getCenter();
-    if (Math.abs(wrapDelta(d.lon - center.lng)) < 1e-8 && Math.abs(d.lat - center.lat) < 1e-8 && Math.abs(d.z - map.transform.elevation) < 0.5) return;
-    animateCamera({ center: [d.lon, d.lat], elevation: d.z }, { duration: 600, easing: EASE_IN_OUT, kind: "follow" });
+    updateFollowingCamera(d);
+    requestMotionFrame();
   }
   // Locate button: ease-out fly to the aircraft, zoom + pitch, framed at altitude; resumes tracking.
   function flyToView(lon, lat, zoom, altFt) {
@@ -1057,6 +1177,8 @@ export function createTactical3d({ container, deps }) {
   function destroy() {
     disposed = true;
     cancelCameraAnimation();
+    cancelMotionFrame();
+    motionTracker.clear();
     if (identBlinkTimer) clearInterval(identBlinkTimer);
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);

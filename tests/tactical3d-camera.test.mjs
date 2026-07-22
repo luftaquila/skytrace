@@ -24,3 +24,20 @@ test("releasing a free pan never rebases the camera to the ground", () => {
   assert.notEqual(onUpEnd, -1, "onUp listener boundary must exist");
   assert.doesNotMatch(source.slice(onUpStart, onUpEnd), /setElevation|rebase|ground/i);
 });
+
+test("dead reckoning is limited to selected and pinned aircraft", () => {
+  const buildLayers = functionSource("buildLayers", "updateFollowingCamera");
+  assert.match(buildLayers, /new Set\(deps\.getPinned\(\)\)/);
+  assert.match(buildLayers, /if \(selHex\) requestedMotion\.add\(selHex\)/);
+  assert.match(buildLayers, /motionTracker\.retain\(motionHexes\)/);
+});
+
+test("tracking camera follows the continuously projected target without another follow tween", () => {
+  const followSelected = functionSource("followSelected", "flyToView");
+  assert.match(followSelected, /updateFollowingCamera\(d\)/);
+  assert.doesNotMatch(followSelected, /animateCamera/);
+
+  const applyMotionFrame = functionSource("applyMotionFrame", "requestMotionFrame");
+  assert.match(applyMotionFrame, /updateFollowingCamera\(selected\)/);
+  assert.match(applyMotionFrame, /motionTrailByHex\.get\(d\.hex\)/);
+});
