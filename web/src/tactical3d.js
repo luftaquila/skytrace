@@ -284,17 +284,22 @@ export function createTactical3d({ container, deps }) {
   // zoom ≥ ~12.5 for all pitches; select/locate fly IN to that range so it's always exact. Every
   // camera op resets the centre elevation to the terrain, so this must be re-applied after each.
   function focusOnSelected(sel) {
+    // Transform-level (NOT map.setCenter) — map.setCenter routes through Camera and stops in-flight
+    // animations / re-anchors, causing the pan↔snap flicker. Direct mutation keeps the aircraft
+    // centred cleanly. Used by the rotate drag (keeps the centre on the — possibly moved — aircraft).
     orbitZ = sel.z;
-    map.setCenter([sel.lon, sel.lat]);
-    map.transform.setElevation(sel.z); // LAST — setCenter/setBearing/setPitch reset it to the terrain
+    map.transform.setCenter(new maplibregl.LngLat(sel.lon, sel.lat));
+    map.transform.setElevation(sel.z);
   }
   function clearOrbit() {
     orbitAttached = false;
+    map.scrollZoom.enable(); // normal cursor-anchored scroll-zoom when not orbiting
     if (orbitZ === 0) return;
     orbitZ = 0;
     map.transform.setElevation(0);
     map.triggerRepaint();
   }
+  function attachOrbit(z) { orbitAttached = true; orbitZ = z; map.scrollZoom.disable(); } // orbit → custom centre-zoom
   let identBlinkOn = false; // toggled by a timer while any aircraft squawks IDENT (gold body flash)
   let identBlinkTimer = 0;
   const onDown = (e) => {
@@ -326,20 +331,22 @@ export function createTactical3d({ container, deps }) {
   cv.addEventListener("mousedown", onDown);
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
-  // While orbit-attached, wheel-zoom keeps the aircraft centred (zoom orbits the aircraft, not the
-  // cursor): re-centre each zoom frame. Programmatic zooms (flyToView etc.) have no originalEvent.
-  map.on("zoom", (e) => {
-    if (!e.originalEvent || !orbitAttached) return;
-    const selHex = deps.getSelectedHex();
-    const sel = selHex && lastList.find((d) => d.hex === selHex);
-    if (!sel) return;
-    // Re-centre via the TRANSFORM directly, NOT map.setCenter — the latter goes through Camera and
-    // stops the in-flight scroll-zoom each frame, which crushed the wheel sensitivity. Direct
-    // transform mutation keeps the aircraft centred without cancelling the zoom.
-    orbitZ = sel.z;
-    map.transform.setCenter(new maplibregl.LngLat(sel.lon, sel.lat));
-    map.transform.setElevation(sel.z);
-  });
+  // While orbit-attached, handle the wheel OURSELVES and zoom around the CENTRE (the aircraft),
+  // NOT the cursor. MapLibre's scrollZoom anchors on the cursor, which panned the view toward the
+  // ground point and then our re-centre snapped it back — a per-tick pan↔snap flicker. scrollZoom
+  // is disabled while attached (see focus/clearOrbit); here we zoom around centre via easeTo, and the
+  // move handler holds the centre elevation so the aircraft stays put. Off-attached, scrollZoom runs.
+  const onWheel = (e) => {
+    if (!orbitAttached) return; // normal scroll-zoom when not orbiting
+    e.preventDefault();
+    followActive = false;
+    const step = (e.deltaMode === 1 ? e.deltaY * 0.04 : e.deltaY * 0.0018);
+    // Floor at 12: below it MapLibre ignores the centre elevation, so the aircraft would fly off the
+    // top. Zooming out to see the overview → deselect. Zoom-in is unrestricted.
+    const z = Math.max(12, Math.min(map.getMaxZoom(), map.getZoom() - step));
+    map.easeTo({ zoom: z, duration: 90, easing: (t) => t }); // around the centre; centre stays on the aircraft
+  };
+  cv.addEventListener("wheel", onWheel, { passive: false });
   // Hold the orbit centre elevation through EASES (fly-in select/locate, follow glide) and drags:
   // every camera op resets the centre elevation to the terrain, so re-apply it via the transform on
   // each move. Transform-level (not map.setElevation) so it does NOT cancel the in-flight ease — the
@@ -888,7 +895,7 @@ export function createTactical3d({ container, deps }) {
   // ≥ 12.5, where the centre-elevation orbit is exact; then auto-tracks. Zooms in only if zoomed out.
   function panTo(lon, lat, altFt) {
     const z = (altFt != null ? altFt * FT_TO_M : 0) * ALT_EXAGG;
-    followActive = true; orbitAttached = true; orbitZ = z;
+    followActive = true; attachOrbit(z);
     followSettleUntil = performance.now() + 720;
     map.easeTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 12.5), duration: 640, easing: EASE_OUT });
   }
@@ -901,14 +908,14 @@ export function createTactical3d({ container, deps }) {
     if (performance.now() < followSettleUntil) return; // let the fly-in settle first
     const d = lastList.find((x) => x.hex === selHex);
     if (!d) return;
-    orbitAttached = true; orbitZ = d.z;
+    attachOrbit(d.z);
     map.easeTo({ center: [d.lon, d.lat], duration: 260, easing: (t) => t });
   }
   // Locate button: ease-out fly to the aircraft, zoom + pitch, framed at altitude; resumes tracking.
   function flyToView(lon, lat, zoom, altFt) {
     if (altFt == null) { clearOrbit(); followActive = false; map.easeTo({ center: [lon, lat], zoom: zoom + 1, pitch: 55, duration: 900, easing: EASE_OUT }); return; }
     const z = altFt * FT_TO_M * ALT_EXAGG;
-    followActive = true; orbitAttached = true; orbitZ = z;
+    followActive = true; attachOrbit(z);
     followSettleUntil = performance.now() + 1000;
     map.easeTo({ center: [lon, lat], zoom: Math.max(zoom + 1, 12.5), pitch: 55, duration: 900, easing: EASE_OUT });
   }
