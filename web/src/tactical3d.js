@@ -209,7 +209,10 @@ export function createTactical3d({ container, deps }) {
       version: 8,
       glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
       sources: {
-        satellite: { type: "raster", tiles: SAT_TILES, tileSize: 256, maxzoom: 19, attribution: "Esri, Maxar, Earthstar Geographics" },
+        // maxzoom 17: Esri returns a "Map data not yet available" placeholder tile past its real
+        // coverage in some areas; capping here makes MapLibre OVERZOOM (scale up) the last real tile
+        // instead of ever requesting/showing that placeholder, so the imagery stays continuous.
+        satellite: { type: "raster", tiles: SAT_TILES, tileSize: 256, maxzoom: 17, attribution: "Esri, Maxar, Earthstar Geographics" },
         dem: { type: "raster-dem", tiles: MAPTERHORN_TILES, encoding: "terrarium", tileSize: 512, maxzoom: 12, attribution: "Terrain © Mapterhorn" },
         contours: { type: "vector", tiles: [contour.contourProtocolUrl({ multiplier: 1, thresholds: { 8: [500, 2000], 10: [200, 1000], 12: [100, 500], 14: [50, 250] }, elevationKey: "ele", levelKey: "level", contourLayer: "contours" })], maxzoom: 15 },
         grid: { type: "geojson", data: EMPTY_FC },
@@ -266,8 +269,9 @@ export function createTactical3d({ container, deps }) {
     if (drag.mode === "rotate") {
       map.setBearing(drag.bearing + (e.clientX - drag.x) * 0.35);
       map.setPitch(Math.max(0, Math.min(map.getMaxPitch(), drag.pitch - (e.clientY - drag.y) * 0.25)));
-      // With an aircraft selected, keep IT under the screen centre so rotation/tilt orbits the
-      // aircraft rather than the map's ground centre (which sits ahead of the target at pitch).
+      // With an aircraft selected, re-centre on IT (centerFor solves for the centre that puts the
+      // target — at its altitude — on screen centre) so rotation/tilt orbits the aircraft. panBy can't
+      // do this: it moves the ground plane, but the target is high up, so parallax drifts it away.
       const selHex = deps.getSelectedHex();
       const sel = selHex && lastList.find((d) => d.hex === selHex);
       if (sel) map.setCenter(centerFor(sel.lon, sel.lat, sel.z));
@@ -280,6 +284,14 @@ export function createTactical3d({ container, deps }) {
   cv.addEventListener("mousedown", onDown);
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
+  // User wheel-zoom keeps the SELECTED aircraft centred (zoom orbits the aircraft, not the cursor):
+  // re-centre on it each zoom frame. Programmatic zooms (flyToView etc.) have no originalEvent.
+  map.on("zoom", (e) => {
+    if (!e.originalEvent) return;
+    const selHex = deps.getSelectedHex();
+    const sel = selHex && lastList.find((d) => d.hex === selHex);
+    if (sel) map.setCenter(centerFor(sel.lon, sel.lat, sel.z));
+  });
   // Generate the tactical airfield glyph icons on demand (per class colour).
   map.on("styleimagemissing", (e) => {
     const color = AF_ICON_COLORS[e.id];
@@ -458,7 +470,7 @@ export function createTactical3d({ container, deps }) {
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
       // Trail: a single crisp altitude-gradient line (no glow/casing). billboard:true keeps the
       // ribbon facing the camera, so it has the same thickness from the side as from above.
-      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.8, widthMinPixels: 2.2, billboard: true, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
+      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.1, widthMinPixels: 1.6, billboard: true, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
       new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
       // Small dot at each stick's ground foot (the old view had these).
       new ScatterplotLayer({ id: "ground-dots", data: sticks, getPosition: (d) => d.target, radiusUnits: "pixels", getRadius: 3, radiusMinPixels: 2.5, radiusMaxPixels: 4, filled: true, stroked: false, getFillColor: (d) => d.color, parameters: { depthCompare: "always" } }),
@@ -554,9 +566,9 @@ export function createTactical3d({ container, deps }) {
       const sig = deps.datablockHtml(d.item);
       if (b.sig !== sig) { b.block.innerHTML = sig; b.sig = sig; }
       b.block.classList.toggle("selected", d.hex === selHex);
-      // Widen the block's offset when zoomed in (the aircraft mesh grows toward its pixel cap), so it
-      // clears the body at close range too.
-      b.block.style.left = `${map.getZoom() >= 11 ? 62 : 44}px`;
+      // Offset scales continuously with zoom (the mesh grows toward its pixel cap as you zoom in), so
+      // the block clears the body at close range and sits closer when zoomed out.
+      b.block.style.left = `${Math.round(Math.max(34, Math.min(64, (map.getZoom() - 9) * 6 + 40)))}px`;
       const p = project(d.lon, d.lat, d.z);
       if (p) { b.el.style.display = ""; b.el.style.transform = `translate3d(${p[0].toFixed(1)}px, ${p[1].toFixed(1)}px, 0)`; }
       else b.el.style.display = "none";
