@@ -41,3 +41,25 @@ test("tracking camera follows the continuously projected target without another 
   assert.match(applyMotionFrame, /updateFollowingCamera\(selected\)/);
   assert.match(applyMotionFrame, /motionTrailByHex\.get\(d\.hex\)/);
 });
+
+test("aircraft selection never starts or moves the tracking camera", () => {
+  const dataPass = functionSource("dataPass", "drawCoverage");
+  assert.match(dataPass, /if \(!followActive\)/);
+  assert.match(dataPass, /selectedHex !== followingSelectionHex/);
+  assert.doesNotMatch(dataPass, /animateCamera|beginSelectionFocus/);
+
+  const panTo = functionSource("panTo", "followSelected");
+  assert.match(panTo, /clearOrbit\(\)/);
+  assert.doesNotMatch(panTo, /animateCamera|applyCameraFrame|attachOrbit/);
+});
+
+test("Locate toggles tracking without changing bearing or pitch", () => {
+  const flyToView = functionSource("flyToView", "fitAircraft");
+  const aircraftBranch = flyToView.slice(flyToView.indexOf("const selectedHex"));
+  assert.match(aircraftBranch, /followActive && selectedHex && followingSelectionHex === selectedHex/);
+  assert.match(aircraftBranch, /kind: "track-start"/);
+  assert.match(aircraftBranch, /return true/);
+  assert.match(aircraftBranch, /return false/);
+  assert.match(aircraftBranch, /\(altFt \?\? 0\)/);
+  assert.doesNotMatch(aircraftBranch, /pitch\s*:|bearing\s*:/);
+});

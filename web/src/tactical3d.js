@@ -280,12 +280,18 @@ export function createTactical3d({ container, deps }) {
   cv.style.userSelect = "none";
   let drag = null;
   let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
-  let followActive = false; // camera tracks the selected aircraft until a free right-drag pan
+  let followActive = false; // camera tracking is explicit: only the Locate toggle may enable it
   let orbitZ = 0; // exaggerated target altitude; the camera's real 3D pivot while orbit-attached
   let orbitAttached = false; // rotate/zoom re-centre on the selected aircraft ONLY while attached; a
   // free pan (right-drag) detaches so rotate/zoom then pivot on the current view, not teleport back.
   let cameraAnimation = null;
   let freeGrounding = null; // released elevated pivot, lowered only while the user zooms in
+
+  function setFollowActive(active) {
+    if (followActive === active) return;
+    followActive = active;
+    deps.onTrackingChange?.(active);
+  }
 
   const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3);
   const EASE_IN_OUT = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
@@ -384,8 +390,8 @@ export function createTactical3d({ container, deps }) {
     }
   }
   function clearOrbit() {
-    const hadOrbit = orbitAttached || orbitZ !== 0 || ["focus", "follow", "locate-aircraft", "wheel-orbit"].includes(cameraAnimation?.kind);
-    followActive = false;
+    const hadOrbit = orbitAttached || orbitZ !== 0 || ["track-start", "wheel-orbit"].includes(cameraAnimation?.kind);
+    setFollowActive(false);
     if (!hadOrbit) return;
     cancelCameraAnimation();
     map.stop();
@@ -408,7 +414,7 @@ export function createTactical3d({ container, deps }) {
     else if (e.button === 2) {
       // A free pan intentionally detaches tracking. Rotation does not: it keeps orbiting and
       // following the selected aircraft while only changing bearing/pitch.
-      followActive = false;
+      setFollowActive(false);
       beginFreeGrounding();
       orbitAttached = false;
       orbitZ = 0;
@@ -782,7 +788,7 @@ export function createTactical3d({ container, deps }) {
     orbitZ = target.z;
     // Selection fly-in and wheel zoom own the camera timeline. Retarget their shared endpoint as
     // the aircraft advances instead of starting a competing animation on every display frame.
-    if (["focus", "locate-aircraft", "wheel-orbit"].includes(cameraAnimation?.kind)) {
+    if (["track-start", "wheel-orbit"].includes(cameraAnimation?.kind)) {
       cameraAnimation.end.center = new maplibregl.LngLat(target.lon, target.lat);
       cameraAnimation.end.elevation = target.z;
       return false;
@@ -1085,20 +1091,16 @@ export function createTactical3d({ container, deps }) {
   function dataPass() {
     buildLayers();
     const selectedHex = deps.getSelectedHex();
-    if (!selectedHex) {
+    if (!followActive) {
+      if (!selectedHex) followingSelectionHex = null;
+      return;
+    }
+    // A click only selects a data block. Changing/clearing selection while tracking stops tracking
+    // in place; it never transfers camera ownership to the newly clicked aircraft.
+    if (!selectedHex || selectedHex !== followingSelectionHex) {
       followingSelectionHex = null;
       clearOrbit();
       return;
-    }
-    // Follow is selection state, not an accidental side effect of which UI path called panTo().
-    // This also covers a selection that already existed when the 3D view was opened.
-    if (selectedHex !== followingSelectionHex) {
-      followingSelectionHex = selectedHex;
-      const selected = lastList.find((item) => item.hex === selectedHex);
-      if (selected) {
-        beginSelectionFocus(selected.lon, selected.lat, selected.z);
-        return;
-      }
     }
     followSelected();
   }
@@ -1120,7 +1122,7 @@ export function createTactical3d({ container, deps }) {
   function setActive(active) {
     running = active;
     if (active) { map.resize(); requestMotionFrame(); hintEl.style.display = ""; setTimeout(() => { hintEl.style.display = "none"; }, 8000); }
-    else { cancelCameraAnimation(); cancelMotionFrame(); hoverHex = null; hoverAf = null; afPinned = null; afPinEl.style.display = "none"; afHoverEl.style.display = "none"; }
+    else { followingSelectionHex = null; clearOrbit(); cancelCameraAnimation(); cancelMotionFrame(); hoverHex = null; hoverAf = null; afPinned = null; afPinEl.style.display = "none"; afHoverEl.style.display = "none"; }
   }
   function resize() { map.resize(); }
   // 3D sits one zoom level CLOSER than the 2D map (pitch pulls the view back), so the default
@@ -1133,20 +1135,11 @@ export function createTactical3d({ container, deps }) {
     applyCameraFrame({ center: [center.lng ?? center.lon, center.lat], zoom: zoom + 1, pitch: 55, elevation: 0 });
   }
   function getCameraForMap() { const c = map.getCenter(); return { center: [c.lat, c.lng], zoom: Math.min(18, Math.max(3, Math.round(map.getZoom() - 1))) }; }
-  function beginSelectionFocus(lon, lat, z) {
-    followActive = true; attachOrbit(z);
-    animateCamera(
-      { center: [lon, lat], zoom: Math.max(map.getZoom(), 10.5), elevation: z },
-      // Ease out from the first frame so centering is never perceived as starting only after zoom.
-      // All dimensions still share this one timeline and land on the same frame.
-      { duration: 760, easing: EASE_OUT, kind: "focus", onComplete: followSelected },
-    );
-  }
-  // Select: center, zoom and 3D pivot are one animation. No globe-transition threshold is needed.
-  function panTo(lon, lat, altFt) {
-    const z = (altFt != null ? altFt * FT_TO_M : 0) * ALT_EXAGG;
-    followingSelectionHex = deps.getSelectedHex();
-    beginSelectionFocus(lon, lat, z);
+  // Aircraft clicks only select/show their data block. If another target was being tracked, release
+  // it without changing a single camera component; Locate is the sole owner of tracking start.
+  function panTo() {
+    followingSelectionHex = null;
+    clearOrbit();
   }
   // The aircraft itself now absorbs sparse receiver ticks through the motion tracker. Once selection
   // fly-in finishes, keep the camera on that continuously moving visual target instead of layering a
@@ -1154,30 +1147,40 @@ export function createTactical3d({ container, deps }) {
   function followSelected() {
     if (!followActive) return;
     const selHex = deps.getSelectedHex();
-    if (!selHex) { followActive = false; clearOrbit(); return; }
+    if (!selHex || selHex !== followingSelectionHex) { followingSelectionHex = null; clearOrbit(); return; }
     const d = lastList.find((x) => x.hex === selHex);
     if (!d) return;
     attachOrbit(d.z);
     updateFollowingCamera(d);
     requestMotionFrame();
   }
-  // Locate button: ease-out fly to the aircraft, zoom + pitch, framed at altitude; resumes tracking.
-  function flyToView(lon, lat, zoom, altFt) {
-    if (altFt == null) {
+  // Locate is a tracking toggle. Starting preserves the current bearing and pitch, changing only
+  // centre/zoom/elevated pivot; stopping preserves the resulting camera exactly where it is.
+  function flyToView(lon, lat, zoom, altFt, trackAircraft = false) {
+    if (!trackAircraft) {
+      followingSelectionHex = null;
+      clearOrbit();
       freeGrounding = null;
       orbitAttached = false;
       orbitZ = 0;
-      followActive = false;
-      animateCamera({ center: [lon, lat], zoom: zoom + 1, pitch: 55, elevation: 0 }, { duration: 900, easing: EASE_IN_OUT, kind: "locate-home" });
-      return;
+      animateCamera({ center: [lon, lat], zoom: Math.max(map.getZoom(), zoom + 1), elevation: 0 }, { duration: 900, easing: EASE_IN_OUT, kind: "locate-browser" });
+      return false;
     }
-    const z = altFt * FT_TO_M * ALT_EXAGG;
-    followingSelectionHex = deps.getSelectedHex();
-    followActive = true; attachOrbit(z);
+    const selectedHex = deps.getSelectedHex();
+    if (!selectedHex) return false;
+    if (followActive && selectedHex && followingSelectionHex === selectedHex) {
+      followingSelectionHex = null;
+      clearOrbit();
+      return false;
+    }
+    const z = (altFt ?? 0) * FT_TO_M * ALT_EXAGG;
+    followingSelectionHex = selectedHex;
+    setFollowActive(true); attachOrbit(z);
     animateCamera(
-      { center: [lon, lat], zoom: Math.max(zoom + 1, 10.5), pitch: 55, elevation: z },
-      { duration: 900, easing: EASE_OUT, kind: "locate-aircraft", onComplete: followSelected },
+      { center: [lon, lat], zoom: Math.max(map.getZoom(), zoom + 1, 10.5), elevation: z },
+      { duration: 900, easing: EASE_OUT, kind: "track-start", onComplete: followSelected },
     );
+    return true;
   }
   function fitAircraft(points) {
     if (!points.length) return;

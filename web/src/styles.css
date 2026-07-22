@@ -1194,6 +1194,24 @@ select {
   font-weight: 600;
 }
 
+/* Keep the compact update age right-aligned immediately before the pin instead of spending
+   horizontal space on the data row below. Shared by the 2D tooltip and 3D data block. */
+.tt-top-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.tt-top-actions .tt-age {
+  color: var(--muted);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 /* Altitude token: keeps the trend arrow vertically centred on the altitude digits. */
 .tt-alt { display: inline-flex; align-items: center; }
 /* Vertical-trend arrow: green climbing, red descending, muted level. */

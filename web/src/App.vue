@@ -91,6 +91,7 @@ const aircraft = ref([]);
 const receivers = ref([]);
 const coverage = ref({ areas: [], points: [] });
 const selectedHex = ref(null);
+const trackingActive = ref(false);
 const hoveredHex = ref(null);
 const selectedTrack = ref([]);
 // Pinned aircraft: their popover label AND their track stay shown regardless of hover /
@@ -760,18 +761,18 @@ function verticalArrowSymbol(item) {
 }
 
 function tooltipHtml(item) {
-  // Same tactical data-block styling and layout as the 3D view: callsign + pin over the
-  // shared status line (trend+altitude · speed · age). The .tt-age span is patched every
+  // Same tactical data-block styling and layout as the 3D view: callsign + age + pin over the
+  // shared status line (trend+altitude · speed). The .tt-age span is patched every
   // second by patchTooltipAge() so the age stays live while the pointer rests on a marker.
-  return `<span class="tt-l1"><b>${escapeHtml(formatFlight(item))}</b>${pinIcon(item.hex)}</span>`
-    + `<span class="tt-l2">${targetLine(item, false)}</span>`;
+  return `<span class="tt-l1"><b>${escapeHtml(formatFlight(item))}</b><span class="tt-top-actions"><span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>${pinIcon(item.hex)}</span></span>`
+    + `<span class="tt-l2">${targetLine(item, false, false)}</span>`;
 }
 
 // Second line shared by the 3D data block and the 2D hover popover: the vertical-trend
-// arrow immediately before the altitude (green climb / red descent), then speed, then the
-// update age (#s), each field separated by a middle dot. Altitude is quantised to 100 ft so
+// arrow immediately before the altitude (green climb / red descent), then speed and optionally
+// the update age (#s), each field separated by a middle dot. Altitude is quantised to 100 ft so
 // the label text (and the DOM rebuild it triggers) stays stable while an aircraft drifts.
-function targetLine(item, altRound) {
+function targetLine(item, altRound, includeAge = true) {
   const altFt = item.altBaro ?? item.altGeom;
   const feet = altRound && altFt != null ? Math.round(altFt / 100) * 100 : altFt;
   const alt = item.onGround ? "GND" : feet == null ? "-" : altText(feet);
@@ -780,7 +781,7 @@ function targetLine(item, altRound) {
   const arrowHtml = arrow ? `<span class="tt-trend ${trend}">${arrow}</span>` : "";
   const parts = [`<span class="tt-alt">${arrowHtml}${escapeHtml(alt)}</span>`];
   if (item.gs != null) parts.push(escapeHtml(formatSpeed(item)));
-  parts.push(`<span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>`);
+  if (includeAge) parts.push(`<span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>`);
   return parts.join(" · ");
 }
 
@@ -795,8 +796,8 @@ function pinIcon(hex) {
 
 // Tactical data block beside each 3D target: callsign + pin over the shared status line.
 function datablockHtml(item) {
-  return `<span class="t3d-datablock"><span class="db-top"><b>${escapeHtml(formatFlight(item))}</b>${pinIcon(item.hex)}</span>`
-    + `<span>${targetLine(item, true)}</span></span>`;
+  return `<span class="t3d-datablock"><span class="db-top"><b>${escapeHtml(formatFlight(item))}</b><span class="tt-top-actions"><span class="tt-age">${escapeHtml(formatAge(item.observedAt))}</span>${pinIcon(item.hex)}</span></span>`
+    + `<span>${targetLine(item, true, false)}</span></span>`;
 }
 
 // Plain-text label for the 3D view's deck.gl TextLayer (no HTML): callsign over
@@ -1515,7 +1516,8 @@ async function togglePin(hex) {
 
 async function selectAircraft(hex, pan = false) {
   selectedHex.value = hex;
-  // Move the camera immediately (before the track fetch) so selecting feels instant.
+  // In 3D a click only opens the selected target's data block and stops any previous tracking;
+  // Locate owns camera movement. The 2D map keeps its existing click-to-centre behaviour.
   const item = selectedAircraft.value;
   if (pan && item?.lat != null && item?.lon != null) {
     if (view3dActive.value) tac3d?.panTo(item.lon, item.lat, item.altBaro ?? item.altGeom);
@@ -1552,19 +1554,39 @@ function onGlobalKeydown(event) {
   if (selectedHex.value) clearSelection();
 }
 
-// Toolbar recenter: smoothly fly to the selected aircraft, or home to the Yuseong IC center
-// when nothing is selected. (Both views.)
-const HOME = { lat: 36.36599, lon: 127.33113 };
-function recenterView() {
+function browserLocation() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) { reject(new Error("Browser geolocation is unavailable")); return; }
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => resolve({ lat: coords.latitude, lon: coords.longitude }),
+      reject,
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 },
+    );
+  });
+}
+
+// With a selected aircraft this is the 3D tracking toggle. Without one, locate the browser's
+// current position (after the normal browser permission prompt) in either map engine.
+async function recenterView() {
   const sel = selectedAircraft.value;
   const hasSel = sel && sel.lat != null && sel.lon != null;
   if (view3dActive.value) {
-    if (hasSel) tac3d?.flyToView(sel.lon, sel.lat, 9, sel.altBaro ?? sel.altGeom);
-    else tac3d?.flyToView(HOME.lon, HOME.lat, 6);
+    if (hasSel) {
+      trackingActive.value = tac3d?.flyToView(sel.lon, sel.lat, 9, sel.altBaro ?? sel.altGeom, true) === true;
+      return;
+    }
   } else if (hasSel) {
     map.setView([sel.lat, sel.lon], Math.max(map.getZoom(), 9), { animate: true });
-  } else {
-    map.setView([HOME.lat, HOME.lon], 7, { animate: true });
+    return;
+  }
+  trackingActive.value = false;
+  try {
+    const here = await browserLocation();
+    if (selectedHex.value) return; // selection changed while waiting for the permission/location fix
+    if (view3dActive.value) tac3d?.flyToView(here.lon, here.lat, 12);
+    else map.setView([here.lat, here.lon], Math.max(map.getZoom(), 13), { animate: true });
+  } catch (error) {
+    console.warn("Unable to locate browser position", error);
   }
 }
 
@@ -1632,6 +1654,7 @@ async function ensureTactical3d() {
         planeSizeScale,
         onSelect: toggleAircraft,
         onHover: (hex) => { hoveredHex.value = hex; },
+        onTrackingChange: (active) => { trackingActive.value = active; },
         onMapClick: () => { if (selectedHex.value) clearSelection(); },
       },
     });
@@ -1815,7 +1838,7 @@ onUnmounted(() => {
         <div class="toolbar">
           <button class="icon-button" :class="{ active: view3dActive }" title="3D tactical view" @click="setView3d(!settings.view3d)"><Rotate3d :size="18" /></button>
           <button v-if="!view3dActive" class="icon-button" :class="{ active: measureMode }" title="Measure range/bearing (Esc to exit)" @click="toggleMeasure"><Ruler :size="18" /></button>
-          <button class="icon-button" :title="selectedAircraft ? 'Center on selected aircraft' : 'Recenter'" @click="recenterView"><LocateFixed :size="18" /></button>
+          <button class="icon-button" :class="{ active: view3dActive && trackingActive }" :title="selectedAircraft ? view3dActive ? (trackingActive ? 'Stop tracking' : 'Track selected aircraft') : 'Center on selected aircraft' : 'Go to my location'" @click="recenterView"><LocateFixed :size="18" /></button>
         </div>
       </div>
       <div v-if="measureMode" class="measure-hint">
