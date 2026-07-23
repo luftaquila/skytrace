@@ -141,8 +141,10 @@ function fieldBounds(points, options) {
     maxAltitudeFt = Math.max(maxAltitudeFt, point.altitudeFt);
   }
 
-  const horizontalPadding = options.horizontalSupportNm + options.horizontalStepNm;
-  const verticalPadding = options.verticalSupportFt + options.verticalStepFt;
+  const horizontalPadding = options.horizontalSupportNm
+    + (1 + options.horizontalSmoothingPasses) * options.horizontalStepNm;
+  const verticalPadding = options.verticalSupportFt
+    + (1 + options.verticalSmoothingPasses) * options.verticalStepFt;
   return {
     minEastNm: Math.floor((minEastNm - horizontalPadding) / options.horizontalStepNm) * options.horizontalStepNm,
     maxEastNm: Math.ceil((maxEastNm + horizontalPadding) / options.horizontalStepNm) * options.horizontalStepNm,
@@ -214,6 +216,64 @@ function interpolateNarrowHorizontalGaps(field) {
   }
 }
 
+// A short separable blur rounds the remaining grid-aligned corners after closing. Its
+// support is limited to one horizontal grid cell per pass, so large occupancy holes remain.
+function smoothHorizontalTransitions(field) {
+  const passes = field.horizontalSmoothingPasses;
+  if (passes < 1) return;
+
+  const planeSize = field.nx * field.ny;
+  const horizontal = new Float32Array(planeSize);
+  const smoothed = new Float32Array(planeSize);
+  for (let pass = 0; pass < passes; pass += 1) {
+    for (let z = 0; z < field.nz; z += 1) {
+      const zOffset = z * planeSize;
+      for (let y = 0; y < field.ny; y += 1) {
+        const rowOffset = y * field.nx;
+        for (let x = 0; x < field.nx; x += 1) {
+          const left = x > 0 ? field.values[zOffset + rowOffset + x - 1] : 0;
+          const current = field.values[zOffset + rowOffset + x];
+          const right = x + 1 < field.nx ? field.values[zOffset + rowOffset + x + 1] : 0;
+          horizontal[rowOffset + x] = left * 0.25 + current * 0.5 + right * 0.25;
+        }
+      }
+      for (let y = 0; y < field.ny; y += 1) {
+        for (let x = 0; x < field.nx; x += 1) {
+          const below = y > 0 ? horizontal[x + field.nx * (y - 1)] : 0;
+          const current = horizontal[x + field.nx * y];
+          const above = y + 1 < field.ny ? horizontal[x + field.nx * (y + 1)] : 0;
+          smoothed[x + field.nx * y] = below * 0.25 + current * 0.5 + above * 0.25;
+        }
+      }
+      field.values.set(smoothed, zOffset);
+    }
+  }
+}
+
+// Smooth only along altitude columns. This rounds shelves caused by traffic clustering at
+// discrete flight levels while leaving every horizontally unobserved column exactly empty.
+function interpolateVerticalTransitions(field) {
+  const passes = field.verticalSmoothingPasses;
+  if (passes < 1) return;
+
+  const planeSize = field.nx * field.ny;
+  const smoothed = new Float32Array(field.values.length);
+  for (let pass = 0; pass < passes; pass += 1) {
+    for (let z = 0; z < field.nz; z += 1) {
+      const zOffset = z * planeSize;
+      const belowOffset = (z - 1) * planeSize;
+      const aboveOffset = (z + 1) * planeSize;
+      for (let index = 0; index < planeSize; index += 1) {
+        const below = z > 0 ? field.values[belowOffset + index] : 0;
+        const current = field.values[zOffset + index];
+        const above = z + 1 < field.nz ? field.values[aboveOffset + index] : 0;
+        smoothed[zOffset + index] = below * 0.25 + current * 0.5 + above * 0.25;
+      }
+    }
+    field.values.set(smoothed);
+  }
+}
+
 export function sampleObservedCoverageField(field, eastNm, northNm, altitudeFt) {
   const gx = (eastNm - field.minEastNm) / field.horizontalStepNm;
   const gy = (northNm - field.minNorthNm) / field.horizontalStepNm;
@@ -251,6 +311,18 @@ export function buildObservedCoverageField(rows, origin, rawOptions = {}) {
     0,
     3,
   );
+  const rawHorizontalSmoothingPasses = Number(rawOptions.horizontalSmoothingPasses);
+  const horizontalSmoothingPasses = clamp(
+    Number.isFinite(rawHorizontalSmoothingPasses) ? Math.floor(rawHorizontalSmoothingPasses) : 2,
+    0,
+    2,
+  );
+  const rawVerticalSmoothingPasses = Number(rawOptions.verticalSmoothingPasses);
+  const verticalSmoothingPasses = clamp(
+    Number.isFinite(rawVerticalSmoothingPasses) ? Math.floor(rawVerticalSmoothingPasses) : 4,
+    0,
+    4,
+  );
   const cosLat = Math.cos(Number(origin.lat) * Math.PI / 180) || 1e-6;
   const points = rows.map((row) => localPoint(row, origin, cosLat)).filter(Boolean);
   if (points.length < 4) return null;
@@ -265,6 +337,8 @@ export function buildObservedCoverageField(rows, origin, rawOptions = {}) {
       horizontalSupportNm: supportHorizontalRatio * horizontalStepNm,
       verticalSupportFt: supportVerticalRatio * verticalStepFt,
       horizontalInterpolationCells,
+      horizontalSmoothingPasses,
+      verticalSmoothingPasses,
       maxSegmentSeconds: Math.max(15, Number(rawOptions.maxSegmentSeconds) || 90),
       maxSegmentNm: Math.max(2, Number(rawOptions.maxSegmentNm) || 15),
       maxSegmentAltitudeFt: Math.max(1000, Number(rawOptions.maxSegmentAltitudeFt) || 6000),
@@ -317,6 +391,8 @@ export function buildObservedCoverageField(rows, origin, rawOptions = {}) {
   }
 
   interpolateNarrowHorizontalGaps(field);
+  smoothHorizontalTransitions(field);
+  interpolateVerticalTransitions(field);
 
   let minObservedField = Infinity;
   for (const point of points) {
@@ -464,6 +540,35 @@ export function smoothIndexedCoverageSurface(surface, rawIterations = 2) {
   return { positions, indices: surface.indices };
 }
 
+function surfaceTopologyCounts(surface) {
+  const vertexCount = surface.positions.length / 3;
+  const edges = new Map();
+  for (let index = 0; index < surface.indices.length; index += 3) {
+    const triangle = [
+      surface.indices[index],
+      surface.indices[index + 1],
+      surface.indices[index + 2],
+    ];
+    for (const [a, b] of [
+      [triangle[0], triangle[1]],
+      [triangle[1], triangle[2]],
+      [triangle[2], triangle[0]],
+    ]) {
+      const low = Math.min(a, b);
+      const high = Math.max(a, b);
+      const key = low * vertexCount + high;
+      edges.set(key, (edges.get(key) || 0) + 1);
+    }
+  }
+  let openEdges = 0;
+  let nonManifoldEdges = 0;
+  for (const count of edges.values()) {
+    if (count === 1) openEdges += 1;
+    else if (count > 2) nonManifoldEdges += 1;
+  }
+  return { openEdges, nonManifoldEdges };
+}
+
 function encodeQuantizedMesh(surface) {
   const vertexCount = surface.positions.length / 3;
   const bounds = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
@@ -503,10 +608,30 @@ export function buildObservedCoverageMesh(rows, origin, options = {}) {
   const startedAt = performance.now();
   const field = buildObservedCoverageField(rows, origin, options);
   if (!field) return null;
-  const rawSurface = polygonizeObservedCoverageField(field, options);
+  const initialIsoLevel = field.isoLevel;
+  let rawSurface = null;
+  let topology = { openEdges: Infinity, nonManifoldEdges: Infinity };
+  let selectedIsoLevel = initialIsoLevel;
+  for (const factor of [1, 0.875, 0.75]) {
+    field.isoLevel = Math.max(0.02, initialIsoLevel * factor);
+    const candidate = polygonizeObservedCoverageField(field, options);
+    const candidateTopology = surfaceTopologyCounts(candidate);
+    const score = candidateTopology.openEdges * 1000000 + candidateTopology.nonManifoldEdges;
+    const bestScore = topology.openEdges * 1000000 + topology.nonManifoldEdges;
+    if (score < bestScore) {
+      rawSurface = candidate;
+      topology = candidateTopology;
+      selectedIsoLevel = field.isoLevel;
+    }
+    if (score === 0) break;
+  }
+  if (topology.openEdges !== 0) {
+    throw new Error(`coverage occupancy surface has ${topology.openEdges} open edges`);
+  }
+  field.isoLevel = selectedIsoLevel;
   const rawSmoothingIterations = Number(options.smoothingIterations);
   const smoothingIterations = clamp(
-    Number.isFinite(rawSmoothingIterations) ? Math.floor(rawSmoothingIterations) : 4,
+    Number.isFinite(rawSmoothingIterations) ? Math.floor(rawSmoothingIterations) : 5,
     0,
     5,
   );
@@ -525,12 +650,15 @@ export function buildObservedCoverageMesh(rows, origin, options = {}) {
     supportHorizontalNm: Number(field.horizontalSupportNm.toFixed(3)),
     supportVerticalFt: Number(field.verticalSupportFt.toFixed(1)),
     horizontalInterpolationCells: field.horizontalInterpolationCells,
+    horizontalSmoothingPasses: field.horizontalSmoothingPasses,
+    verticalSmoothingPasses: field.verticalSmoothingPasses,
     smoothingIterations,
     isoLevel: Number(field.isoLevel.toFixed(6)),
     stats: {
       grid: [field.nx, field.ny, field.nz],
       gridNodes: field.values.length,
       occupiedNodes,
+      nonManifoldEdges: topology.nonManifoldEdges,
       minObservedField: Number(field.minObservedField.toFixed(6)),
       generatedMs: Math.round((performance.now() - startedAt) * 10) / 10,
       binaryBytes: encoded.binaryBytes,

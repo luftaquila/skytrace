@@ -93,6 +93,8 @@ test("horizontal interpolation fills a narrow corridor gap without bridging a wi
     horizontalSupportNm: 1.5,
     verticalSupportFt: 1000,
     horizontalInterpolationCells: 0,
+    horizontalSmoothingPasses: 0,
+    verticalSmoothingPasses: 0,
   });
   assert.ok(sampleObservedCoverageField(rawField, 0, 0, 10000) < rawField.isoLevel);
 
@@ -102,6 +104,8 @@ test("horizontal interpolation fills a narrow corridor gap without bridging a wi
     horizontalSupportNm: 1.5,
     verticalSupportFt: 1000,
     horizontalInterpolationCells: 1,
+    horizontalSmoothingPasses: 0,
+    verticalSmoothingPasses: 0,
   });
   assert.ok(sampleObservedCoverageField(interpolatedField, 0, 0, 10000) >= interpolatedField.isoLevel);
 
@@ -117,8 +121,42 @@ test("horizontal interpolation fills a narrow corridor gap without bridging a wi
     horizontalSupportNm: 1.5,
     verticalSupportFt: 1000,
     horizontalInterpolationCells: 1,
+    horizontalSmoothingPasses: 0,
+    verticalSmoothingPasses: 0,
   });
   assert.equal(sampleObservedCoverageField(separatedField, 0, 0, 10000), 0);
+});
+
+test("horizontal smoothing rounds a nearby edge without filling a distant hole", () => {
+  const rows = [
+    observation(0, 0, 10000),
+    observation(0.1, 0, 10000),
+    observation(0, 0.1, 10000),
+    observation(0.1, 0.1, 10000),
+  ];
+  const rawField = buildObservedCoverageField(rows, ORIGIN, {
+    horizontalStepNm: 1,
+    verticalStepFt: 500,
+    horizontalSupportNm: 1.5,
+    verticalSupportFt: 1000,
+    horizontalInterpolationCells: 0,
+    horizontalSmoothingPasses: 0,
+    verticalSmoothingPasses: 0,
+  });
+  const roundedField = buildObservedCoverageField(rows, ORIGIN, {
+    horizontalStepNm: 1,
+    verticalStepFt: 500,
+    horizontalSupportNm: 1.5,
+    verticalSupportFt: 1000,
+    horizontalInterpolationCells: 0,
+    horizontalSmoothingPasses: 1,
+    verticalSmoothingPasses: 0,
+  });
+  assert.ok(
+    sampleObservedCoverageField(roundedField, 2, 0, 10000)
+      > sampleObservedCoverageField(rawField, 2, 0, 10000),
+  );
+  assert.equal(sampleObservedCoverageField(roundedField, 8, 0, 10000), 0);
 });
 
 test("surface smoothing rounds vertices without changing indexed topology", () => {
@@ -145,6 +183,38 @@ test("surface smoothing rounds vertices without changing indexed topology", () =
   assert.ok(smoothed.positions.every(Number.isFinite));
   assert.ok(smoothed.positions.some((value, index) => value !== surface.positions[index]));
   assert.ok(smoothed.positions[2] < surface.positions[2]);
+});
+
+test("vertical smoothing rounds flight-level transitions without filling horizontal voids", () => {
+  const rows = [
+    observation(0, 0, 10000),
+    observation(0.1, 0, 10000),
+    observation(0, 0.1, 10000),
+    observation(0.1, 0.1, 10000),
+  ];
+  const rawField = buildObservedCoverageField(rows, ORIGIN, {
+    horizontalStepNm: 1,
+    verticalStepFt: 500,
+    horizontalSupportNm: 1.5,
+    verticalSupportFt: 1000,
+    horizontalInterpolationCells: 0,
+    horizontalSmoothingPasses: 0,
+    verticalSmoothingPasses: 0,
+  });
+  const smoothedField = buildObservedCoverageField(rows, ORIGIN, {
+    horizontalStepNm: 1,
+    verticalStepFt: 500,
+    horizontalSupportNm: 1.5,
+    verticalSupportFt: 1000,
+    horizontalInterpolationCells: 0,
+    horizontalSmoothingPasses: 0,
+    verticalSmoothingPasses: 2,
+  });
+  assert.ok(
+    sampleObservedCoverageField(smoothedField, 0, 0, 11000)
+      > sampleObservedCoverageField(rawField, 0, 0, 11000),
+  );
+  assert.equal(sampleObservedCoverageField(smoothedField, 8, 0, 10000), 0);
 });
 
 test("surface-net mesh is watertight, indexed, and compact", () => {

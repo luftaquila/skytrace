@@ -848,6 +848,8 @@ export function getCoverage(db, options = {}) {
           horizontalSupportNm: options.coverageHorizontalSupportNm,
           verticalSupportFt: options.coverageVerticalSupportFt,
           horizontalInterpolationCells: options.coverageHorizontalInterpolationCells,
+          horizontalSmoothingPasses: options.coverageHorizontalSmoothingPasses,
+          verticalSmoothingPasses: options.coverageVerticalSmoothingPasses,
           smoothingIterations: options.coverageSmoothingIterations,
           maxCells: options.coverageMaxCells,
           maxTriangles: options.coverageMaxTriangles,
