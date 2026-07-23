@@ -102,12 +102,15 @@ const COV_VERT = `#version 300 es
 precision highp float;
 uniform mat4 u_mvp;
 in vec3 a_pos;
+in vec3 a_normal;
 out float v_altFt;
-void main() { v_altFt = max(a_pos.z / 0.3048, 0.0); gl_Position = u_mvp * vec4(a_pos, 1.0); }`;
+out vec3 v_normal;
+void main() { v_altFt = max(a_pos.z / 0.3048, 0.0); v_normal = a_normal; gl_Position = u_mvp * vec4(a_pos, 1.0); }`;
 const COV_FRAG = `#version 300 es
 precision highp float;
 uniform float u_alpha;
 in float v_altFt;
+in vec3 v_normal;
 out vec4 fragColor;
 float covLinToSrgb(float v) { v = max(v, 0.0); return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055; }
 vec3 covOklch(float L, float C, float hDeg) {
@@ -122,7 +125,11 @@ vec3 covOklch(float L, float C, float hDeg) {
   return clamp(vec3(covLinToSrgb(lin.r), covLinToSrgb(lin.g), covLinToSrgb(lin.b)), 0.0, 1.0);
 }
 vec3 covColor(float ft) { float t = clamp(ft / 40000.0, 0.0, 1.0); return covOklch(0.72, 0.18, mix(50.0, 300.0, t)); }
-void main() { fragColor = vec4(covColor(v_altFt), u_alpha); }`;
+void main() {
+  float light = abs(dot(normalize(v_normal), normalize(vec3(-0.35, 0.45, 0.82))));
+  vec3 color = covColor(v_altFt) * (0.76 + 0.24 * light);
+  fragColor = vec4(color, u_alpha);
+}`;
 
 function scale3(x, y, z) {
   return new Float64Array([x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1]);
@@ -144,10 +151,13 @@ function compile(gl, src, type) {
 // getData()     → aircraft (see below)
 // getSegments() → [{ a:[lon,lat,alt], b:[lon,lat,alt], color:[r,g,b,a 0..255], widthPx }] (sticks/trails/conflicts)
 // getDots()     → [{ p:[lon,lat,alt], color:[r,g,b,a 0..255], sizePx }] (ground feet)
-// getCoverage() → { positions: Float32Array (metre offsets, size 3), anchor:[lon,lat], altExagg } | null
+// getCoverage() → { positions: Float32Array, normals: Float32Array, indices?: Uint16Array|Uint32Array,
+//                   anchor:[lon,lat], altExagg } | null
 export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, getDots, getCoverage }) {
   let gl = null, map = null, program = null, lineProgram = null, lineBuf = null;
-  let covProgram = null, covBuf = null, covRef = null, covCount = 0;
+  let covProgram = null, covBuf = null, covNormalBuf = null, covIndexBuf = null;
+  let covRef = null, covNormalRef = null, covIndexRef = null;
+  let covCount = 0, covIndexType = null;
   let lastMain = null; // last frame's mainMatrix, for the debug projection hook
   const loc = {};
   const lineLoc = {};
@@ -205,9 +215,12 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
       gl.linkProgram(covProgram);
       if (!gl.getProgramParameter(covProgram, gl.LINK_STATUS)) throw new Error("coverage link: " + gl.getProgramInfoLog(covProgram));
       covLoc.pos = gl.getAttribLocation(covProgram, "a_pos");
+      covLoc.normal = gl.getAttribLocation(covProgram, "a_normal");
       covLoc.mvp = gl.getUniformLocation(covProgram, "u_mvp");
       covLoc.alpha = gl.getUniformLocation(covProgram, "u_alpha");
       covBuf = gl.createBuffer();
+      covNormalBuf = gl.createBuffer();
+      covIndexBuf = gl.createBuffer();
     },
     // Debug-only: project a lon/lat/alt to CSS pixels using the EXACT matrix the layer last drew
     // with — lets a test confirm the aircraft follows the map camera (rotate/tilt) in globe.
@@ -227,6 +240,8 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
       if (lineBuf) gl.deleteBuffer(lineBuf);
       if (covProgram) gl.deleteProgram(covProgram);
       if (covBuf) gl.deleteBuffer(covBuf);
+      if (covNormalBuf) gl.deleteBuffer(covNormalBuf);
+      if (covIndexBuf) gl.deleteBuffer(covIndexBuf);
     },
     render(glCtx, args) {
       const main = args.defaultProjectionData.mainMatrix;
@@ -244,8 +259,25 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
         if (cov.positions !== covRef) {
           gl.bindBuffer(gl.ARRAY_BUFFER, covBuf);
           gl.bufferData(gl.ARRAY_BUFFER, cov.positions, gl.STATIC_DRAW);
-          covCount = cov.positions.length / 3;
           covRef = cov.positions;
+        }
+        if (cov.normals !== covNormalRef) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, covNormalBuf);
+          gl.bufferData(gl.ARRAY_BUFFER, cov.normals, gl.STATIC_DRAW);
+          covNormalRef = cov.normals;
+        }
+        if (cov.indices) {
+          if (cov.indices !== covIndexRef) {
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, covIndexBuf);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, cov.indices, gl.STATIC_DRAW);
+            covIndexRef = cov.indices;
+          }
+          covCount = cov.indices.length;
+          covIndexType = cov.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT;
+        } else {
+          covIndexRef = null;
+          covCount = cov.positions.length / 3;
+          covIndexType = null;
         }
         // mesh verts are Z-up ENU metre offsets [east, north, alt]; ENU_TO_FRAME puts the altitude on
         // the frame's UP axis (Y) so the dome stands vertically UP, not tipped over onto its side.
@@ -255,16 +287,27 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
         gl.bindBuffer(gl.ARRAY_BUFFER, covBuf);
         gl.enableVertexAttribArray(covLoc.pos);
         gl.vertexAttribPointer(covLoc.pos, 3, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, covNormalBuf);
+        gl.enableVertexAttribArray(covLoc.normal);
+        gl.vertexAttribPointer(covLoc.normal, 3, gl.FLOAT, false, 0, 0);
         gl.enable(gl.DEPTH_TEST);
         gl.depthFunc(gl.LEQUAL);
+        const drawCoverage = () => {
+          if (covIndexType) {
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, covIndexBuf);
+            gl.drawElements(gl.TRIANGLES, covCount, covIndexType, 0);
+          } else {
+            gl.drawArrays(gl.TRIANGLES, 0, covCount);
+          }
+        };
         gl.depthMask(true);
         gl.colorMask(false, false, false, false);
         gl.uniform1f(covLoc.alpha, 0.0);
-        gl.drawArrays(gl.TRIANGLES, 0, covCount);   // pass 1: depth only
+        drawCoverage();                              // pass 1: depth only
         gl.colorMask(true, true, true, true);
         gl.depthMask(false);
         gl.uniform1f(covLoc.alpha, 58 / 255);
-        gl.drawArrays(gl.TRIANGLES, 0, covCount);   // pass 2: colour once
+        drawCoverage();                              // pass 2: colour once
       }
 
       gl.disable(gl.DEPTH_TEST);           // sticks/trails/aircraft over terrain/dome (deck used depthCompare 'always')

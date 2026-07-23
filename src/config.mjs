@@ -7,6 +7,13 @@ function intFromEnv(env, key, fallback) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+function numberFromEnv(env, key, fallback) {
+  const raw = env[key];
+  if (raw == null || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 function boolFromEnv(env, key, fallback = false) {
   const raw = env[key];
   if (raw == null || raw === "") return fallback;
@@ -70,5 +77,12 @@ export function loadConfig(env = process.env) {
     coverageWindowHours: intFromEnv(env, "SKYTRACE_COVERAGE_WINDOW_HOURS", 24 * 30),
     coverageBearingStepDegrees: Number.parseFloat(env.SKYTRACE_COVERAGE_BEARING_STEP_DEGREES || "1"),
     coverageMaxPoints: intFromEnv(env, "SKYTRACE_COVERAGE_MAX_POINTS", 50000),
+    coverageRefreshSeconds: intFromEnv(env, "SKYTRACE_COVERAGE_REFRESH_SECONDS", 300),
+    coverageHorizontalStepNm: numberFromEnv(env, "SKYTRACE_COVERAGE_HORIZONTAL_STEP_NM", 2.5),
+    coverageVerticalStepFt: numberFromEnv(env, "SKYTRACE_COVERAGE_VERTICAL_STEP_FT", 1000),
+    coverageHorizontalSupportNm: numberFromEnv(env, "SKYTRACE_COVERAGE_HORIZONTAL_SUPPORT_NM", 4.5),
+    coverageVerticalSupportFt: numberFromEnv(env, "SKYTRACE_COVERAGE_VERTICAL_SUPPORT_FT", 2500),
+    coverageMaxCells: intFromEnv(env, "SKYTRACE_COVERAGE_MAX_CELLS", 1200000),
+    coverageMaxTriangles: intFromEnv(env, "SKYTRACE_COVERAGE_MAX_TRIANGLES", 200000),
   };
 }

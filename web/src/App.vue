@@ -186,6 +186,7 @@ const coverageSummary = computed(() => {
     areas: areas.filter((area) => area.polygon).length,
     positions: coverage.value.count ?? (coverage.value.points || []).length,
     receivers: coverage.value.receiverCount ?? areas.length,
+    triangles: areas.reduce((sum, area) => sum + (area.volumeMesh?.triangleCount || 0), 0),
   };
 });
 
@@ -915,10 +916,9 @@ async function refreshLive() {
   }
 }
 
-// Coverage is a heavy query (a 30-day, up-to-50k-row envelope) whose outline barely moves
-// per position, so it refetches only when a batch actually recorded new track points (see
-// the ingest handler) — event-driven, not on a blind timer that both lags real changes and
-// spins while idle.
+// The server rebuilds one complete occupancy snapshot every five minutes. The browser only
+// downloads that finished snapshot on the same cadence; live ingest events never trigger mesh
+// generation or repeated downloads.
 async function refreshCoverage() {
   try {
     coverage.value = (await fetchJson("/api/coverage")) || { areas: [], points: [] };
@@ -1157,10 +1157,10 @@ onMounted(async () => {
   tac3d.applySettings();
   await refreshLive();
   await refreshCoverage();
-  // Fallback polls in case the SSE stream drops; otherwise live updates are driven by
-  // ingest events, and coverage only when a batch actually recorded new track points.
+  // Fallback polls in case the SSE stream drops. Coverage is an independent five-minute
+  // snapshot, deliberately decoupled from the five-second aircraft updates.
   refreshTimer = setInterval(() => liveRefresher.schedule(0), 10000);
-  coverageTimer = setInterval(() => coverageRefresher.schedule(0), 60000);
+  coverageTimer = setInterval(() => coverageRefresher.schedule(0), 300000);
   clockTimer = setInterval(() => {
     now.value = Date.now();
     // Coast/drop transitions and each data block's age (#s) are time-driven; a dataPass
@@ -1175,13 +1175,8 @@ function connectEvents() {
   eventSource = new EventSource("/api/events");
   // A (re)opened stream may have missed events while down — resync immediately.
   eventSource.onopen = () => liveRefresher.schedule(0);
-  eventSource.addEventListener("ingest", (event) => {
+  eventSource.addEventListener("ingest", () => {
     liveRefresher.schedule();
-    // Only touch the heavy coverage query when this batch actually stored new track
-    // points; otherwise the 30-day envelope cannot have changed.
-    let trackPoints = 1;
-    try { trackPoints = JSON.parse(event.data)?.trackPoints ?? 1; } catch { /* refetch on parse failure */ }
-    if (trackPoints > 0) coverageRefresher.schedule(1000);
   });
   eventSource.onerror = () => {
     status.value = "reconnecting";
@@ -1424,7 +1419,10 @@ onUnmounted(() => {
           <div class="dock-stats">
             <section class="coverage-card">
               <header><Layers :size="17" /><span>Coverage</span></header>
-              <div class="coverage-note">{{ coverageSummary.areas }} areas · {{ coverageSummary.positions }} positions</div>
+              <div class="coverage-note">
+                {{ coverageSummary.areas }} areas · {{ coverageSummary.positions }} positions
+                <template v-if="coverageSummary.triangles"> · {{ numberFormatter(0).format(coverageSummary.triangles) }} triangles</template>
+              </div>
             </section>
             <section class="coverage-card">
               <header><TowerControl :size="17" /><span>Airfields</span></header>

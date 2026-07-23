@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import express from "express";
+import { createCoverageCache } from "./coverage-cache.mjs";
 import {
   authenticateIngest,
   getCoverage,
@@ -35,6 +36,23 @@ export function createApp({ db, config, sseHub }) {
   if (config.trustProxy) app.set("trust proxy", true);
 
   app.use(express.json({ limit: "8mb" }));
+
+  const coverageCache = createCoverageCache({
+    refreshSeconds: config.coverageRefreshSeconds,
+    build: (now) => getCoverage(db, {
+      now,
+      coverageWindowHours: config.coverageWindowHours,
+      coverageBearingStepDegrees: config.coverageBearingStepDegrees,
+      coverageMaxPoints: config.coverageMaxPoints,
+      coverageHorizontalStepNm: config.coverageHorizontalStepNm,
+      coverageVerticalStepFt: config.coverageVerticalStepFt,
+      coverageHorizontalSupportNm: config.coverageHorizontalSupportNm,
+      coverageVerticalSupportFt: config.coverageVerticalSupportFt,
+      coverageMaxCells: config.coverageMaxCells,
+      coverageMaxTriangles: config.coverageMaxTriangles,
+    }),
+  });
+  app.locals.coverageCache = coverageCache;
 
   app.get("/healthz", (req, res) => {
     res.json({ ok: true, now: new Date().toISOString() });
@@ -98,12 +116,10 @@ export function createApp({ db, config, sseHub }) {
   });
 
   app.get("/api/coverage", (req, res) => {
-    res.json(getCoverage(db, {
-      now: new Date().toISOString(),
-      coverageWindowHours: config.coverageWindowHours,
-      coverageBearingStepDegrees: config.coverageBearingStepDegrees,
-      coverageMaxPoints: config.coverageMaxPoints,
-    }));
+    // The browser's five-minute timer should always ask the server for its current snapshot;
+    // only the server cache controls mesh freshness.
+    res.set("cache-control", "public, max-age=0, must-revalidate");
+    res.json(coverageCache.get());
   });
 
   app.get("/api/aircraft/:hex/track.kml", (req, res) => {

@@ -16,6 +16,7 @@ const server = app.listen(config.port, () => {
 
 function shutdown(signal) {
   console.log(`received ${signal}, shutting down`);
+  app.locals.coverageCache?.close();
   server.close(() => {
     db.close();
     process.exit(0);

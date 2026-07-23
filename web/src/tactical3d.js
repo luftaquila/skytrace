@@ -763,7 +763,13 @@ export function createTactical3d({ container, deps }) {
     for (const c of conflictLines) segs.push({ a: c.source, b: c.target, color: [251, 113, 133, 235], widthPx: 2.6 });
     aircraftSegments = segs;
     aircraftDots = sticks.map((s) => ({ p: s.target, color: s.color, sizePx: 3 }));
-    aircraftCoverage = covMesh ? { positions: covMesh.attributes.positions.value, anchor: [HOME.lon, HOME.lat], altExagg: ALT_EXAGG } : null;
+    aircraftCoverage = covMesh ? {
+      positions: covMesh.attributes.positions.value,
+      normals: covMesh.attributes.normals.value,
+      indices: covMesh.indices || null,
+      anchor: [HOME.lon, HOME.lat],
+      altExagg: ALT_EXAGG,
+    } : null;
     // Playback ghost (a dim, semi-transparent aircraft at the replayed position).
     for (const g of ghostData) aircraftRenderList.push({ lon: g.lon, lat: g.lat, z: g.z, r: g.rgb.r, g: g.rgb.g, b: g.rgb.b, a: 150, pitch: g.orientation[0], yaw: g.orientation[1], roll: g.orientation[2], cls: "medium", clsMul: 1 });
     if (ready) map.triggerRepaint();
@@ -877,11 +883,25 @@ export function createTactical3d({ container, deps }) {
   let coverageMeshSource = null;
   let cachedCoverageMesh = null;
 
-  function decodeFloat32Base64(encoded) {
+  function decodeBase64Bytes(encoded) {
     const binary = atob(encoded);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-    return new Float32Array(bytes.buffer);
+    return bytes;
+  }
+
+  function decodeFloat32Base64(encoded) {
+    return new Float32Array(decodeBase64Bytes(encoded).buffer);
+  }
+
+  function decodeUnsignedBase64(encoded, bits) {
+    const bytes = decodeBase64Bytes(encoded);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const values = bits === 16 ? new Uint16Array(bytes.byteLength / 2) : new Uint32Array(bytes.byteLength / 4);
+    for (let i = 0; i < values.length; i += 1) {
+      values[i] = bits === 16 ? view.getUint16(i * 2, true) : view.getUint32(i * 4, true);
+    }
+    return values;
   }
 
   function coverageMesh() {
@@ -890,11 +910,32 @@ export function createTactical3d({ container, deps }) {
     if (coverage === coverageMeshSource) return cachedCoverageMesh;
     coverageMeshSource = coverage;
     const positions = [];
+    const indices = [];
     // Metre offset of a ring vertex from HOME (the SimpleMeshLayer anchor).
     const off = (pt, z) => [(pt[0] - HOME.lon) * M_PER_DEG_LON, (pt[1] - HOME.lat) * M_PER_DEG_LAT, z];
     const pushV = (p) => { positions.push(p[0], p[1], p[2]); };
     for (const area of coverage?.areas || []) {
       const observed = area.volumeMesh;
+      if (observed?.encoding === "quantized-uint16-le-base64"
+        && observed.positions && observed.indices && observed.positionBounds?.length === 6
+        && observed.origin?.length === 2) {
+        const quantized = decodeUnsignedBase64(observed.positions, 16);
+        const bounds = observed.positionBounds;
+        const spans = [bounds[3] - bounds[0], bounds[4] - bounds[1], bounds[5] - bounds[2]];
+        const eastOffset = (observed.origin[0] - HOME.lon) * M_PER_DEG_LON;
+        const northOffset = (observed.origin[1] - HOME.lat) * M_PER_DEG_LAT;
+        const vertexBase = positions.length / 3;
+        for (let i = 0; i < quantized.length; i += 3) {
+          positions.push(
+            bounds[0] + spans[0] * quantized[i] / 65535 + eastOffset,
+            bounds[1] + spans[1] * quantized[i + 1] / 65535 + northOffset,
+            bounds[2] + spans[2] * quantized[i + 2] / 65535,
+          );
+        }
+        const decodedIndices = decodeUnsignedBase64(observed.indices, observed.indexEncoding === "uint16-le-base64" ? 16 : 32);
+        for (const index of decodedIndices) indices.push(vertexBase + index);
+        continue;
+      }
       if (observed?.encoding === "float32-le-base64" && observed.positions && observed.origin?.length === 2) {
         const decoded = decodeFloat32Base64(observed.positions);
         const eastOffset = (observed.origin[0] - HOME.lon) * M_PER_DEG_LON;
@@ -932,10 +973,39 @@ export function createTactical3d({ container, deps }) {
       cachedCoverageMesh = null;
       return null;
     }
+    const positionArray = new Float32Array(positions);
+    const indexArray = indices.length
+      ? (positions.length / 3 <= 65535 ? Uint16Array.from(indices) : Uint32Array.from(indices))
+      : null;
+    const normals = new Float32Array(positionArray.length);
+    const addNormal = (ia, ib, ic) => {
+      const ax = positionArray[ia * 3]; const ay = positionArray[ia * 3 + 1]; const az = positionArray[ia * 3 + 2] * ALT_EXAGG;
+      const bx = positionArray[ib * 3]; const by = positionArray[ib * 3 + 1]; const bz = positionArray[ib * 3 + 2] * ALT_EXAGG;
+      const cx = positionArray[ic * 3]; const cy = positionArray[ic * 3 + 1]; const cz = positionArray[ic * 3 + 2] * ALT_EXAGG;
+      const abx = bx - ax; const aby = by - ay; const abz = bz - az;
+      const acx = cx - ax; const acy = cy - ay; const acz = cz - az;
+      const nx = aby * acz - abz * acy;
+      const ny = abz * acx - abx * acz;
+      const nz = abx * acy - aby * acx;
+      normals[ia * 3] += nx; normals[ia * 3 + 1] += ny; normals[ia * 3 + 2] += nz;
+      normals[ib * 3] += nx; normals[ib * 3 + 1] += ny; normals[ib * 3 + 2] += nz;
+      normals[ic * 3] += nx; normals[ic * 3 + 1] += ny; normals[ic * 3 + 2] += nz;
+    };
+    if (indexArray) {
+      for (let i = 0; i < indexArray.length; i += 3) addNormal(indexArray[i], indexArray[i + 1], indexArray[i + 2]);
+    } else {
+      for (let i = 0; i < positionArray.length / 3; i += 3) addNormal(i, i + 1, i + 2);
+    }
+    for (let i = 0; i < normals.length; i += 3) {
+      const length = Math.hypot(normals[i], normals[i + 1], normals[i + 2]) || 1;
+      normals[i] /= length; normals[i + 1] /= length; normals[i + 2] /= length;
+    }
     cachedCoverageMesh = {
       attributes: {
-        positions: { value: new Float32Array(positions), size: 3 },
+        positions: { value: positionArray, size: 3 },
+        normals: { value: normals, size: 3 },
       },
+      indices: indexArray,
     };
     return cachedCoverageMesh;
   }

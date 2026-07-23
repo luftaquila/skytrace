@@ -1,5 +1,6 @@
 import { hashToken, nowIso } from "./db.mjs";
 import { isFreshObservation, normalizeReadsbPayload, sanitizeReceiverId } from "./normalize-readsb.mjs";
+import { buildObservedCoverageMesh } from "./coverage-volume.mjs";
 
 function tokenHashSet(tokens) {
   return new Set((tokens || []).map((token) => hashToken(token)));
@@ -763,6 +764,7 @@ export function getCoverage(db, options = {}) {
   const rows = db.prepare(`
     SELECT
       t.receiver_id,
+      t.hex,
       r.public_name AS receiver_name,
       r.lat AS receiver_lat,
       r.lon AS receiver_lon,
@@ -813,7 +815,7 @@ export function getCoverage(db, options = {}) {
 
   return {
     from,
-    type: "observed-envelope",
+    type: "observed-occupancy",
     count: rows.length,
     receiverCount: groups.size,
     bounds: bounds.minLat == null ? null : [
@@ -822,6 +824,9 @@ export function getCoverage(db, options = {}) {
     ],
     areas: [...groups.values()].map((group) => {
       const ring = coverageRingForReceiver(group.rows, group.receiverLat, group.receiverLon);
+      // The mesh origin is the reception centroid, never the private receiver position. The
+      // origin is only a local tangent-plane anchor and does not alter occupancy geometry.
+      const meshOrigin = coverageOrigin(group.rows, null, null);
       return {
         receiverName: group.receiverName,
         count: group.count,
@@ -829,12 +834,22 @@ export function getCoverage(db, options = {}) {
         lastSeenAt: group.lastSeenAt,
         polygon: ring ? { type: "Polygon", coordinates: [ring] } : null,
         bands: coverageBandsForReceiver(group.rows, group.receiverLat, group.receiverLon),
-        volume: coverageVolumeForReceiver(group.rows, group.receiverLat, group.receiverLon),
+        // Ring skins cannot represent internal observed/unobserved space. Keep the 2D summary
+        // polygons for API compatibility, but make the actual 3D representation an occupancy
+        // surface generated from observations and short continuous track segments.
+        volume: null,
+        volumeMesh: buildObservedCoverageMesh(group.rows, meshOrigin, {
+          horizontalStepNm: options.coverageHorizontalStepNm,
+          verticalStepFt: options.coverageVerticalStepFt,
+          horizontalSupportNm: options.coverageHorizontalSupportNm,
+          verticalSupportFt: options.coverageVerticalSupportFt,
+          maxCells: options.coverageMaxCells,
+          maxTriangles: options.coverageMaxTriangles,
+        }),
       };
     }).sort((a, b) => b.count - a.count),
-    // Raw points are no longer sent: the 2D outline/bands and the 3D volume are all
-    // computed server-side above, so shipping tens of thousands of points would only add
-    // download/parse cost for nothing.
+    // Raw points are never sent. The indexed, quantized mesh is substantially smaller than
+    // either 50k JSON points or an unindexed triangle list.
     points: [],
   };
 }

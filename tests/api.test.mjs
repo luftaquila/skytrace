@@ -29,6 +29,7 @@ async function withServer(fn) {
     await fn({ baseUrl, db });
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    app.locals.coverageCache?.close();
     db.close();
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -119,16 +120,54 @@ test("ingests receiver aircraft and exposes current state and track", async () =
     assert.equal(receivers.receivers[0].name, "Roof Receiver");
     assert.equal(receivers.receivers[0].lat, null);
 
-    const coverage = await (await fetch(`${baseUrl}/api/coverage`)).json();
-    assert.equal(coverage.type, "observed-envelope");
+    const coverageResponse = await fetch(`${baseUrl}/api/coverage`);
+    assert.equal(coverageResponse.headers.get("cache-control"), "public, max-age=0, must-revalidate");
+    const coverage = await coverageResponse.json();
+    assert.equal(coverage.type, "observed-occupancy");
     assert.equal(coverage.receiverCount, 1);
     assert.equal(coverage.areas.length, 1);
     assert.equal(coverage.areas[0].receiverName, "Roof Receiver");
     assert.equal(coverage.areas[0].receiverLat, undefined);
     assert.equal(coverage.areas[0].receiverLon, undefined);
-    assert.equal(coverage.points.length, 1);
-    assert.equal(coverage.points[0].lat, 37.55);
-    assert.equal(coverage.points[0].lon, 127.05);
+    assert.equal(coverage.points.length, 0);
+    assert.equal(coverage.areas[0].volume, null);
+    assert.equal(coverage.areas[0].volumeMesh, null);
+    assert.equal(coverage.refreshIntervalSeconds, 300);
+    assert.ok(Number.isFinite(Date.parse(coverage.generatedAt)));
+  });
+});
+
+test("coverage API returns a compact indexed occupancy mesh", async () => {
+  await withServer(async ({ baseUrl }) => {
+    const now = Date.now() / 1000;
+    const aircraft = [
+      ["aaa001", 37.45, 127.00, 8000],
+      ["aaa002", 37.50, 127.05, 10000],
+      ["aaa003", 37.55, 127.10, 12000],
+      ["aaa004", 37.60, 127.15, 14000],
+    ].map(([hex, lat, lon, alt_baro]) => ({
+      hex, type: "adsb_icao", lat, lon, alt_baro, seen: 0, seen_pos: 0,
+    }));
+    const response = await fetch(`${baseUrl}/api/ingest/readsb`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer secret-token" },
+      body: JSON.stringify({
+        receiver: { id: "rx-1", name: "Roof Receiver", lat: 37.5, lon: 127.1 },
+        payload: { now, aircraft },
+      }),
+    });
+    assert.equal(response.status, 200);
+
+    const coverage = await (await fetch(`${baseUrl}/api/coverage`)).json();
+    const mesh = coverage.areas[0].volumeMesh;
+    assert.equal(mesh.type, "observed-occupancy-surface");
+    assert.equal(mesh.encoding, "quantized-uint16-le-base64");
+    assert.match(mesh.indexEncoding, /^uint(16|32)-le-base64$/);
+    assert.equal(mesh.sourcePointCount, 4);
+    assert.ok(mesh.vertexCount > 0);
+    assert.ok(mesh.triangleCount > 0);
+    assert.equal(coverage.areas[0].receiverLat, undefined);
+    assert.equal(coverage.areas[0].receiverLon, undefined);
   });
 });
 
