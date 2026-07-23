@@ -49,6 +49,7 @@ export function createApp({ db, config, sseHub }) {
       coverageHorizontalSupportNm: config.coverageHorizontalSupportNm,
       coverageVerticalSupportFt: config.coverageVerticalSupportFt,
       coverageHorizontalInterpolationCells: config.coverageHorizontalInterpolationCells,
+      coverageSmoothingIterations: config.coverageSmoothingIterations,
       coverageMaxCells: config.coverageMaxCells,
       coverageMaxTriangles: config.coverageMaxTriangles,
     }),

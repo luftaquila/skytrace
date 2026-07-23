@@ -239,8 +239,8 @@ export function sampleObservedCoverageField(field, eastNm, northNm, altitudeFt) 
 }
 
 export function buildObservedCoverageField(rows, origin, rawOptions = {}) {
-  let horizontalStepNm = Math.max(0.75, Number(rawOptions.horizontalStepNm) || 2.5);
-  let verticalStepFt = Math.max(250, Number(rawOptions.verticalStepFt) || 1000);
+  let horizontalStepNm = Math.max(0.75, Number(rawOptions.horizontalStepNm) || 2);
+  let verticalStepFt = Math.max(250, Number(rawOptions.verticalStepFt) || 800);
   const supportHorizontalRatio = Math.max(1.25, (Number(rawOptions.horizontalSupportNm) || 4.5) / horizontalStepNm);
   const supportVerticalRatio = Math.max(1.25, (Number(rawOptions.verticalSupportFt) || 2500) / verticalStepFt);
   const maxCells = Math.max(25000, Number(rawOptions.maxCells) || 1200000);
@@ -410,6 +410,60 @@ export function polygonizeObservedCoverageField(field, rawOptions = {}) {
   return { positions: Float32Array.from(positions), indices };
 }
 
+export function smoothIndexedCoverageSurface(surface, rawIterations = 2) {
+  const vertexCount = surface.positions.length / 3;
+  const iterations = clamp(Math.floor(Number(rawIterations) || 0), 0, 5);
+  if (iterations === 0 || vertexCount < 4) return surface;
+
+  const neighbors = Array.from({ length: vertexCount }, () => new Set());
+  const connect = (a, b) => {
+    if (a === b) return;
+    neighbors[a].add(b);
+    neighbors[b].add(a);
+  };
+  for (let i = 0; i < surface.indices.length; i += 3) {
+    const a = surface.indices[i];
+    const b = surface.indices[i + 1];
+    const c = surface.indices[i + 2];
+    connect(a, b);
+    connect(b, c);
+    connect(c, a);
+  }
+
+  let positions = Float32Array.from(surface.positions);
+  const pass = (factor) => {
+    const next = new Float32Array(positions.length);
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      const adjacent = neighbors[vertex];
+      if (!adjacent.size) {
+        next.set(positions.subarray(vertex * 3, vertex * 3 + 3), vertex * 3);
+        continue;
+      }
+      const average = [0, 0, 0];
+      for (const neighbor of adjacent) {
+        average[0] += positions[neighbor * 3];
+        average[1] += positions[neighbor * 3 + 1];
+        average[2] += positions[neighbor * 3 + 2];
+      }
+      for (let axis = 0; axis < 3; axis += 1) {
+        average[axis] /= adjacent.size;
+        const index = vertex * 3 + axis;
+        next[index] = positions[index] + factor * (average[axis] - positions[index]);
+      }
+    }
+    positions = next;
+  };
+
+  // A positive Laplacian pass rounds grid corners; the short negative pass restores most
+  // of the lost volume. A few Taubin-style cycles soften the surface without moving
+  // topology or bridging any occupancy gap.
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    pass(0.42);
+    pass(-0.44);
+  }
+  return { positions, indices: surface.indices };
+}
+
 function encodeQuantizedMesh(surface) {
   const vertexCount = surface.positions.length / 3;
   const bounds = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
@@ -449,7 +503,14 @@ export function buildObservedCoverageMesh(rows, origin, options = {}) {
   const startedAt = performance.now();
   const field = buildObservedCoverageField(rows, origin, options);
   if (!field) return null;
-  const surface = polygonizeObservedCoverageField(field, options);
+  const rawSurface = polygonizeObservedCoverageField(field, options);
+  const rawSmoothingIterations = Number(options.smoothingIterations);
+  const smoothingIterations = clamp(
+    Number.isFinite(rawSmoothingIterations) ? Math.floor(rawSmoothingIterations) : 4,
+    0,
+    5,
+  );
+  const surface = smoothIndexedCoverageSurface(rawSurface, smoothingIterations);
   if (!surface.positions.length || !surface.indices.length) return null;
   const encoded = encodeQuantizedMesh(surface);
   const occupiedNodes = field.values.reduce((count, value) => count + (value >= field.isoLevel ? 1 : 0), 0);
@@ -464,6 +525,7 @@ export function buildObservedCoverageMesh(rows, origin, options = {}) {
     supportHorizontalNm: Number(field.horizontalSupportNm.toFixed(3)),
     supportVerticalFt: Number(field.verticalSupportFt.toFixed(1)),
     horizontalInterpolationCells: field.horizontalInterpolationCells,
+    smoothingIterations,
     isoLevel: Number(field.isoLevel.toFixed(6)),
     stats: {
       grid: [field.nx, field.ny, field.nz],

@@ -4,6 +4,7 @@ import {
   buildObservedCoverageField,
   buildObservedCoverageMesh,
   sampleObservedCoverageField,
+  smoothIndexedCoverageSurface,
 } from "../src/coverage-volume.mjs";
 
 const ORIGIN = { lat: 36.372628, lon: 127.333295 };
@@ -118,6 +119,32 @@ test("horizontal interpolation fills a narrow corridor gap without bridging a wi
     horizontalInterpolationCells: 1,
   });
   assert.equal(sampleObservedCoverageField(separatedField, 0, 0, 10000), 0);
+});
+
+test("surface smoothing rounds vertices without changing indexed topology", () => {
+  const surface = {
+    positions: Float32Array.from([
+      0, 0, 2,
+      -1, -1, 0,
+      1, -1, 0,
+      1, 1, 0,
+      -1, 1, 0,
+    ]),
+    indices: [
+      0, 1, 2,
+      0, 2, 3,
+      0, 3, 4,
+      0, 4, 1,
+      1, 4, 3,
+      1, 3, 2,
+    ],
+  };
+  const smoothed = smoothIndexedCoverageSurface(surface, 2);
+  assert.deepEqual(smoothed.indices, surface.indices);
+  assert.equal(smoothed.positions.length, surface.positions.length);
+  assert.ok(smoothed.positions.every(Number.isFinite));
+  assert.ok(smoothed.positions.some((value, index) => value !== surface.positions[index]));
+  assert.ok(smoothed.positions[2] < surface.positions[2]);
 });
 
 test("surface-net mesh is watertight, indexed, and compact", () => {
