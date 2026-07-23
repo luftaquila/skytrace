@@ -86,9 +86,13 @@ const COVERAGE_ALTITUDE_BANDS = [
 // receptions (the public feed hides receiver coordinates). A shared origin keeps the
 // overall outline and every altitude band concentric.
 function coverageOrigin(positioned, receiverLat, receiverLon) {
-  if (finiteLatLon(receiverLat, receiverLon)) {
+  if (receiverLat != null && receiverLon != null && finiteLatLon(receiverLat, receiverLon)) {
     return { lat: Number(receiverLat), lon: Number(receiverLon) };
   }
+  return coverageCentroid(positioned);
+}
+
+function coverageCentroid(positioned) {
   return {
     lat: positioned.reduce((sum, row) => sum + row.lat, 0) / positioned.length,
     lon: positioned.reduce((sum, row) => sum + row.lon, 0) / positioned.length,
@@ -826,7 +830,7 @@ export function getCoverage(db, options = {}) {
       const ring = coverageRingForReceiver(group.rows, group.receiverLat, group.receiverLon);
       // The mesh origin is the reception centroid, never the private receiver position. The
       // origin is only a local tangent-plane anchor and does not alter occupancy geometry.
-      const meshOrigin = coverageOrigin(group.rows, null, null);
+      const meshOrigin = coverageCentroid(group.rows);
       return {
         receiverName: group.receiverName,
         count: group.count,
