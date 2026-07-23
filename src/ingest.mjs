@@ -761,31 +761,15 @@ export function getTrack(db, hex, options = {}) {
     .map((row) => ({ ...row, onGround: Boolean(row.onGround) }));
 }
 
-export function getCoverage(db, options = {}) {
+// Build the public response from already bounded observations. Raw track selection and
+// aggregation intentionally live outside this renderer so a worker can feed it compact,
+// receiver-partitioned coverage cells instead of repeatedly loading an unbounded history.
+export function buildCoverageSnapshotFromRows(rows, options = {}) {
   const nowMs = Date.parse(options.now || nowIso());
-  const from = new Date(nowMs - (options.coverageWindowHours || 720) * 3600 * 1000).toISOString();
-  const limit = Math.max(100, Math.min(options.coverageMaxPoints || 50000, 250000));
-  const rows = db.prepare(`
-    SELECT
-      t.receiver_id,
-      t.hex,
-      r.public_name AS receiver_name,
-      r.lat AS receiver_lat,
-      r.lon AS receiver_lon,
-      t.position_at,
-      t.lat,
-      t.lon,
-      t.alt_baro,
-      t.alt_geom
-    FROM track_points t
-    JOIN receivers r ON r.id = t.receiver_id
-    WHERE t.position_at >= ?
-      AND t.lat IS NOT NULL
-      AND t.lon IS NOT NULL
-    ORDER BY t.position_at DESC
-    LIMIT ?
-  `).all(from, limit);
-
+  const windowHours = Math.max(1, Number(options.coverageWindowHours) || 720);
+  const from = options.from
+    ? new Date(options.from).toISOString()
+    : new Date(nowMs - windowHours * 3600 * 1000).toISOString();
   const groups = new Map();
   const bounds = {
     minLat: null,
@@ -819,6 +803,9 @@ export function getCoverage(db, options = {}) {
 
   return {
     from,
+    to: new Date(nowMs).toISOString(),
+    windowHours,
+    windowDays: Number((windowHours / 24).toFixed(2)),
     type: "observed-occupancy",
     count: rows.length,
     receiverCount: groups.size,
@@ -857,7 +844,7 @@ export function getCoverage(db, options = {}) {
       };
     }).sort((a, b) => b.count - a.count),
     // Raw points are never sent. The indexed, quantized mesh is substantially smaller than
-    // either 50k JSON points or an unindexed triangle list.
+    // either time-windowed cell JSON or an unindexed triangle list.
     points: [],
   };
 }

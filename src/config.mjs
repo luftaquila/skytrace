@@ -60,6 +60,8 @@ export function loadConfig(env = process.env) {
     ...parseTokenList(env.SKYTRACE_INGEST_TOKEN),
     ...parseTokenList(env.SKYTRACE_INGEST_TOKENS),
   ];
+  const coverageHorizontalStepNm = numberFromEnv(env, "SKYTRACE_COVERAGE_HORIZONTAL_STEP_NM", 2);
+  const coverageVerticalStepFt = numberFromEnv(env, "SKYTRACE_COVERAGE_VERTICAL_STEP_FT", 800);
 
   return {
     port: intFromEnv(env, "PORT", 3000),
@@ -71,15 +73,24 @@ export function loadConfig(env = process.env) {
     receiverTokens: parseReceiverTokens(env.SKYTRACE_RECEIVER_TOKENS),
     currentWindowSeconds: intFromEnv(env, "SKYTRACE_CURRENT_WINDOW_SECONDS", 90),
     maxObservationAgeSeconds: intFromEnv(env, "SKYTRACE_MAX_OBSERVATION_AGE_SECONDS", 120),
-    trackMinIntervalSeconds: intFromEnv(env, "SKYTRACE_TRACK_MIN_INTERVAL_SECONDS", 5),
+    trackMinIntervalSeconds: intFromEnv(env, "SKYTRACE_TRACK_MIN_INTERVAL_SECONDS", 3),
     maxTrackQueryPoints: intFromEnv(env, "SKYTRACE_MAX_TRACK_QUERY_POINTS", 10000),
     positionFilterMaxMach: Number.parseFloat(env.SKYTRACE_POSITION_FILTER_MAX_MACH || "3.5"),
     coverageWindowHours: intFromEnv(env, "SKYTRACE_COVERAGE_WINDOW_HOURS", 24 * 30),
-    coverageBearingStepDegrees: Number.parseFloat(env.SKYTRACE_COVERAGE_BEARING_STEP_DEGREES || "1"),
-    coverageMaxPoints: intFromEnv(env, "SKYTRACE_COVERAGE_MAX_POINTS", 50000),
-    coverageRefreshSeconds: intFromEnv(env, "SKYTRACE_COVERAGE_REFRESH_SECONDS", 300),
-    coverageHorizontalStepNm: numberFromEnv(env, "SKYTRACE_COVERAGE_HORIZONTAL_STEP_NM", 2),
-    coverageVerticalStepFt: numberFromEnv(env, "SKYTRACE_COVERAGE_VERTICAL_STEP_FT", 800),
+    coverageRefreshSeconds: intFromEnv(env, "SKYTRACE_COVERAGE_REFRESH_SECONDS", 180),
+    coverageHorizontalStepNm,
+    coverageVerticalStepFt,
+    coverageCellHorizontalStepNm: numberFromEnv(
+      env,
+      "SKYTRACE_COVERAGE_CELL_HORIZONTAL_STEP_NM",
+      coverageHorizontalStepNm / 2,
+    ),
+    coverageCellVerticalStepFt: numberFromEnv(
+      env,
+      "SKYTRACE_COVERAGE_CELL_VERTICAL_STEP_FT",
+      coverageVerticalStepFt / 2,
+    ),
+    coverageAggregationChunkSize: intFromEnv(env, "SKYTRACE_COVERAGE_AGGREGATION_CHUNK_SIZE", 5000),
     coverageHorizontalSupportNm: numberFromEnv(env, "SKYTRACE_COVERAGE_HORIZONTAL_SUPPORT_NM", 4.5),
     coverageVerticalSupportFt: numberFromEnv(env, "SKYTRACE_COVERAGE_VERTICAL_SUPPORT_FT", 2500),
     coverageHorizontalInterpolationCells: intFromEnv(env, "SKYTRACE_COVERAGE_HORIZONTAL_INTERPOLATION_CELLS", 2),

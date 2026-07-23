@@ -1,13 +1,10 @@
-// 3D tactical view on MapLibre GL v5 (raster-DEM terrain + LOD imagery, no key) with a
-// deck.gl overlay for the GPU objects. It reproduces the old three.js "Top Gun" look on top
-// of MapLibre: dark terrain with a glowing teal grid + topo contours + hillshade relief
-// (satellite is a toggle), a solid altitude-gradient coverage dome, glTF aircraft with
-// altitude sticks / trails, and HTML data-block popovers with pins.
+// 3D satellite view on MapLibre GL v5 (raster-DEM terrain + LOD imagery, no key) with a
+// deck.gl overlay for the GPU objects: a solid altitude-gradient coverage volume, glTF
+// aircraft with altitude sticks/trails, and HTML data-block popovers with pins.
 //
 // Loaded via dynamic import from App.vue. All app state and formatting comes through `deps`.
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import mlcontour from "maplibre-contour";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { ScenegraphLayer, SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
@@ -39,26 +36,16 @@ function ensureEsriProtocol() {
   });
 }
 // Terrain relief comes from Mapterhorn (higher-quality open DEM, terrarium-encoded webp, CORS *,
-// maxzoom 12 over Korea). AWS Terrarium is kept only for the maplibre-contour source.
+// maxzoom 12 over Korea).
 const MAPTERHORN_TILES = ["https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"];
-const DEM_TILES = ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"];
 const MODEL_URI = `${import.meta.env.BASE_URL}aircraft.glb`;
 const EMPTY_FC = { type: "FeatureCollection", features: [] };
 const M_PER_DEG_LAT = 111320;
 const COV_ANCHOR = [{ position: [127.33113, 36.36599, 0] }]; // dome anchored at HOME (mesh verts are metre offsets)
-// Vertical exaggeration for ALTITUDE (aircraft z, sticks, trails, coverage dome). Independent of the
-// terrain relief exaggeration (which stays on the Terrain × setting) so altitudes read tall & clearly
-// separated over gentler terrain.
-const ALT_EXAGG = 5;
 
-// One shared contour tile source (registers the maplibre-contour protocol once).
-let demSource = null;
-function ensureContourSource() {
-  if (!demSource) {
-    demSource = new mlcontour.DemSource({ url: DEM_TILES[0], encoding: "terrarium", maxzoom: 15, worker: true });
-    demSource.setupMaplibre(maplibregl);
-  }
-  return demSource;
+function settingExaggeration(settings, key, max, fallback) {
+  const value = Number(settings?.[key]);
+  return Number.isFinite(value) ? Math.max(1, Math.min(max, value)) : fallback;
 }
 
 // deps colors are `hsl(H S% L%)` or hex; parse to {r,g,b} 0-255.
@@ -190,10 +177,13 @@ function makeAirfieldIcon(color) {
 }
 
 export function createTactical3d({ container, deps }) {
-  let exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
+  const initialSettings = deps.getSettings();
+  let terrainExagg = settingExaggeration(initialSettings, "terrainExaggeration", 5, 2);
+  let altitudeExagg = settingExaggeration(initialSettings, "altitudeExaggeration", 10, 5);
+  let pitchExagg = settingExaggeration(initialSettings, "aircraftPitchExaggeration", 5, 3);
+  let rollExagg = settingExaggeration(initialSettings, "aircraftRollExaggeration", 5, 1);
   let disposed = false;
   let ready = false;
-  const contour = ensureContourSource();
   ensureEsriProtocol();
 
   // Shared airfield symbol layout/paint. Split into per-class layers (below) so the worldwide
@@ -209,8 +199,8 @@ export function createTactical3d({ container, deps }) {
   };
   const afPaint = { "text-color": "#8ff0e4", "text-halo-color": "#04211f", "text-halo-width": 1.7, "text-halo-blur": 0.6 };
 
-  // --- MapLibre map (mercator so the deck.gl overlay aligns). Dark tactical terrain by
-  // default; satellite is a toggle. -------------------------------------------------------
+  // --- MapLibre map (mercator so the deck.gl overlay aligns). Satellite imagery is the
+  // sole basemap; terrain relief comes from the DEM beneath it. ---------------------------
   const map = new maplibregl.Map({
     container,
     attributionControl: false,
@@ -233,17 +223,12 @@ export function createTactical3d({ container, deps }) {
         // placeholder tile per location, so gaps overzoom the last real tile instead of showing it.
         satellite: { type: "raster", tiles: SAT_TILES, tileSize: 256, maxzoom: 20, attribution: "Esri, Maxar, Earthstar Geographics" },
         dem: { type: "raster-dem", tiles: MAPTERHORN_TILES, encoding: "terrarium", tileSize: 512, maxzoom: 12, attribution: "Terrain © Mapterhorn" },
-        contours: { type: "vector", tiles: [contour.contourProtocolUrl({ multiplier: 1, thresholds: { 8: [500, 2000], 10: [200, 1000], 12: [100, 500], 14: [50, 250] }, elevationKey: "ele", levelKey: "level", contourLayer: "contours" })], maxzoom: 15 },
-        grid: { type: "geojson", data: EMPTY_FC },
         airfields: { type: "geojson", data: EMPTY_FC },
         rings: { type: "geojson", data: EMPTY_FC },
       },
       layers: [
         { id: "bg", type: "background", paint: { "background-color": "#050a0c" } },
-        { id: "hillshade", type: "hillshade", source: "dem", paint: { "hillshade-shadow-color": "#020a0c", "hillshade-highlight-color": "#1d6f66", "hillshade-accent-color": "#0b3a38", "hillshade-exaggeration": 0.75 } },
-        { id: "sat", type: "raster", source: "satellite", layout: { visibility: "none" }, paint: { "raster-saturation": -0.45, "raster-brightness-max": 0.78, "raster-contrast": 0.08, "raster-hue-rotate": 8 } },
-        { id: "grid-line", type: "line", source: "grid", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "major"], 1, 0.28, 0.12], "line-width": ["match", ["get", "major"], 1, 1, 0.6] } },
-        { id: "contour-line", type: "line", source: "contours", "source-layer": "contours", paint: { "line-color": "#48e0d1", "line-opacity": ["match", ["get", "level"], 1, 0.4, 0.16], "line-width": ["match", ["get", "level"], 1, 1.1, 0.6], "line-blur": 0.6 } },
+        { id: "sat", type: "raster", source: "satellite", paint: { "raster-saturation": -0.2, "raster-brightness-max": 0.9, "raster-contrast": 0.04 } },
         { id: "rings-line", type: "line", source: "rings", filter: ["==", ["get", "kind"], "ring"], paint: { "line-color": "#48e0d1", "line-opacity": 0.5, "line-width": 1.3, "line-blur": 1.2 } },
         // Tactical airfield: an aeronautical glyph icon (ring + crossed runways, class colour/size,
         // constant screen size) with the code below it. Split into three per-class layers so the
@@ -255,7 +240,7 @@ export function createTactical3d({ container, deps }) {
         { id: "ring-label", type: "symbol", source: "rings", filter: ["in", ["get", "kind"], ["literal", ["ringlabel", "compass"]]], layout: { "text-field": ["get", "label"], "text-font": ["Open Sans Regular"], "text-size": ["case", ["==", ["get", "kind"], "compass"], 15, 11], "text-allow-overlap": true }, paint: { "text-color": "#7fe6da", "text-opacity": ["case", ["==", ["get", "kind"], "compass"], 0.85, 0.55], "text-halo-color": "#050a0c", "text-halo-width": 1.2 } },
       ],
       // atmosphere-blend 0 kills MapLibre globe's bright horizon atmosphere glow (a hazy white/orange
-      // glare that washed the view near-horizontal at high pitch); keep the dark tactical sky/fog.
+      // glare that washed the view near-horizontal at high pitch); keep a neutral dark horizon.
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6, "atmosphere-blend": 0 },
     },
   });
@@ -268,6 +253,7 @@ export function createTactical3d({ container, deps }) {
   // button-swap option in this release, so drive both by hand off the canvas mouse events.
   map.dragPan.disable();
   map.dragRotate.disable();
+  map.doubleClickZoom.disable();
   // Native cursor-anchored wheel zoom can choose a distant surface point as the new pivot on a
   // pitched globe. All wheel zooming below is center-anchored instead, selected or not.
   map.scrollZoom.disable();
@@ -282,15 +268,25 @@ export function createTactical3d({ container, deps }) {
   let dragMoved = false; // set once a gesture actually drags, so the trailing map "click" is ignored
   let followActive = false; // camera tracking is explicit: only the Locate toggle may enable it
   let orbitZ = 0; // exaggerated target altitude; the camera's real 3D pivot while orbit-attached
-  let orbitAttached = false; // rotate/zoom re-centre on the selected aircraft ONLY while attached; a
-  // free pan (right-drag) detaches so rotate/zoom then pivot on the current view, not teleport back.
+  let orbitAttached = false; // rotate/zoom re-centre on the active aircraft or airfield pivot while attached
+  let airfieldOrbit = null; // { lon, lat } fixed ground pivot created by an airfield double-click
+  // A free pan (right-drag) detaches so rotate/zoom then pivot on the current view, not teleport back.
   let cameraAnimation = null;
   let freeGrounding = null; // released elevated pivot, lowered only while the user zooms in
+  let trackedAircraftClick = null;
+
+  function isRepeatedTrackedPointer(clientX, clientY, now = performance.now()) {
+    return Boolean(
+      trackedAircraftClick
+      && now - trackedAircraftClick.at < 700
+      && Math.hypot(clientX - trackedAircraftClick.x, clientY - trackedAircraftClick.y) < 16
+    );
+  }
 
   function setFollowActive(active) {
     if (followActive === active) return;
     followActive = active;
-    deps.onTrackingChange?.(active);
+    deps.onTrackingChange?.(followActive || Boolean(airfieldOrbit));
   }
 
   const EASE_OUT = (t) => 1 - Math.pow(1 - t, 3);
@@ -380,8 +376,20 @@ export function createTactical3d({ container, deps }) {
   // Orbit the selected aircraft by making its lon/lat/exaggerated altitude MapLibre's actual camera
   // center. The globe matrix adapter above makes this the same physical pivot in globe and mercator.
   function focusOnSelected(sel) {
+    airfieldOrbit = null;
     orbitZ = sel.z;
     applyCameraFrame({ center: [sel.lon, sel.lat], elevation: sel.z });
+  }
+  function activeOrbitTarget() {
+    if (!orbitAttached) return null;
+    if (airfieldOrbit) return { ...airfieldOrbit, z: 0 };
+    const selHex = deps.getSelectedHex();
+    return selHex ? lastList.find((d) => d.hex === selHex) || null : null;
+  }
+  function focusOrbitTarget(target) {
+    if (!target) return;
+    orbitZ = target.z || 0;
+    applyCameraFrame({ center: [target.lon, target.lat], elevation: target.z || 0 });
   }
   function beginFreeGrounding() {
     const elevation = Math.max(0, map.transform.elevation || 0);
@@ -390,8 +398,11 @@ export function createTactical3d({ container, deps }) {
     }
   }
   function clearOrbit() {
-    const hadOrbit = orbitAttached || orbitZ !== 0 || ["track-start", "track-switch", "wheel-orbit"].includes(cameraAnimation?.kind);
-    setFollowActive(false);
+    const hadOrbit = orbitAttached || orbitZ !== 0 || airfieldOrbit || ["track-start", "track-switch", "wheel-orbit", "airfield-orbit"].includes(cameraAnimation?.kind);
+    const wasTracking = followActive || Boolean(airfieldOrbit);
+    followActive = false;
+    airfieldOrbit = null;
+    if (wasTracking) deps.onTrackingChange?.(false);
     if (!hadOrbit) return;
     cancelCameraAnimation();
     map.stop();
@@ -402,11 +413,31 @@ export function createTactical3d({ container, deps }) {
     // simply becomes the free-view pivot. Any attempt to convert it to a ground pivot changes the
     // globe camera matrix and visibly teleports the view to the aircraft's ground projection.
   }
-  function attachOrbit(z) { freeGrounding = null; orbitAttached = true; orbitZ = z; } // orbit → aircraft-centred zoom
+  function attachOrbit(z) { freeGrounding = null; airfieldOrbit = null; orbitAttached = true; orbitZ = z; } // orbit → aircraft-centred zoom
+  function startAirfieldOrbit(field) {
+    if (!field) return;
+    followingSelectionHex = null;
+    // An airport orbit is a tracking state for the UI, but it is deliberately not an aircraft
+    // follow: selecting an airport alone must not move the camera.
+    followActive = false;
+    freeGrounding = null;
+    orbitAttached = true;
+    orbitZ = 0;
+    airfieldOrbit = { lon: field.lon, lat: field.lat };
+    deps.onTrackingChange?.(true);
+    animateCamera(
+      { center: [field.lon, field.lat], elevation: 0 },
+      { duration: 700, easing: EASE_OUT, kind: "airfield-orbit" },
+    );
+  }
   let identBlinkOn = false; // toggled by a timer while any aircraft squawks IDENT (gold body flash)
   let identBlinkTimer = 0;
   const onDown = (e) => {
     e.preventDefault(); // no native drag-image / text selection while manipulating the camera
+    // The first click of a tracked-aircraft double-click has already started the normal 900 ms
+    // transfer. Its second mousedown must not cancel that animation; the matching mouseup would
+    // otherwise call followSelected() and snap straight to the new aircraft.
+    if (e.button === 0 && isRepeatedTrackedPointer(e.clientX, e.clientY)) return;
     cancelCameraAnimation();
     map.stop();
     dragMoved = false;
@@ -414,10 +445,7 @@ export function createTactical3d({ container, deps }) {
     else if (e.button === 2) {
       // A free pan intentionally detaches tracking. Rotation does not: it keeps orbiting and
       // following the selected aircraft while only changing bearing/pitch.
-      setFollowActive(false);
-      beginFreeGrounding();
-      orbitAttached = false;
-      orbitZ = 0;
+      clearOrbit();
       drag = { mode: "pan", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
     }
   };
@@ -425,15 +453,14 @@ export function createTactical3d({ container, deps }) {
     if (!drag) return;
     if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 3) dragMoved = true;
     if (drag.mode === "rotate") {
-      const selHex = deps.getSelectedHex();
-      const sel = orbitAttached && selHex && lastList.find((d) => d.hex === selHex);
+      const target = activeOrbitTarget();
       applyCameraFrame({
-        center: sel ? [sel.lon, sel.lat] : null,
+        center: target ? [target.lon, target.lat] : null,
         bearing: drag.bearing + (e.clientX - drag.x) * 0.35,
         pitch: drag.pitch - (e.clientY - drag.y) * 0.25,
-        elevation: sel ? sel.z : map.transform.elevation,
+        elevation: target ? target.z || 0 : map.transform.elevation,
       });
-      if (sel) orbitZ = sel.z;
+      if (target) orbitZ = target.z || 0;
     } else {
       map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0, freezeElevation: true });
       drag.x = e.clientX; drag.y = e.clientY; // pan is incremental
@@ -478,11 +505,10 @@ export function createTactical3d({ container, deps }) {
     const baseZoom = cameraAnimation?.kind?.startsWith("wheel") ? cameraAnimation.end.zoom : map.getZoom();
     const z = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), baseZoom - step));
     if (orbitAttached) {
-      const selHex = deps.getSelectedHex();
-      const sel = selHex && lastList.find((d) => d.hex === selHex);
-      if (!sel) { clearOrbit(); return; }
-      orbitZ = sel.z;
-      animateCamera({ center: [sel.lon, sel.lat], zoom: z, elevation: sel.z }, { duration: 150, easing: EASE_OUT, kind: "wheel-orbit" });
+      const target = activeOrbitTarget();
+      if (!target) { clearOrbit(); return; }
+      orbitZ = target.z || 0;
+      animateCamera({ center: [target.lon, target.lat], zoom: z, elevation: target.z || 0 }, { duration: 150, easing: EASE_OUT, kind: "wheel-orbit" });
     } else {
       beginFreeGrounding();
       const grounding = freeGrounding;
@@ -506,13 +532,11 @@ export function createTactical3d({ container, deps }) {
     }
   };
   cv.addEventListener("wheel", onWheel, { passive: false });
-  // Native touch gestures still emit `move`; reassert the selected 3D pivot synchronously before the
+  // Native touch gestures still emit `move`; reassert the active 3D pivot synchronously before the
   // next render. Our own rAF animations are excluded because they already interpolate that pivot.
   map.on("move", () => {
     if (orbitAttached && !cameraAnimation) {
-      const selHex = deps.getSelectedHex();
-      const sel = selHex && lastList.find((d) => d.hex === selHex);
-      if (sel) focusOnSelected(sel);
+      focusOrbitTarget(activeOrbitTarget());
     }
   });
   // Generate the tactical airfield glyph icons on demand (per class colour).
@@ -550,6 +574,7 @@ export function createTactical3d({ container, deps }) {
       elevation: map.transform.elevation,
       orbitAttached,
       orbitZ,
+      orbit: airfieldOrbit ? "airfield" : orbitAttached ? "aircraft" : null,
       animation: cameraAnimation?.kind || null,
       globeCenterElevationInstalled,
     });
@@ -615,16 +640,19 @@ export function createTactical3d({ container, deps }) {
       if (airborne) {
         const vs = item.baroRate ?? item.geomRate;
         const gs = (item.gs ?? 0) * 0.514444;
-        if (vs != null && gs > 5) phi = (Math.atan2(vs * 0.00508, gs) * 3 * 180) / Math.PI;
+        if (vs != null && gs > 5) phi = (Math.atan2(vs * 0.00508, gs) * pitchExagg * 180) / Math.PI;
         phi = Math.max(-40, Math.min(40, phi));
       }
-      const bank = airborne && Number.isFinite(item.roll) ? Math.max(-45, Math.min(45, item.roll)) : 0;
+      const reportedBank = airborne && Number.isFinite(item.roll)
+        ? Math.max(-45, Math.min(45, item.roll))
+        : 0;
+      const bank = Math.max(-75, Math.min(75, reportedBank * rollExagg));
       const track = Number.isFinite(item.track) ? item.track : 0;
       const cls = deps.planeSizeScale(item.category); // 0.85 light · 1 · 1.18 heavy
       // deck maps the nose (+X) to world-Z = -sin(pitch) and the right wing (+Y) to
       // world-Z = cos(pitch)*sin(roll). ADS-B roll>0 = right wing DOWN and climb phi>0 = nose UP,
       // both the opposite sign of what deck needs — so negate both pitch and roll.
-      const z = altM * ALT_EXAGG;
+      const z = altM * altitudeExagg;
       const motion = {
         lon: item.lon,
         lat: item.lat,
@@ -634,13 +662,28 @@ export function createTactical3d({ container, deps }) {
         trackRate: item.trackRate,
         roll: bank,
         pitch: phi,
-        verticalSpeed: airborne ? (item.baroRate ?? item.geomRate ?? 0) * 0.00508 * ALT_EXAGG : 0,
+        verticalSpeed: airborne ? (item.baroRate ?? item.geomRate ?? 0) * 0.00508 * altitudeExagg : 0,
         onGround: !airborne,
         // The clock-driven dataPass runs every second. Only a genuinely new receiver sample may
         // reset the extrapolation clock or start a correction toward a new observed position.
         key: [item.positionAt, item.observedAt, item.lon, item.lat, z, item.gs, item.track, item.trackRate, bank, item.baroRate, item.geomRate].join("|"),
       };
-      out.push({ hex: item.hex, lon: item.lon, lat: item.lat, z, airborne, rgb, cls, orientation: [-phi, 90 - track, -bank], motion, coasting: deps.isCoasting(item), spi: !!item.spi, item });
+      const coasting = deps.isCoasting(item);
+      out.push({
+        hex: item.hex,
+        lon: item.lon,
+        lat: item.lat,
+        z,
+        airborne,
+        rgb,
+        cls,
+        orientation: [-phi, 90 - track, -bank],
+        motion,
+        coasting,
+        coastOpacity: coasting ? deps.coastOpacity?.(item) ?? 0.42 : 1,
+        spi: !!item.spi,
+        item,
+      });
     }
     return out;
   }
@@ -679,11 +722,16 @@ export function createTactical3d({ container, deps }) {
     const conflictHexes = new Set();
     for (const p of conflicts) { conflictHexes.add(p.a.hex); conflictHexes.add(p.b.hex); }
     const conflictLines = conflicts.map((p) => ({
-      source: [p.a.lon, p.a.lat, ((p.a.altBaro ?? p.a.altGeom) || 0) * FT_TO_M * ALT_EXAGG],
-      target: [p.b.lon, p.b.lat, ((p.b.altBaro ?? p.b.altGeom) || 0) * FT_TO_M * ALT_EXAGG],
+      source: [p.a.lon, p.a.lat, ((p.a.altBaro ?? p.a.altGeom) || 0) * FT_TO_M * altitudeExagg],
+      target: [p.b.lon, p.b.lat, ((p.b.altBaro ?? p.b.altGeom) || 0) * FT_TO_M * altitudeExagg],
     }));
 
-    const sticks = list.filter((d) => d.airborne).map((d) => ({ hex: d.hex, source: [d.lon, d.lat, d.z], target: [d.lon, d.lat, 0], color: [d.rgb.r, d.rgb.g, d.rgb.b, 200] }));
+    const sticks = list.filter((d) => d.airborne).map((d) => ({
+      hex: d.hex,
+      source: [d.lon, d.lat, d.z],
+      target: [d.lon, d.lat, 0],
+      color: [d.rgb.r, d.rgb.g, d.rgb.b, Math.round(200 * d.coastOpacity)],
+    }));
 
     const trails = [];
     const trailAnchors = new Map();
@@ -703,7 +751,7 @@ export function createTactical3d({ container, deps }) {
         lastAlt = altM;
         const c = parseRgb(deps.trackSegmentColor(p));
         const col = [c.r, c.g, c.b];
-        const pt = [p.lon, p.lat, altM * ALT_EXAGG];
+        const pt = [p.lon, p.lat, altM * altitudeExagg];
         trailAnchors.set(hex, { point: pt, color: col });
         if (!run || gap || (runColor && (col[0] !== runColor[0] || col[1] !== runColor[1] || col[2] !== runColor[2]))) {
           if (run && run.path.length >= 2) trails.push(run);
@@ -723,7 +771,7 @@ export function createTactical3d({ container, deps }) {
     for (const { hex, points } of deps.getAllAircraftTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(hex, points); }
 
     const ghost = deps.getPlaybackGhost();
-    const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * ALT_EXAGG, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
+    const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * altitudeExagg, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
 
     const covMesh = coverageMesh();
     // Aircraft grouped by size class so per-category size differences survive the pixel clamp
@@ -731,13 +779,19 @@ export function createTactical3d({ container, deps }) {
     // colour, with a per-fragment fresnel rim self-glow (GlowScenegraphLayer) — no extra geometry.
     // Aircraft render list for the MapLibre custom WebGL layer (drawn with the map's real camera,
     // so it rotates/tilts with the globe incl. pitch > 90°). Colour resolves exactly as the old deck
-    // getColor did: IDENT gold flash > conflict pink > true altitude colour (coasting = 150 alpha).
+    // getColor did: IDENT gold flash > conflict pink > true altitude colour. Coasting targets
+    // desaturate and fade progressively together with their altitude projection.
     aircraftRenderList = list.map((d) => {
       const gold = d.spi && identBlinkOn;
       const conflict = conflictHexes.has(d.hex);
       const cls = d.cls < 0.95 ? "small" : d.cls < 1.1 ? "medium" : "large";
-      const [r, g, b] = gold ? [255, 215, 0] : conflict ? [251, 113, 133] : [d.rgb.r, d.rgb.g, d.rgb.b];
-      return { hex: d.hex, lon: d.lon, lat: d.lat, z: d.z, r, g, b, a: d.coasting ? 150 : 255, pitch: d.orientation[0], yaw: d.orientation[1], roll: d.orientation[2], cls, clsMul: d.cls };
+      const [baseR, baseG, baseB] = gold ? [255, 215, 0] : conflict ? [251, 113, 133] : [d.rgb.r, d.rgb.g, d.rgb.b];
+      const luma = Math.round(baseR * 0.299 + baseG * 0.587 + baseB * 0.114);
+      const desaturate = d.coasting ? 0.52 : 0;
+      const r = Math.round(baseR * (1 - desaturate) + luma * desaturate);
+      const g = Math.round(baseG * (1 - desaturate) + luma * desaturate);
+      const b = Math.round(baseB * (1 - desaturate) + luma * desaturate);
+      return { hex: d.hex, lon: d.lon, lat: d.lat, z: d.z, r, g, b, a: Math.round(255 * d.coastOpacity), pitch: d.orientation[0], yaw: d.orientation[1], roll: d.orientation[2], cls, clsMul: d.cls };
     });
     aircraftRenderByHex = new Map(aircraftRenderList.map((d) => [d.hex, d]));
     // Sticks (aircraft→ground), altitude-gradient trails, and conflict links as line segments; the
@@ -758,7 +812,7 @@ export function createTactical3d({ container, deps }) {
       const anchor = trailAnchors.get(d.hex);
       const a = anchor?.point || [d.motion.lon, d.motion.lat, d.motion.z];
       const color = anchor?.color || [d.rgb.r, d.rgb.g, d.rgb.b];
-      const segment = { a, b: [d.lon, d.lat, d.z], color: [...color, 255], widthPx: 2.1 };
+      const segment = { a, b: [d.lon, d.lat, d.z], color: [...color, Math.round(255 * d.coastOpacity)], widthPx: 2.1 };
       segs.push(segment);
       motionTrailByHex.set(d.hex, segment);
     }
@@ -770,7 +824,7 @@ export function createTactical3d({ container, deps }) {
       normals: covMesh.attributes.normals.value,
       indices: covMesh.indices || null,
       anchor: [HOME.lon, HOME.lat],
-      altExagg: ALT_EXAGG,
+      altExagg: altitudeExagg,
     } : null;
     // Playback ghost (a dim, semi-transparent aircraft at the replayed position).
     for (const g of ghostData) aircraftRenderList.push({ lon: g.lon, lat: g.lat, z: g.z, r: g.rgb.r, g: g.rgb.g, b: g.rgb.b, a: 150, pitch: g.orientation[0], yaw: g.orientation[1], roll: g.orientation[2], cls: "medium", clsMul: 1 });
@@ -786,13 +840,13 @@ export function createTactical3d({ container, deps }) {
       // farther one. Aircraft/sticks/trails use depthCompare 'always', so the dome never hides them.
       covMesh && new CoverageMeshLayer({
         id: "coverage-depth", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [0, 0, 0, 0], getScale: [1, 1, ALT_EXAGG], sizeScale: 1, material: covMat, pickable: false,
+        getColor: [0, 0, 0, 0], getScale: [1, 1, altitudeExagg], sizeScale: 1, material: covMat, pickable: false,
         // alpha 0 with blending on leaves colour untouched; the point of this pass is the depth write.
         parameters: { depthWriteEnabled: true, depthCompare: "less-equal" },
       }),
       covMesh && new CoverageMeshLayer({
         id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 58], getScale: [1, 1, ALT_EXAGG], sizeScale: 1, material: covMat, pickable: false,
+        getColor: [255, 255, 255, 58], getScale: [1, 1, altitudeExagg], sizeScale: 1, material: covMat, pickable: false,
         parameters: { depthWriteEnabled: false, depthCompare: "less-equal" },
       }),
       // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
@@ -816,7 +870,7 @@ export function createTactical3d({ container, deps }) {
   }
 
   function updateFollowingCamera(target) {
-    if (!followActive || !orbitAttached || !target) return false;
+    if (!followActive || !orbitAttached || airfieldOrbit || !target) return false;
     orbitZ = target.z;
     // Selection fly-in and wheel zoom own the camera timeline. Retarget their shared endpoint as
     // the aircraft advances instead of starting a competing animation on every display frame.
@@ -981,9 +1035,9 @@ export function createTactical3d({ container, deps }) {
       : null;
     const normals = new Float32Array(positionArray.length);
     const addNormal = (ia, ib, ic) => {
-      const ax = positionArray[ia * 3]; const ay = positionArray[ia * 3 + 1]; const az = positionArray[ia * 3 + 2] * ALT_EXAGG;
-      const bx = positionArray[ib * 3]; const by = positionArray[ib * 3 + 1]; const bz = positionArray[ib * 3 + 2] * ALT_EXAGG;
-      const cx = positionArray[ic * 3]; const cy = positionArray[ic * 3 + 1]; const cz = positionArray[ic * 3 + 2] * ALT_EXAGG;
+      const ax = positionArray[ia * 3]; const ay = positionArray[ia * 3 + 1]; const az = positionArray[ia * 3 + 2] * altitudeExagg;
+      const bx = positionArray[ib * 3]; const by = positionArray[ib * 3 + 1]; const bz = positionArray[ib * 3 + 2] * altitudeExagg;
+      const cx = positionArray[ic * 3]; const cy = positionArray[ic * 3 + 1]; const cz = positionArray[ic * 3 + 2] * altitudeExagg;
       const abx = bx - ax; const aby = by - ay; const abz = bz - az;
       const acx = cx - ax; const acy = cy - ay; const acz = cz - az;
       const nx = aby * acz - abz * acy;
@@ -1084,49 +1138,208 @@ export function createTactical3d({ container, deps }) {
     return best;
   }
   const airfieldByKey = new Map();
+  // Airfields use the same projected-screen hit testing as aircraft.  MapLibre's symbol-event
+  // hit boxes are tied to its placement/collision result and can become unreliable at steep
+  // pitches, even while the icon or label is plainly visible.  The geographic grid keeps the
+  // projection work local to the viewport rather than walking the worldwide data set per hover.
+  const AIRFIELD_GRID_DEGREES = 4;
+  const AIRFIELD_GRID_COLUMNS = 360 / AIRFIELD_GRID_DEGREES;
+  const AIRFIELD_HIT_CELL_PIXELS = 64;
+  const airfieldHitGrid = new Map();
+  let airfieldHitCells = new Map();
+  let airfieldHitView = null;
   let afPinned = null; // airfield popover pinned by a click; stays until a click elsewhere
-  const AF_LAYERS = ["airfield-large", "airfield-medium", "airfield-small"]; // the three per-class symbol layers — hover/click on any
+
+  function airfieldGridKey(latCell, lonCell) { return `${latCell}:${(lonCell % AIRFIELD_GRID_COLUMNS + AIRFIELD_GRID_COLUMNS) % AIRFIELD_GRID_COLUMNS}`; }
+  function airfieldGridCell(field) {
+    return {
+      lat: Math.max(0, Math.min(44, Math.floor((field.lat + 90) / AIRFIELD_GRID_DEGREES))),
+      lon: Math.floor((field.lon + 180) / AIRFIELD_GRID_DEGREES),
+    };
+  }
+  function airfieldHitViewKey() {
+    const center = map.getCenter();
+    return [cv.clientWidth, cv.clientHeight, center.lng.toFixed(5), center.lat.toFixed(5), map.getZoom().toFixed(4), map.getBearing().toFixed(3), map.getPitch().toFixed(3), (map.transform.elevation || 0).toFixed(1)].join(":");
+  }
+  function airfieldVisibleAtZoom(field, zoom) {
+    const minor = isMinorAirfield(field);
+    if (minor || field.kind === "small") return zoom >= 7;
+    if (field.kind === "medium") return zoom >= 5;
+    return true;
+  }
+  function addAirfieldHitEntry(entry) {
+    const minX = Math.floor((entry.x - entry.labelHalfWidth) / AIRFIELD_HIT_CELL_PIXELS);
+    const maxX = Math.floor((entry.x + entry.labelHalfWidth) / AIRFIELD_HIT_CELL_PIXELS);
+    const minY = Math.floor((entry.y - entry.iconRadius) / AIRFIELD_HIT_CELL_PIXELS);
+    const maxY = Math.floor((entry.y + entry.labelBottom) / AIRFIELD_HIT_CELL_PIXELS);
+    for (let row = minY; row <= maxY; row += 1) {
+      for (let col = minX; col <= maxX; col += 1) {
+        const key = `${col}:${row}`;
+        const entries = airfieldHitCells.get(key);
+        if (entries) entries.push(entry);
+        else airfieldHitCells.set(key, [entry]);
+      }
+    }
+  }
+  function rebuildAirfieldHitIndex() {
+    airfieldHitCells = new Map();
+    airfieldHitView = airfieldHitViewKey();
+    const bounds = map.getBounds();
+    if (!bounds || !airfieldHitGrid.size) return;
+    const west = bounds.getWest();
+    const east = bounds.getEast() < west ? bounds.getEast() + 360 : bounds.getEast();
+    const latSpan = Math.max(0.01, bounds.getNorth() - bounds.getSouth());
+    const lngSpan = Math.max(0.01, east - west);
+    // A tilted camera can show a little beyond the nominal ground bounds near its horizon.
+    const latPad = Math.max(1, latSpan * 0.22);
+    const lngPad = Math.max(2, lngSpan * 0.22);
+    const latStart = Math.max(0, Math.floor((bounds.getSouth() - latPad + 90) / AIRFIELD_GRID_DEGREES));
+    const latEnd = Math.min(44, Math.floor((bounds.getNorth() + latPad + 90) / AIRFIELD_GRID_DEGREES));
+    const rawLonStart = Math.floor((west - lngPad + 180) / AIRFIELD_GRID_DEGREES);
+    const rawLonEnd = Math.floor((east + lngPad + 180) / AIRFIELD_GRID_DEGREES);
+    const allLongitudes = rawLonEnd - rawLonStart + 1 >= AIRFIELD_GRID_COLUMNS;
+    const width = cv.clientWidth;
+    const height = cv.clientHeight;
+    const seen = new Set();
+    for (let lat = latStart; lat <= latEnd; lat += 1) {
+      const lonStart = allLongitudes ? 0 : rawLonStart;
+      const lonEnd = allLongitudes ? AIRFIELD_GRID_COLUMNS - 1 : rawLonEnd;
+      for (let lon = lonStart; lon <= lonEnd; lon += 1) {
+        for (const field of airfieldHitGrid.get(airfieldGridKey(lat, lon)) || []) {
+          const key = field.icao || field.code;
+          if (seen.has(key) || !airfieldVisibleAtZoom(field, map.getZoom())) continue;
+          seen.add(key);
+          const point = map.project([field.lon, field.lat]);
+          const iconRadius = field.kind === "large" ? 15 : field.kind === "medium" ? 13 : 11;
+          const labelHalfWidth = Math.max(iconRadius, String(field.code || "").length * 4.6 + 7);
+          const labelBottom = isMinorAirfield(field) ? iconRadius : 34;
+          if (point.x < -labelHalfWidth || point.x > width + labelHalfWidth || point.y < -iconRadius || point.y > height + labelBottom) continue;
+          addAirfieldHitEntry({ field, x: point.x, y: point.y, iconRadius, labelHalfWidth, labelBottom });
+        }
+      }
+    }
+  }
+  function pickAirfieldAt(x, y) {
+    if (airfieldHitView !== airfieldHitViewKey()) rebuildAirfieldHitIndex();
+    const entries = airfieldHitCells.get(`${Math.floor(x / AIRFIELD_HIT_CELL_PIXELS)}:${Math.floor(y / AIRFIELD_HIT_CELL_PIXELS)}`) || [];
+    let best = null;
+    let bestDistance = Infinity;
+    for (const entry of entries) {
+      const dx = x - entry.x;
+      const dy = y - entry.y;
+      const iconHit = Math.hypot(dx, dy) <= entry.iconRadius;
+      // The MapLibre label is centered beneath its icon (text-offset [0, 1.15]).  Treat its
+      // visible code as part of the same target, rather than requiring a symbol-layer hit.
+      const labelHit = Math.abs(dx) <= entry.labelHalfWidth && dy >= 6 && dy <= entry.labelBottom;
+      if (!iconHit && !labelHit) continue;
+      const distance = iconHit ? Math.hypot(dx, dy) : Math.hypot(Math.max(0, Math.abs(dx) - entry.labelHalfWidth), Math.max(0, dy - 20));
+      if (distance < bestDistance) { bestDistance = distance; best = entry.field; }
+    }
+    return best;
+  }
+  function setHoverAirfield(field) {
+    if (field === hoverAf?.field) return;
+    hoverAf = field ? { field } : null;
+    if (!field) {
+      if (!hoverHex) map.getCanvas().style.cursor = "";
+      afHoverEl.style.display = "none";
+      return;
+    }
+    map.getCanvas().style.cursor = "pointer";
+    // The hover popover shows any airfield EXCEPT the one already pinned (its own popover stays up).
+    if (field !== afPinned) { afHoverEl.innerHTML = deps.airfieldTooltip(field); afHoverEl.style.display = ""; positionAf(afHoverEl, field); }
+    else afHoverEl.style.display = "none";
+  }
   function positionAf(el, field) { if (!field) return; const p = map.project([field.lon, field.lat]); el.style.transform = `translate3d(${p.x.toFixed(1)}px, ${(p.y - 12).toFixed(1)}px, 0) translate(-50%, -100%)`; }
-  function showPinned(field) { afPinned = field; afPinEl.innerHTML = deps.airfieldTooltip(field); afPinEl.style.display = ""; positionAf(afPinEl, field); if (hoverAf?.field === field) afHoverEl.style.display = "none"; }
-  function clearPinned() { afPinned = null; afPinEl.style.display = "none"; }
+  function airfieldOrbitMatches(field) { return Boolean(field && airfieldOrbit && field.lon === airfieldOrbit.lon && field.lat === airfieldOrbit.lat); }
+  function showPinned(field) {
+    // Changing selected airports ends an existing airport track without changing the camera.
+    if (airfieldOrbit && !airfieldOrbitMatches(field)) clearOrbit();
+    const changed = afPinned !== field;
+    afPinned = field;
+    afPinEl.innerHTML = deps.airfieldTooltip(field);
+    afPinEl.style.display = "";
+    positionAf(afPinEl, field);
+    if (hoverAf?.field === field) afHoverEl.style.display = "none";
+    if (changed) deps.onAirfieldSelection?.(field);
+  }
+  function clearPinned({ releaseOrbit = false } = {}) {
+    const hadPinned = Boolean(afPinned);
+    afPinned = null;
+    afPinEl.style.display = "none";
+    if (releaseOrbit && airfieldOrbit) clearOrbit();
+    if (hadPinned) deps.onAirfieldSelection?.(null);
+  }
   map.on("render", () => {
     if (afPinned) positionAf(afPinEl, afPinned);
     if (hoverAf?.field && hoverAf.field !== afPinned) positionAf(afHoverEl, hoverAf.field);
     syncBlocks();
   });
-  map.on("mousemove", AF_LAYERS, (e) => {
-    const field = airfieldByKey.get(e.features?.[0]?.properties?.key);
-    if (field && field !== hoverAf?.field) {
-      hoverAf = { field };
-      map.getCanvas().style.cursor = "pointer";
-      // The hover popover shows any airfield EXCEPT the one already pinned (its own popover stays up).
-      if (field !== afPinned) { afHoverEl.innerHTML = deps.airfieldTooltip(field); afHoverEl.style.display = ""; positionAf(afHoverEl, field); }
-      else afHoverEl.style.display = "none";
-    }
-  });
-  map.on("mouseleave", AF_LAYERS, () => { hoverAf = null; if (!hoverHex) map.getCanvas().style.cursor = ""; afHoverEl.style.display = "none"; });
   map.on("click", (e) => {
+    const clickNow = performance.now();
+    const canvasRect = cv.getBoundingClientRect();
+    const clickClientX = e.originalEvent?.clientX ?? canvasRect.left + e.point.x;
+    const clickClientY = e.originalEvent?.clientY ?? canvasRect.top + e.point.y;
+    const repeatedTrackedClick = isRepeatedTrackedPointer(clickClientX, clickClientY, clickNow);
+    // MapLibre does not consistently preserve MouseEvent.detail on its synthetic map click. Catch
+    // the second click of a rapid double-click by time + physical screen position before hit-testing:
+    // the first click may already have moved the aircraft away from this coordinate.
+    if (repeatedTrackedClick) return;
     if (dragMoved) { dragMoved = false; return; } // ignore the click that trails a rotate/pan drag
+    if (e.originalEvent?.detail > 1) return; // the second half of a double-click is handled below
     // Aircraft: pick synchronously off MapLibre's (immediate) click instead of deck's onClick,
     // which waits ~300ms to disambiguate single- vs double-click — that lag was the select delay.
     const hit = pickAircraftAt(e.point.x, e.point.y, 40);
-    if (hit) { deps.onSelect(hit.hex); return; }
-    const field = airfieldByKey.get(map.queryRenderedFeatures(e.point, { layers: AF_LAYERS })[0]?.properties?.key);
+    if (hit) {
+      const wasFollowing = followActive;
+      clearPinned({ releaseOrbit: true });
+      deps.onSelect(hit.hex);
+      trackedAircraftClick = wasFollowing
+        ? { x: clickClientX, y: clickClientY, at: clickNow }
+        : null;
+      return;
+    }
+    trackedAircraftClick = null;
+    const field = pickAirfieldAt(e.point.x, e.point.y);
     if (field) { showPinned(field); return; } // clicking an airfield pins its popover
-    if (afPinned) clearPinned(); // click elsewhere clears it
+    if (afPinned) clearPinned({ releaseOrbit: true }); // click elsewhere clears it
     deps.onMapClick();
   });
-  // Aircraft hover (cursor + hovered highlight) via the same CPU pick — deck's onHover froze in globe.
+  map.on("dblclick", (e) => {
+    e.preventDefault?.();
+    // While following, the first click already selects the new aircraft and dataPass starts the
+    // established smooth tracked-target transfer. Ignore the double-click action entirely: by now
+    // the camera may have moved the pointer over empty space or another aircraft, so re-picking the
+    // second coordinate would replace that transfer with a new camera action.
+    const repeatedTrackedClick = trackedAircraftClick
+      && performance.now() - trackedAircraftClick.at < 700;
+    if (repeatedTrackedClick || followActive) return;
+    // A visible airport glyph wins over a nearby aircraft's generous hit radius, so double-clicking
+    // the airport still creates its ground orbit when traffic is passing directly overhead.
+    const field = pickAirfieldAt(e.point.x, e.point.y);
+    if (field) {
+      showPinned(field);
+      startAirfieldOrbit(field);
+      return;
+    }
+    const hit = pickAircraftAt(e.point.x, e.point.y, 40);
+    if (hit) deps.onTrackAircraft?.(hit.hex);
+  });
+  // Aircraft and airfields share projected-screen hit testing.  Neither depends on deck or
+  // MapLibre symbol mouse events, both of which can lose their hit target in globe/tilted views.
   map.on("mousemove", (e) => {
     const hex = pickAircraftAt(e.point.x, e.point.y, 40)?.hex || null;
     if (hex !== hoverHex) { hoverHex = hex; deps.onHover(hex); scheduleActive(hex); }
+    const field = hex ? null : pickAirfieldAt(e.point.x, e.point.y);
+    setHoverAirfield(field);
     if (hex) map.getCanvas().style.cursor = "pointer";
-    else if (!hoverAf) map.getCanvas().style.cursor = "";
   });
 
   // --- Native GeoJSON sources -------------------------------------------------------------
   function airfieldsFC() {
     airfieldByKey.clear();
+    airfieldHitGrid.clear();
+    airfieldHitView = null;
     const s = deps.getSettings();
     if (!s.airfields) return EMPTY_FC;
     const features = [];
@@ -1135,6 +1348,11 @@ export function createTactical3d({ container, deps }) {
       if (minor && !s.airfieldsMinor) continue;
       const key = f.icao || f.code;
       airfieldByKey.set(key, f);
+      const cell = airfieldGridCell(f);
+      const cellKey = airfieldGridKey(cell.lat, cell.lon);
+      const fields = airfieldHitGrid.get(cellKey);
+      if (fields) fields.push(f);
+      else airfieldHitGrid.set(cellKey, [f]);
       // icon-image/size + text pick their own per-class values from kind/minor in the style.
       features.push({ type: "Feature", properties: { key, code: f.code, minor, kind: f.kind }, geometry: { type: "Point", coordinates: [f.lon, f.lat] } });
     }
@@ -1152,34 +1370,9 @@ export function createTactical3d({ container, deps }) {
     for (const [label, dx, dy] of [["N", 0, 1], ["E", 1, 0], ["S", 0, -1], ["W", -1, 0]]) feats.push({ type: "Feature", properties: { kind: "compass", label }, geometry: { type: "Point", coordinates: [HOME.lon + (340 / 111.32 / cosLat) * dx, HOME.lat + (340 / 111.32) * dy] } });
     return { type: "FeatureCollection", features: feats };
   }
-  // Metric tactical grid (50 km major / 10 km minor) around the receiver.
-  function gridFC() {
-    const cosLat = Math.cos((HOME.lat * Math.PI) / 180) || 1;
-    const R = 480;
-    const feats = [];
-    for (let d = -R; d <= R; d += 10) {
-      const major = d % 50 === 0 ? 1 : 0;
-      const lon = HOME.lon + d / 111.32 / cosLat;
-      const lat = HOME.lat + d / 111.32;
-      feats.push({ type: "Feature", properties: { major }, geometry: { type: "LineString", coordinates: [[lon, HOME.lat - R / 111.32], [lon, HOME.lat + R / 111.32]] } });
-      feats.push({ type: "Feature", properties: { major }, geometry: { type: "LineString", coordinates: [[HOME.lon - R / 111.32 / cosLat, lat], [HOME.lon + R / 111.32 / cosLat, lat]] } });
-    }
-    return { type: "FeatureCollection", features: feats };
-  }
   function refreshSources() {
     map.getSource("airfields")?.setData(airfieldsFC());
     map.getSource("rings")?.setData(ringsFC());
-    map.getSource("grid")?.setData(gridFC());
-    applyTerrainMode();
-  }
-  // Satellite toggle: show the photo OR the dark tactical terrain (grid + contours + shade).
-  function applyTerrainMode() {
-    const sat = deps.getSettings().terrainSatellite === true;
-    const set = (id, vis) => { if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis ? "visible" : "none"); };
-    set("sat", sat);
-    set("hillshade", !sat);
-    set("grid-line", !sat);
-    set("contour-line", !sat);
   }
 
   // --- Public API -------------------------------------------------------------------------
@@ -1223,16 +1416,30 @@ export function createTactical3d({ container, deps }) {
   }
   function drawCoverage() { buildLayers(); }
   function applySettings() {
-    exagg = Math.max(1, Math.min(4, Number(deps.getSettings().terrainExaggeration) || 2));
+    const settings = deps.getSettings();
+    const nextTerrainExagg = settingExaggeration(settings, "terrainExaggeration", 5, 2);
+    const nextAltitudeExagg = settingExaggeration(settings, "altitudeExaggeration", 10, 5);
+    const nextPitchExagg = settingExaggeration(settings, "aircraftPitchExaggeration", 5, 3);
+    const nextRollExagg = settingExaggeration(settings, "aircraftRollExaggeration", 5, 1);
+    const altitudeScaleChanged = nextAltitudeExagg !== altitudeExagg;
+    terrainExagg = nextTerrainExagg;
+    altitudeExagg = nextAltitudeExagg;
+    pitchExagg = nextPitchExagg;
+    rollExagg = nextRollExagg;
+    if (altitudeScaleChanged) {
+      // Normals are calculated in exaggerated space, so a new coverage scale invalidates only
+      // the decoded browser mesh. The server snapshot and network payload remain unchanged.
+      coverageMeshSource = null;
+      cachedCoverageMesh = null;
+    }
     if (ready) {
       const currentElevation = map.transform.elevation || 0;
-      map.setTerrain({ source: "dem", exaggeration: exagg });
-      const selHex = deps.getSelectedHex();
-      const sel = orbitAttached && selHex && lastList.find((d) => d.hex === selHex);
-      if (sel) focusOnSelected(sel);
-      else applyCameraFrame({ elevation: currentElevation });
+      map.setTerrain({ source: "dem", exaggeration: terrainExagg });
       refreshSources();
       buildLayers();
+      const target = activeOrbitTarget();
+      if (target) focusOrbitTarget(target);
+      else applyCameraFrame({ elevation: currentElevation });
     }
   }
   function setHoverClass(prev, next) { hoverHex = next; scheduleActive(next); }
@@ -1273,9 +1480,19 @@ export function createTactical3d({ container, deps }) {
       clearOrbit();
       return false;
     }
-    const z = (altFt ?? 0) * FT_TO_M * ALT_EXAGG;
+    const z = (altFt ?? 0) * FT_TO_M * altitudeExagg;
     return transitionTrackedSelection({ hex: selectedHex, lon, lat, z }, "track-start");
   }
+  function toggleAirfieldTracking(field) {
+    if (!field) return false;
+    if (airfieldOrbitMatches(field)) {
+      clearOrbit();
+      return false;
+    }
+    startAirfieldOrbit(field);
+    return true;
+  }
+  function clearAirfieldSelection() { clearPinned({ releaseOrbit: true }); }
   function fitAircraft(points) {
     if (!points.length) return;
     clearOrbit();
@@ -1312,7 +1529,7 @@ export function createTactical3d({ container, deps }) {
     }
     if (ready) return;
     ready = true;
-    map.setTerrain({ source: "dem", exaggeration: exagg });
+    map.setTerrain({ source: "dem", exaggeration: terrainExagg });
     // setTerrain seeds center elevation from the DEM even with centerClampedToGround:false.
     // The free camera uses sea-level/ground pivot until an aircraft orbit is explicitly attached.
     applyCameraFrame({ elevation: 0 });
@@ -1321,5 +1538,5 @@ export function createTactical3d({ container, deps }) {
     refreshSources();
     dataPass();
   });
-  return { resize, dataPass, drawCoverage, applySettings, setHoverClass, locateBrowser, toggleTracking, fitAircraft, destroy };
+  return { resize, dataPass, drawCoverage, applySettings, setHoverClass, locateBrowser, toggleTracking, toggleAirfieldTracking, clearAirfieldSelection, fitAircraft, destroy };
 }

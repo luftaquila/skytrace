@@ -62,7 +62,7 @@ function loadAgentConfig(env = process.env) {
   return {
     ingestUrl: `${serverUrl}/api/ingest/readsb`,
     token: requiredEnv(env, "SKYTRACE_TOKEN"),
-    intervalMs: Number.parseInt(env.SKYTRACE_INTERVAL_MS || "5000", 10),
+    intervalMs: Number.parseInt(env.SKYTRACE_INTERVAL_MS || "3000", 10),
     aircraftUrl,
     aircraftFile,
     receiver: {

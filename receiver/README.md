@@ -32,7 +32,7 @@ build + units, see its README), `skytrace-agent.service` (uploader unit).
    SKYTRACE_TOKEN=<token>
    SKYTRACE_AIRCRAFT_FILE=/run/readsb/aircraft.json
    SKYTRACE_RECEIVER_NAME=<display name>
-   SKYTRACE_INTERVAL_MS=5000
+   SKYTRACE_INTERVAL_MS=3000
    ```
 
 3. Run the provisioner as root:

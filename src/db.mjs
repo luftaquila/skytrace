@@ -11,13 +11,13 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
-export function openDatabase(dbPath) {
+export function openDatabase(dbPath, options = {}) {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
-  migrate(db);
+  if (options.migrate !== false) migrate(db);
   return db;
 }
 
@@ -157,11 +157,53 @@ export function migrate(db) {
       last_flight TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS coverage_receiver_state (
+      receiver_id TEXT PRIMARY KEY,
+      schema_key TEXT NOT NULL,
+      origin_lat REAL NOT NULL,
+      origin_lon REAL NOT NULL,
+      last_track_id INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (receiver_id) REFERENCES receivers(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS coverage_track_state (
+      receiver_id TEXT NOT NULL,
+      hex TEXT NOT NULL,
+      position_at TEXT NOT NULL,
+      lat REAL NOT NULL,
+      lon REAL NOT NULL,
+      altitude_ft REAL NOT NULL,
+      PRIMARY KEY (receiver_id, hex),
+      FOREIGN KEY (receiver_id) REFERENCES receivers(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS coverage_cells (
+      receiver_id TEXT NOT NULL,
+      schema_key TEXT NOT NULL,
+      cell_x INTEGER NOT NULL,
+      cell_y INTEGER NOT NULL,
+      cell_z INTEGER NOT NULL,
+      lat REAL NOT NULL,
+      lon REAL NOT NULL,
+      altitude_ft REAL NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      hit_count INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (receiver_id, schema_key, cell_x, cell_y, cell_z),
+      FOREIGN KEY (receiver_id) REFERENCES receivers(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_receiver_current_observed ON receiver_aircraft_current(observed_at);
     CREATE INDEX IF NOT EXISTS idx_receiver_current_hex ON receiver_aircraft_current(hex);
     CREATE INDEX IF NOT EXISTS idx_track_hex_time ON track_points(hex, position_at);
     CREATE INDEX IF NOT EXISTS idx_track_time ON track_points(position_at);
+    CREATE INDEX IF NOT EXISTS idx_track_receiver_id ON track_points(receiver_id, id);
+    CREATE INDEX IF NOT EXISTS idx_track_receiver_time ON track_points(receiver_id, position_at, id);
     CREATE INDEX IF NOT EXISTS idx_batches_receiver_time ON ingest_batches(receiver_id, received_at);
+    CREATE INDEX IF NOT EXISTS idx_coverage_cells_active
+      ON coverage_cells(receiver_id, schema_key, last_seen_at);
+    CREATE INDEX IF NOT EXISTS idx_coverage_track_state_time
+      ON coverage_track_state(receiver_id, position_at);
   `);
 
   ensureColumns(db, "receiver_aircraft_current", {

@@ -36,9 +36,16 @@ const DEFAULT_SETTINGS = {
   coastDrop: true,
   proximity: true,
   terrainExaggeration: 2,
-  terrainSatellite: true,
+  altitudeExaggeration: 5,
+  aircraftPitchExaggeration: 3,
+  aircraftRollExaggeration: 1,
   allAircraftTracks: false,
 };
+
+function clampSetting(value, min, max, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+}
 
 function loadSettings() {
   try {
@@ -47,6 +54,20 @@ function loadSettings() {
     for (const key of Object.keys(DEFAULT_SETTINGS)) {
       if (Object.hasOwn(saved, key)) settings[key] = saved[key];
     }
+    settings.terrainExaggeration = clampSetting(settings.terrainExaggeration, 1, 5, 2);
+    settings.aircraftPitchExaggeration = clampSetting(settings.aircraftPitchExaggeration, 1, 5, 3);
+    settings.aircraftRollExaggeration = clampSetting(settings.aircraftRollExaggeration, 1, 5, 1);
+    // Merge the short-lived split settings from local development into the single shared
+    // altitude scale. Aircraft, tracks, tracking camera, and coverage must stay co-located.
+    settings.altitudeExaggeration = clampSetting(
+      saved.altitudeExaggeration
+        ?? saved.aircraftAltitudeExaggeration
+        ?? saved.coverageAltitudeExaggeration
+        ?? settings.altitudeExaggeration,
+      1,
+      10,
+      5,
+    );
     return settings;
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -58,6 +79,7 @@ const aircraft = ref([]);
 const receivers = ref([]);
 const coverage = ref({ areas: [], points: [] });
 const selectedHex = ref(null);
+const selectedAirfield = ref(null);
 const trackingActive = ref(false);
 const hoveredHex = ref(null);
 const selectedTrackRaw = ref([]);
@@ -203,11 +225,13 @@ const airfieldSummary = computed(() => {
 
 const coverageSummary = computed(() => {
   const areas = coverage.value.areas || [];
+  const windowDays = Number(coverage.value.windowDays);
   return {
     areas: areas.filter((area) => area.polygon).length,
-    positions: coverage.value.count ?? (coverage.value.points || []).length,
+    cells: coverage.value.aggregation?.activeCells ?? coverage.value.count ?? (coverage.value.points || []).length,
     receivers: coverage.value.receiverCount ?? areas.length,
     triangles: areas.reduce((sum, area) => sum + (area.volumeMesh?.triangleCount || 0), 0),
+    window: Number.isFinite(windowDays) ? `${numberFormatter(0).format(windowDays)}d` : "-",
   };
 });
 
@@ -296,10 +320,6 @@ function sortAircraft(rows, key) {
 
 const selectedAircraft = computed(() => {
   return aircraft.value.find((item) => item.hex === selectedHex.value) || null;
-});
-const trackingButtonText = computed(() => {
-  if (!selectedAircraft.value) return "Locate";
-  return trackingActive.value ? "Tracking" : "Track";
 });
 
 const kmlHref = computed(() => {
@@ -475,6 +495,13 @@ function isCoasting(item) {
 function isDropped(item) {
   return settings.value.coastDrop && targetAgeSec(item) >= DROP_AGE_SEC;
 }
+function coastOpacity(item) {
+  if (!isCoasting(item)) return 1;
+  // A target becomes visibly ghosted as soon as it is stale, then keeps fading until it drops.
+  // Keep a small floor so it remains discoverable and selectable before DROP_AGE_SEC removes it.
+  const progress = Math.min(1, Math.max(0, (targetAgeSec(item) - COAST_AGE_SEC) / (DROP_AGE_SEC - COAST_AGE_SEC)));
+  return 0.46 - progress * 0.24;
+}
 
 // Proximity (STCA-style): airborne pairs closer than PROXIMITY_NM laterally AND within
 // PROXIMITY_FT vertically. Recomputed only when the aircraft set changes (not per second),
@@ -618,15 +645,17 @@ const altitudeLegend = computed(() => {
   }
   const fl = settings.value.flightLevels;
   const metric = settings.value.units === "metric" && !fl;
+  const unit = fl ? "FL" : metric ? "m" : "ft";
   const ticks = [1, 0.75, 0.5, 0.25, 0].map((frac) => {
-    if (fl) return { label: `${Math.round((frac * ALT_COLOR_MAX_FT) / 100)}` };
-    const value = frac * ALT_COLOR_MAX_FT * (metric ? 0.3048 : 1);
-    return { label: value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}` };
+    const value = fl
+      ? Math.round((frac * ALT_COLOR_MAX_FT) / 100)
+      : frac * ALT_COLOR_MAX_FT * (metric ? 0.3048 : 1);
+    const label = !fl && value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}`;
+    return { label: frac === 0 ? `${label} (${unit})` : label };
   });
   return {
     gradient: `linear-gradient(to top, ${stops.join(", ")})`,
     ticks,
-    unit: fl ? "FL" : metric ? "m" : "ft",
     groundColor: ALT_COLOR_GROUND,
   };
 });
@@ -940,9 +969,8 @@ async function refreshLive() {
   }
 }
 
-// The server rebuilds one complete occupancy snapshot every five minutes. The browser only
-// downloads that finished snapshot on the same cadence; live ingest events never trigger mesh
-// generation or repeated downloads.
+// The server worker publishes one complete occupancy snapshot every three minutes. The browser only
+// downloads completed immutable snapshots; live ingest events never generate meshes inline.
 async function refreshCoverage() {
   try {
     coverage.value = (await fetchJson("/api/coverage")) || { areas: [], points: [] };
@@ -1031,8 +1059,12 @@ async function togglePin(hex) {
   tac3d?.dataPass();
 }
 
-async function selectAircraft(hex) {
+function beginAircraftSelection(hex) {
   if (!hex || selectedHex.value === hex) return;
+  if (selectedAirfield.value) {
+    selectedAirfield.value = null;
+    tac3d?.clearAirfieldSelection();
+  }
   // Invalidate the previous request and erase its points before changing the selected hex. This
   // prevents one render frame from treating aircraft A's final trail point as aircraft B's anchor.
   selectedTrackRequestVersion += 1;
@@ -1040,6 +1072,11 @@ async function selectAircraft(hex) {
   playbackSpeed.value = 0;
   playbackIndex.value = 0;
   selectedHex.value = hex;
+  return true;
+}
+
+async function selectAircraft(hex) {
+  if (!beginAircraftSelection(hex)) return;
   // Selection alone keeps the camera untouched. If Track is already active, dataPass transfers
   // the existing tracked orbit smoothly to the newly selected aircraft.
   tac3d?.dataPass();
@@ -1062,6 +1099,24 @@ function toggleAircraft(hex) {
   else selectAircraft(hex);
 }
 
+// A map double-click is the Track control applied to the clicked target. Selection is made first
+// so an existing tracking orbit transfers directly to this aircraft instead of being released.
+function trackAircraftFromMap(hex) {
+  const item = aircraft.value.find((candidate) => candidate.hex === hex);
+  if (!item || item.lat == null || item.lon == null) return;
+  const selectionChanged = beginAircraftSelection(hex);
+  trackingActive.value = tac3d?.toggleTracking(item.lon, item.lat, item.altBaro ?? item.altGeom) === true;
+  tac3d?.dataPass();
+  if (selectionChanged) void refreshTrack();
+}
+
+function selectAirfieldFromMap(field) {
+  selectedAirfield.value = field || null;
+  // Airport selection itself has no camera effect. Clearing an aircraft selection only makes the
+  // shared Track icon unambiguously address the airport that was just selected.
+  if (field && selectedHex.value) clearSelection();
+}
+
 function onGlobalKeydown(event) {
   if (event.key !== "Escape") return;
   if (selectedHex.value) clearSelection();
@@ -1081,6 +1136,11 @@ function browserLocation() {
 // With a selected aircraft this is the tracking toggle. Without one, locate the browser's
 // current position after the normal browser permission prompt.
 async function recenterView() {
+  const airfield = selectedAirfield.value;
+  if (airfield) {
+    trackingActive.value = tac3d?.toggleAirfieldTracking(airfield) === true;
+    return;
+  }
   const sel = selectedAircraft.value;
   const hasSel = sel && sel.lat != null && sel.lon != null;
   if (hasSel) {
@@ -1148,11 +1208,14 @@ async function ensureTactical3d() {
         passesFilters,
         isDropped,
         isCoasting,
+        coastOpacity,
         altitudeColor,
         altitudeColorFeet,
         trackSegmentColor,
         planeSizeScale,
         onSelect: toggleAircraft,
+        onTrackAircraft: trackAircraftFromMap,
+        onAirfieldSelection: selectAirfieldFromMap,
         onHover: (hex) => { hoveredHex.value = hex; },
         onTrackingChange: (active) => { trackingActive.value = active; },
         onMapClick: () => { if (selectedHex.value) clearSelection(); },
@@ -1195,10 +1258,10 @@ onMounted(async () => {
   tac3d.applySettings();
   await refreshLive();
   await refreshCoverage();
-  // Fallback polls in case the SSE stream drops. Coverage is an independent five-minute
-  // snapshot, deliberately decoupled from the five-second aircraft updates.
+  // Fallback polls in case the SSE stream drops. Coverage remains an independent
+  // three-minute worker snapshot.
   refreshTimer = setInterval(() => liveRefresher.schedule(0), 10000);
-  coverageTimer = setInterval(() => coverageRefresher.schedule(0), 300000);
+  coverageTimer = setInterval(() => coverageRefresher.schedule(0), 180000);
   clockTimer = setInterval(() => {
     now.value = Date.now();
     // Coast/drop transitions and each data block's age (#s) are time-driven; a dataPass
@@ -1220,7 +1283,7 @@ function connectEvents() {
     status.value = "reconnecting";
     // The browser only retries transient drops on its own; an HTTP error response
     // (e.g. a 502 while the server redeploys) fails the stream PERMANENTLY per the
-    // EventSource spec, silently demoting the tab to the 10s fallback poll forever —
+    // EventSource spec, silently demoting the tab to fallback polling forever —
     // rebuild the stream ourselves.
     if (eventSource.readyState === EventSource.CLOSED) {
       clearTimeout(sseRetryTimer);
@@ -1262,15 +1325,14 @@ onUnmounted(() => {
         <button
           class="icon-button map-track-button"
           :class="{ active: trackingActive }"
-          :title="selectedAircraft ? (trackingActive ? 'Stop tracking' : 'Track selected aircraft') : 'Go to my location'"
-          :aria-label="selectedAircraft ? (trackingActive ? 'Stop tracking' : 'Track selected aircraft') : 'Go to my location'"
+          :title="selectedAirfield ? (trackingActive ? 'Stop tracking airport' : 'Track selected airport') : selectedAircraft ? (trackingActive ? 'Stop tracking' : 'Track selected aircraft') : 'Go to my location'"
+          :aria-label="selectedAirfield ? (trackingActive ? 'Stop tracking airport' : 'Track selected airport') : selectedAircraft ? (trackingActive ? 'Stop tracking' : 'Track selected aircraft') : 'Go to my location'"
           @click="recenterView"
         >
           <LocateFixed :size="17" />
-          <span>{{ trackingButtonText }}</span>
         </button>
         <div class="map-legend" aria-hidden="true">
-          <div class="legend-title">Altitude ({{ altitudeLegend.unit }})</div>
+          <div class="legend-title">Altitude</div>
           <div class="legend-body">
             <div class="legend-bar" :style="{ background: altitudeLegend.gradient }"></div>
             <div class="legend-ticks">
@@ -1473,7 +1535,7 @@ onUnmounted(() => {
             <section class="coverage-card">
               <header><Layers :size="17" /><span>Coverage</span></header>
               <div class="coverage-note">
-                {{ coverageSummary.areas }} areas · {{ coverageSummary.positions }} positions
+                {{ coverageSummary.areas }} areas · {{ numberFormatter(0).format(coverageSummary.cells) }} cells · {{ coverageSummary.window }}
                 <template v-if="coverageSummary.triangles"> · {{ numberFormatter(0).format(coverageSummary.triangles) }} triangles</template>
               </div>
             </section>
@@ -1507,11 +1569,13 @@ onUnmounted(() => {
             <header><Settings :size="17" /><span>Display</span></header>
             <div class="control-grid">
               <label><span>Units</span><select v-model="settings.units"><option value="aero">Aeronautical</option><option value="metric">Metric</option><option value="imperial">Imperial</option></select></label>
-              <label><span>Terrain ×{{ Number(settings.terrainExaggeration).toFixed(1) }}</span><input v-model.number="settings.terrainExaggeration" type="range" min="1" max="4" step="0.1" /></label>
+              <label><span>Terrain ×{{ Number(settings.terrainExaggeration).toFixed(1) }}</span><input v-model.number="settings.terrainExaggeration" type="range" min="1" max="5" step="0.1" /></label>
+              <label><span>Altitude ×{{ Number(settings.altitudeExaggeration).toFixed(1) }}</span><input v-model.number="settings.altitudeExaggeration" type="range" min="1" max="10" step="0.1" /></label>
+              <label><span>Climb pitch ×{{ Number(settings.aircraftPitchExaggeration).toFixed(1) }}</span><input v-model.number="settings.aircraftPitchExaggeration" type="range" min="1" max="5" step="0.1" /></label>
+              <label><span>Roll ×{{ Number(settings.aircraftRollExaggeration).toFixed(1) }}</span><input v-model.number="settings.aircraftRollExaggeration" type="range" min="1" max="5" step="0.1" /></label>
             </div>
             <div class="toggle-row">
               <label><input v-model="settings.flightLevels" type="checkbox" /> Flight levels</label>
-              <label><input v-model="settings.terrainSatellite" type="checkbox" /> Satellite terrain</label>
               <label><input v-model="settings.allAircraftTracks" type="checkbox" /> All aircraft trails</label>
             </div>
           </section>

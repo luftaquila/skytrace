@@ -16,10 +16,15 @@ const server = app.listen(config.port, () => {
 
 function shutdown(signal) {
   console.log(`received ${signal}, shutting down`);
-  app.locals.coverageCache?.close();
-  server.close(() => {
-    db.close();
-    process.exit(0);
+  server.close(async () => {
+    try {
+      await app.locals.coverageCache?.close();
+      db.close();
+      process.exit(0);
+    } catch (error) {
+      console.error("shutdown failed", error);
+      process.exit(1);
+    }
   });
   setTimeout(() => process.exit(1), 10000).unref();
 }

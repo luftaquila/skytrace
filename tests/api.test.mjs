@@ -26,17 +26,17 @@ async function withServer(fn) {
   await new Promise((resolve) => server.once("listening", resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   try {
-    await fn({ baseUrl, db });
+    await fn({ baseUrl, db, coverageCache: app.locals.coverageCache });
   } finally {
     await new Promise((resolve) => server.close(resolve));
-    app.locals.coverageCache?.close();
+    await app.locals.coverageCache?.close();
     db.close();
     await fs.rm(dir, { recursive: true, force: true });
   }
 }
 
 test("ingests receiver aircraft and exposes current state and track", async () => {
-  await withServer(async ({ baseUrl }) => {
+  await withServer(async ({ baseUrl, coverageCache }) => {
     const now = Date.now() / 1000;
     const ingest = await fetch(`${baseUrl}/api/ingest/readsb`, {
       method: "POST",
@@ -120,6 +120,7 @@ test("ingests receiver aircraft and exposes current state and track", async () =
     assert.equal(receivers.receivers[0].name, "Roof Receiver");
     assert.equal(receivers.receivers[0].lat, null);
 
+    await coverageCache.refresh();
     const coverageResponse = await fetch(`${baseUrl}/api/coverage`);
     assert.equal(coverageResponse.headers.get("cache-control"), "public, max-age=0, must-revalidate");
     const coverage = await coverageResponse.json();
@@ -132,13 +133,15 @@ test("ingests receiver aircraft and exposes current state and track", async () =
     assert.equal(coverage.points.length, 0);
     assert.equal(coverage.areas[0].volume, null);
     assert.equal(coverage.areas[0].volumeMesh, null);
-    assert.equal(coverage.refreshIntervalSeconds, 300);
+    assert.equal(coverage.refreshIntervalSeconds, 180);
+    assert.equal(coverage.windowDays, 30);
+    assert.equal(coverage.aggregation.type, "receiver-spatial-cells");
     assert.ok(Number.isFinite(Date.parse(coverage.generatedAt)));
   });
 });
 
 test("coverage API returns a compact indexed occupancy mesh", async () => {
-  await withServer(async ({ baseUrl }) => {
+  await withServer(async ({ baseUrl, coverageCache }) => {
     const now = Date.now() / 1000;
     const aircraft = [
       ["aaa001", 37.45, 127.00, 8000],
@@ -158,6 +161,7 @@ test("coverage API returns a compact indexed occupancy mesh", async () => {
     });
     assert.equal(response.status, 200);
 
+    await coverageCache.refresh();
     const coverage = await (await fetch(`${baseUrl}/api/coverage`)).json();
     const mesh = coverage.areas[0].volumeMesh;
     assert.equal(mesh.type, "observed-occupancy-surface");
@@ -227,4 +231,55 @@ test("filters implausible position jumps from track storage", async () => {
     assert.equal(track.points.length, 1);
     assert.equal(track.points[0].lat, 37.5);
   });
+});
+
+test("coverage work can wait without blocking health or live HTTP handling", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "skytrace-worker-http-"));
+  const config = loadConfig({
+    PORT: "0",
+    SKYTRACE_DB_PATH: path.join(dir, "skytrace.db"),
+    SKYTRACE_STATIC_DIR: path.join(dir, "missing-dist"),
+  });
+  const db = openDatabase(config.dbPath);
+  let releaseBuild;
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const buildResult = new Promise((resolve) => { releaseBuild = resolve; });
+  const coverageWorker = {
+    build: async () => {
+      markStarted();
+      return buildResult;
+    },
+    async close() {},
+  };
+  const app = createApp({ db, config, sseHub: createSseHub(), coverageWorker });
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once("listening", resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await started;
+    const pendingCoverage = fetch(`${baseUrl}/api/coverage`);
+    const health = await (await fetch(`${baseUrl}/healthz`)).json();
+    assert.equal(health.ok, true);
+    assert.equal(health.coverage.refreshing, true);
+
+    releaseBuild({
+      type: "observed-occupancy",
+      from: "2026-06-23T00:00:00.000Z",
+      to: "2026-07-23T00:00:00.000Z",
+      windowDays: 30,
+      count: 0,
+      receiverCount: 0,
+      areas: [],
+      points: [],
+    });
+    const coverage = await (await pendingCoverage).json();
+    assert.equal(coverage.status, "ready");
+    assert.equal(coverage.windowDays, 30);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await app.locals.coverageCache.close();
+    db.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });

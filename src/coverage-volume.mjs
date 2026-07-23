@@ -88,7 +88,7 @@ function coverageSamples(points, options) {
     byAircraft.set(point.hex, list);
   }
 
-  // Stored points normally arrive every five seconds. Interpolating only short, physically
+  // Stored points normally arrive every few seconds. Interpolating only short, physically
   // plausible runs prevents polling gaps from punching slits through an otherwise observed
   // flight path without drawing bridges between separate flights or unrelated aircraft.
   for (const list of byAircraft.values()) {
@@ -114,7 +114,7 @@ function coverageSamples(points, options) {
   }
 
   // Repeated traffic in the same small cell cannot expand an observed-volume union. Removing
-  // those duplicates keeps a 50k-point refresh comfortably below the five-minute budget.
+  // those duplicates keeps mesh cost tied to spatial evidence instead of raw traffic volume.
   const unique = new Map();
   const h = options.horizontalStepNm * 0.5;
   const v = options.verticalStepFt * 0.5;

@@ -497,9 +497,10 @@ select {
   box-shadow: inset 3px 0 0 var(--danger);
 }
 
-/* Coasting (stale) list rows dim to read as "not currently updating". */
+/* Coasting (stale) list rows visually match their ghosted map target. */
 .aircraft-row.coasting {
-  opacity: 0.68;
+  opacity: 0.56;
+  filter: saturate(0.5);
 }
 
 .alt-dot {
@@ -847,11 +848,6 @@ select {
 }
 
 .map-track-button {
-  width: auto;
-  min-width: 38px;
-  padding: 0 11px;
-  gap: 7px;
-  font-weight: 700;
   pointer-events: auto;
 }
 

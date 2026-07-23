@@ -2,9 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import express from "express";
 import { createCoverageCache } from "./coverage-cache.mjs";
+import { createCoverageWorkerClient } from "./coverage-worker-client.mjs";
 import {
   authenticateIngest,
-  getCoverage,
   getCurrentAircraft,
   getPublicReceivers,
   getTrack,
@@ -30,36 +30,46 @@ function parseDateQuery(value) {
   return Number.isFinite(d.getTime()) ? d.toISOString() : null;
 }
 
-export function createApp({ db, config, sseHub }) {
+export function createApp({ db, config, sseHub, coverageWorker = null }) {
   const app = express();
   app.disable("x-powered-by");
   if (config.trustProxy) app.set("trust proxy", true);
 
   app.use(express.json({ limit: "8mb" }));
 
+  const coverageOptions = {
+    coverageWindowHours: config.coverageWindowHours,
+    coverageHorizontalStepNm: config.coverageHorizontalStepNm,
+    coverageVerticalStepFt: config.coverageVerticalStepFt,
+    coverageCellHorizontalStepNm: config.coverageCellHorizontalStepNm,
+    coverageCellVerticalStepFt: config.coverageCellVerticalStepFt,
+    coverageHorizontalSupportNm: config.coverageHorizontalSupportNm,
+    coverageVerticalSupportFt: config.coverageVerticalSupportFt,
+    coverageHorizontalInterpolationCells: config.coverageHorizontalInterpolationCells,
+    coverageHorizontalSmoothingPasses: config.coverageHorizontalSmoothingPasses,
+    coverageVerticalSmoothingPasses: config.coverageVerticalSmoothingPasses,
+    coverageSmoothingIterations: config.coverageSmoothingIterations,
+    coverageMaxCells: config.coverageMaxCells,
+    coverageMaxTriangles: config.coverageMaxTriangles,
+    coverageAggregationChunkSize: config.coverageAggregationChunkSize,
+  };
+  const workerClient = coverageWorker || createCoverageWorkerClient({
+    dbPath: config.dbPath,
+    options: coverageOptions,
+  });
   const coverageCache = createCoverageCache({
     refreshSeconds: config.coverageRefreshSeconds,
-    build: (now) => getCoverage(db, {
-      now,
-      coverageWindowHours: config.coverageWindowHours,
-      coverageBearingStepDegrees: config.coverageBearingStepDegrees,
-      coverageMaxPoints: config.coverageMaxPoints,
-      coverageHorizontalStepNm: config.coverageHorizontalStepNm,
-      coverageVerticalStepFt: config.coverageVerticalStepFt,
-      coverageHorizontalSupportNm: config.coverageHorizontalSupportNm,
-      coverageVerticalSupportFt: config.coverageVerticalSupportFt,
-      coverageHorizontalInterpolationCells: config.coverageHorizontalInterpolationCells,
-      coverageHorizontalSmoothingPasses: config.coverageHorizontalSmoothingPasses,
-      coverageVerticalSmoothingPasses: config.coverageVerticalSmoothingPasses,
-      coverageSmoothingIterations: config.coverageSmoothingIterations,
-      coverageMaxCells: config.coverageMaxCells,
-      coverageMaxTriangles: config.coverageMaxTriangles,
-    }),
+    build: (now) => workerClient.build(now),
+    closeBuild: () => workerClient.close(),
   });
   app.locals.coverageCache = coverageCache;
 
   app.get("/healthz", (req, res) => {
-    res.json({ ok: true, now: new Date().toISOString() });
+    res.json({
+      ok: true,
+      now: new Date().toISOString(),
+      coverage: coverageCache.state(),
+    });
   });
 
   app.get("/api/events", (req, res) => {
@@ -119,12 +129,12 @@ export function createApp({ db, config, sseHub }) {
     }));
   });
 
-  app.get("/api/coverage", (req, res) => {
-    // The browser's five-minute timer should always ask the server for its current snapshot;
-    // only the server cache controls mesh freshness.
+  app.get("/api/coverage", asyncRoute(async (req, res) => {
+    // The API waits asynchronously for the first snapshot, while later requests receive the
+    // last completed immutable snapshot immediately. Mesh generation never blocks Express.
     res.set("cache-control", "public, max-age=0, must-revalidate");
-    res.json(coverageCache.get());
-  });
+    res.json(await coverageCache.ready());
+  }));
 
   app.get("/api/aircraft/:hex/track.kml", (req, res) => {
     const points = getTrack(db, req.params.hex, {
