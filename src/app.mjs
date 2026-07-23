@@ -11,7 +11,7 @@ import {
   trackToKml,
 } from "./ingest.mjs";
 import { sanitizeReceiverId } from "./normalize-readsb.mjs";
-import { queryAircraftTracks, queryRecordedAircraftTracks } from "./track-query.mjs";
+import { queryAircraftTracks } from "./track-query.mjs";
 
 function bearerToken(req) {
   const header = req.get("authorization") || "";
@@ -57,18 +57,6 @@ export function createApp({ db, config, sseHub }) {
       limit: config.maxTrackQueryPoints,
       maxAircraft: 250,
       now: new Date().toISOString(),
-    }));
-  });
-
-  app.post("/api/aircraft/tracks/recorded", (req, res) => {
-    res.json(queryRecordedAircraftTracks(db, {
-      pageAfterHex: req.body?.pageAfterHex,
-      snapshotId: req.body?.snapshotId,
-      afterId: req.body?.afterId,
-      pageSize: 250,
-      limit: config.maxTrackQueryPoints,
-      updateLimit: 50000,
-      compact: true,
     }));
   });
 

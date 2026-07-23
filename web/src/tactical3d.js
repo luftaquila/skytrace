@@ -688,8 +688,8 @@ export function createTactical3d({ container, deps }) {
     const trails = [];
     const trailAnchors = new Map();
     const seen = new Set();
-    const addTrail = (hex, allPoints, includeHistoric = deps.getSettings().historicTracks) => {
-      const pts = includeHistoric ? allPoints : currentTrackRun(allPoints);
+    const addTrail = (hex, allPoints) => {
+      const pts = deps.getSettings().historicTracks ? allPoints : currentTrackRun(allPoints);
       let run = null;
       let runColor = null;
       let prevT = null;
@@ -715,7 +715,6 @@ export function createTactical3d({ container, deps }) {
       }
       if (run && run.path.length >= 2) trails.push(run);
     };
-    for (const { hex, points } of deps.getRecordedAircraftTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(hex, points, true); }
     const selTrack = deps.getSelectedTrack();
     if (selHex && selTrack.length) { addTrail(selHex, selTrack); seen.add(selHex); }
     for (const { hex, points } of deps.getPinnedTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(hex, points); }

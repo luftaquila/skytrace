@@ -39,7 +39,6 @@ const DEFAULT_SETTINGS = {
   terrainSatellite: true,
   historicTracks: false,
   allAircraftTracks: false,
-  recordedAircraftTracks: false,
 };
 
 function loadSettings() {
@@ -68,7 +67,6 @@ const selectedTrack = ref([]);
 const pinned = ref(new Set());
 const pinnedTracks = ref(new Map());
 const allTrackCache = ref(new Map());
-const recordedTrackCache = ref(new Map());
 const search = ref("");
 const sortKey = ref("callsign");
 const tracklogOpen = ref(false);
@@ -131,10 +129,6 @@ let tac3d;
 let tac3dPromise;
 let allTrackCursors = new Map();
 let allTrackRequestVersion = 0;
-let recordedTrackCursor = null;
-let recordedTrackLoaded = false;
-let recordedTrackRequestVersion = 0;
-let recordedTrackRefreshPromise = null;
 
 watch(settings, (value) => {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(value));
@@ -260,10 +254,6 @@ const trailFilterKey = computed(() => [
 watch(() => settings.value.allAircraftTracks, (enabled) => {
   if (enabled) refreshAllAircraftTracks({ reset: true });
   else clearAllTrackCache();
-});
-watch(() => settings.value.recordedAircraftTracks, (enabled) => {
-  if (enabled) refreshRecordedAircraftTracks({ reset: true });
-  else clearRecordedTrackCache();
 });
 watch(() => settings.value.historicTracks, () => refreshAllAircraftTracks({ reset: true }));
 watch(trailFilterKey, () => refreshAllAircraftTracks());
@@ -888,88 +878,6 @@ async function refreshAllAircraftTracks({ reset = false } = {}) {
   }
 }
 
-function clearRecordedTrackCache() {
-  recordedTrackRequestVersion += 1;
-  recordedTrackCursor = null;
-  recordedTrackLoaded = false;
-  recordedTrackRefreshPromise = null;
-  if (recordedTrackCache.value.size) recordedTrackCache.value = new Map();
-  tac3d?.dataPass();
-}
-
-function decodeRecordedPoints(track) {
-  return (track?.points || []).map((point) => Array.isArray(point) ? ({
-    id: point[0],
-    positionAt: point[1],
-    lat: point[2],
-    lon: point[3],
-    altBaro: point[4],
-    altGeom: point[5],
-    onGround: Boolean(point[6]),
-  }) : point);
-}
-
-async function refreshRecordedAircraftTracks({ reset = false } = {}) {
-  if (!settings.value.recordedAircraftTracks) {
-    if (recordedTrackCache.value.size || recordedTrackLoaded) clearRecordedTrackCache();
-    return;
-  }
-  if (recordedTrackRefreshPromise && !reset) return recordedTrackRefreshPromise;
-
-  const requestVersion = ++recordedTrackRequestVersion;
-  const load = (async () => {
-    if (reset || !recordedTrackLoaded) {
-      const nextTracks = new Map();
-      let pageAfterHex = null;
-      let snapshotId = null;
-      do {
-        const result = await fetchJson("/api/aircraft/tracks/recorded", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ pageAfterHex, snapshotId }),
-        });
-        if (requestVersion !== recordedTrackRequestVersion || !settings.value.recordedAircraftTracks) return;
-        snapshotId = result.snapshotId;
-        for (const track of result.tracks || []) {
-          nextTracks.set(track.hex, mergeTrackPoints([], decodeRecordedPoints(track), true));
-        }
-        pageAfterHex = result.nextHex;
-      } while (pageAfterHex);
-      recordedTrackCache.value = nextTracks;
-      recordedTrackCursor = snapshotId;
-      recordedTrackLoaded = true;
-      tac3d?.dataPass();
-      return;
-    }
-
-    const nextTracks = new Map(recordedTrackCache.value);
-    let hasMore = false;
-    do {
-      const result = await fetchJson("/api/aircraft/tracks/recorded", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ afterId: recordedTrackCursor }),
-      });
-      if (requestVersion !== recordedTrackRequestVersion || !settings.value.recordedAircraftTracks) return;
-      for (const track of result.tracks || []) {
-        nextTracks.set(track.hex, mergeTrackPoints(nextTracks.get(track.hex) || [], decodeRecordedPoints(track), true));
-      }
-      recordedTrackCursor = result.cursorId ?? recordedTrackCursor;
-      hasMore = result.hasMore === true;
-    } while (hasMore);
-    recordedTrackCache.value = nextTracks;
-    tac3d?.dataPass();
-  })();
-  recordedTrackRefreshPromise = load;
-  try {
-    await load;
-  } catch (error) {
-    if (requestVersion === recordedTrackRequestVersion) console.error(error);
-  } finally {
-    if (recordedTrackRefreshPromise === load) recordedTrackRefreshPromise = null;
-  }
-}
-
 async function refreshTrackRange() {
   await Promise.all([
     selectedHex.value ? refreshTrack() : null,
@@ -1000,7 +908,6 @@ async function refreshLive() {
       selectedHex.value ? refreshTrack(false) : null,
       refreshPinnedTracks(),
       refreshAllAircraftTracks(),
-      refreshRecordedAircraftTracks(),
     ]);
   } catch (err) {
     status.value = "offline";
@@ -1197,7 +1104,6 @@ async function ensureTactical3d() {
         getPinned: () => pinned.value,
         getPinnedTracks: () => [...pinnedTracks.value].map(([hex, points]) => ({ hex, points })),
         getAllAircraftTracks: () => [...allTrackCache.value].map(([hex, points]) => ({ hex, points })),
-        getRecordedAircraftTracks: () => [...recordedTrackCache.value].map(([hex, points]) => ({ hex, points })),
         togglePin,
         datablockHtml,
         airfieldTooltip,
@@ -1557,7 +1463,6 @@ onUnmounted(() => {
               <label><input v-model="settings.terrainSatellite" type="checkbox" /> Satellite terrain</label>
               <label><input v-model="settings.historicTracks" type="checkbox" /> Historic</label>
               <label><input v-model="settings.allAircraftTracks" type="checkbox" /> All aircraft trails</label>
-              <label><input v-model="settings.recordedAircraftTracks" type="checkbox" /> All recorded trails</label>
             </div>
           </section>
         </div>
