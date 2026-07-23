@@ -42,25 +42,30 @@ test("tracking camera follows the continuously projected target without another 
   assert.match(applyMotionFrame, /motionTrailByHex\.get\(d\.hex\)/);
 });
 
-test("aircraft selection never starts or moves the tracking camera", () => {
+test("aircraft selection only moves the camera when tracking mode is already active", () => {
   const dataPass = functionSource("dataPass", "drawCoverage");
   assert.match(dataPass, /if \(!followActive\)/);
   assert.match(dataPass, /selectedHex !== followingSelectionHex/);
+  assert.match(dataPass, /transitionTrackedSelection\(next\)/);
   assert.doesNotMatch(dataPass, /animateCamera|beginSelectionFocus/);
 
-  const panTo = functionSource("panTo", "followSelected");
-  assert.match(panTo, /clearOrbit\(\)/);
-  assert.doesNotMatch(panTo, /animateCamera|applyCameraFrame|attachOrbit/);
+  const transition = functionSource("transitionTrackedSelection", "dataPass");
+  assert.match(transition, /followingSelectionHex = target\.hex/);
+  assert.match(transition, /setFollowActive\(true\)/);
+  assert.match(transition, /attachOrbit\(target\.z\)/);
+  assert.match(transition, /kind/);
+  assert.match(source, /kind = "track-switch"/);
 });
 
 test("Locate toggles tracking without changing bearing or pitch", () => {
   const aircraftBranch = functionSource("toggleTracking", "fitAircraft");
+  const transition = functionSource("transitionTrackedSelection", "dataPass");
   assert.match(aircraftBranch, /followActive && selectedHex && followingSelectionHex === selectedHex/);
-  assert.match(aircraftBranch, /kind: "track-start"/);
-  assert.match(aircraftBranch, /return true/);
+  assert.match(aircraftBranch, /transitionTrackedSelection\(\{ hex: selectedHex, lon, lat, z \}, "track-start"\)/);
+  assert.match(transition, /return true/);
   assert.match(aircraftBranch, /return false/);
   assert.match(aircraftBranch, /\(altFt \?\? 0\)/);
-  assert.match(aircraftBranch, /zoom: Math\.max\(map\.getZoom\(\), 10\.5\)/);
+  assert.match(transition, /zoom: Math\.max\(map\.getZoom\(\), 10\.5\)/);
   assert.doesNotMatch(aircraftBranch, /\bzoom\s*\+/);
   assert.doesNotMatch(aircraftBranch, /pitch\s*:|bearing\s*:/);
 });

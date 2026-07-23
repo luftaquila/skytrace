@@ -19,7 +19,7 @@ import {
   X,
 } from "@lucide/vue";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
-import { mergeTrackPoints } from "./track-runs.js";
+import { currentTrackRun, mergeTrackPoints } from "./track-runs.js";
 
 const SETTINGS_KEY = "skytrace.settings.v3";
 const DEFAULT_SETTINGS = {
@@ -37,7 +37,6 @@ const DEFAULT_SETTINGS = {
   proximity: true,
   terrainExaggeration: 2,
   terrainSatellite: true,
-  historicTracks: false,
   allAircraftTracks: false,
 };
 
@@ -61,7 +60,28 @@ const coverage = ref({ areas: [], points: [] });
 const selectedHex = ref(null);
 const trackingActive = ref(false);
 const hoveredHex = ref(null);
-const selectedTrack = ref([]);
+const selectedTrackRaw = ref([]);
+const historicTrackHexes = ref(new Set());
+const selectedTrack = computed(() => {
+  const points = selectedTrackRaw.value;
+  return selectedHex.value && historicTrackHexes.value.has(selectedHex.value)
+    ? points
+    : currentTrackRun(points);
+});
+const selectedHistoric = computed({
+  get: () => Boolean(selectedHex.value && historicTrackHexes.value.has(selectedHex.value)),
+  set: (enabled) => {
+    const hex = selectedHex.value;
+    if (!hex) return;
+    const next = new Set(historicTrackHexes.value);
+    if (enabled) next.add(hex);
+    else next.delete(hex);
+    historicTrackHexes.value = next;
+    playbackSpeed.value = 0;
+    playbackIndex.value = Math.max(0, selectedTrack.value.length - 1);
+    renderTrackView();
+  },
+});
 // Pinned aircraft: their popover label AND their track stay shown regardless of hover /
 // selection. pinnedTracks caches each pinned hex's track points.
 const pinned = ref(new Set());
@@ -129,6 +149,7 @@ let tac3d;
 let tac3dPromise;
 let allTrackCursors = new Map();
 let allTrackRequestVersion = 0;
+let selectedTrackRequestVersion = 0;
 
 watch(settings, (value) => {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(value));
@@ -256,7 +277,6 @@ watch(() => settings.value.allAircraftTracks, (enabled) => {
   if (enabled) refreshAllAircraftTracks({ reset: true });
   else clearAllTrackCache();
 });
-watch(() => settings.value.historicTracks, () => refreshAllAircraftTracks({ reset: true }));
 watch(trailFilterKey, () => refreshAllAircraftTracks());
 watch(trackHours, () => refreshTrackRange());
 
@@ -276,6 +296,10 @@ function sortAircraft(rows, key) {
 
 const selectedAircraft = computed(() => {
   return aircraft.value.find((item) => item.hex === selectedHex.value) || null;
+});
+const trackingButtonText = computed(() => {
+  if (!selectedAircraft.value) return "Locate";
+  return trackingActive.value ? "Tracking" : "Track";
 });
 
 const kmlHref = computed(() => {
@@ -856,7 +880,7 @@ async function refreshAllAircraftTracks({ reset = false } = {}) {
         aircraft: chunk.map((hex) => ({ hex, afterId: previousCursors.get(hex) ?? null })),
         from: from.toISOString(),
         to: to.toISOString(),
-        historic: settings.value.historicTracks,
+        historic: false,
       }),
     })));
     if (requestVersion !== allTrackRequestVersion || !settings.value.allAircraftTracks) return;
@@ -867,7 +891,7 @@ async function refreshAllAircraftTracks({ reset = false } = {}) {
     for (const hex of hexes) {
       const track = returned.get(hex);
       const current = reset ? [] : (previousTracks.get(hex) || []);
-      nextTracks.set(hex, mergeTrackPoints(current, track?.points || [], settings.value.historicTracks));
+      nextTracks.set(hex, mergeTrackPoints(current, track?.points || []));
       const cursor = track?.cursorId ?? previousCursors.get(hex);
       if (cursor != null) nextCursors.set(hex, cursor);
     }
@@ -953,16 +977,19 @@ const liveRefresher = makeCoalescer(refreshLive);
 const coverageRefresher = makeCoalescer(refreshCoverage);
 
 async function refreshTrack(resetPlayback = true) {
-  if (!selectedHex.value) return;
+  const hex = selectedHex.value;
+  if (!hex) return;
+  const requestVersion = ++selectedTrackRequestVersion;
   const to = new Date();
   const from = new Date(to.getTime() - trackHours.value * 60 * 60 * 1000);
   const params = new URLSearchParams({ from: from.toISOString(), to: to.toISOString() });
-  const result = await fetchJson(`/api/aircraft/${selectedHex.value}/track?${params}`);
+  const result = await fetchJson(`/api/aircraft/${hex}/track?${params}`);
+  if (requestVersion !== selectedTrackRequestVersion || selectedHex.value !== hex) return;
   // Was the user watching the live edge (vs. scrubbing to a past point) before new
   // points arrived? If so, follow the new live edge so a stale playback marker does not
   // spawn behind the moving aircraft; only a deliberate scrub keeps its past position.
   const wasAtLiveEdge = playbackIndex.value >= selectedTrack.value.length - 1;
-  selectedTrack.value = result.points || [];
+  selectedTrackRaw.value = result.points || [];
   const lastIndex = Math.max(0, selectedTrack.value.length - 1);
   if (resetPlayback || (!playbackSpeed.value && wasAtLiveEdge)) {
     if (resetPlayback) playbackSpeed.value = 0;
@@ -1005,18 +1032,25 @@ async function togglePin(hex) {
 }
 
 async function selectAircraft(hex) {
+  if (!hex || selectedHex.value === hex) return;
+  // Invalidate the previous request and erase its points before changing the selected hex. This
+  // prevents one render frame from treating aircraft A's final trail point as aircraft B's anchor.
+  selectedTrackRequestVersion += 1;
+  selectedTrackRaw.value = [];
+  playbackSpeed.value = 0;
+  playbackIndex.value = 0;
   selectedHex.value = hex;
-  // Selection only opens the data block and stops any prior tracking. Locate owns all
-  // intentional camera movement.
-  tac3d?.panTo();
+  // Selection alone keeps the camera untouched. If Track is already active, dataPass transfers
+  // the existing tracked orbit smoothly to the newly selected aircraft.
   tac3d?.dataPass();
   await refreshTrack();
   await nextTick();
 }
 
 function clearSelection() {
+  selectedTrackRequestVersion += 1;
+  selectedTrackRaw.value = [];
   selectedHex.value = null;
-  selectedTrack.value = [];
   playbackSpeed.value = 0;
   playbackIndex.value = 0;
   tac3d?.dataPass();
@@ -1102,7 +1136,11 @@ async function ensureTactical3d() {
         getPlaybackGhost,
         getSettings: () => settings.value,
         getPinned: () => pinned.value,
-        getPinnedTracks: () => [...pinnedTracks.value].map(([hex, points]) => ({ hex, points })),
+        getPinnedTracks: () => [...pinnedTracks.value].map(([hex, points]) => ({
+          hex,
+          points,
+          historic: historicTrackHexes.value.has(hex),
+        })),
         getAllAircraftTracks: () => [...allTrackCache.value].map(([hex, points]) => ({ hex, points })),
         togglePin,
         datablockHtml,
@@ -1219,20 +1257,29 @@ onUnmounted(() => {
             {{ status }} · {{ filteredAircraft.length }}/{{ aircraft.length }} aircraft · {{ receivers.length }} receivers
           </div>
         </div>
-        <div class="toolbar">
-          <button class="icon-button" :class="{ active: trackingActive }" :title="selectedAircraft ? (trackingActive ? 'Stop tracking' : 'Track selected aircraft') : 'Go to my location'" @click="recenterView"><LocateFixed :size="18" /></button>
-        </div>
       </div>
-      <div class="map-legend" aria-hidden="true">
-        <div class="legend-title">Altitude ({{ altitudeLegend.unit }})</div>
-        <div class="legend-body">
-          <div class="legend-bar" :style="{ background: altitudeLegend.gradient }"></div>
-          <div class="legend-ticks">
-            <span v-for="(tick, i) in altitudeLegend.ticks" :key="i">{{ tick.label }}</span>
+      <div class="map-corner-controls">
+        <button
+          class="icon-button map-track-button"
+          :class="{ active: trackingActive }"
+          :title="selectedAircraft ? (trackingActive ? 'Stop tracking' : 'Track selected aircraft') : 'Go to my location'"
+          :aria-label="selectedAircraft ? (trackingActive ? 'Stop tracking' : 'Track selected aircraft') : 'Go to my location'"
+          @click="recenterView"
+        >
+          <LocateFixed :size="17" />
+          <span>{{ trackingButtonText }}</span>
+        </button>
+        <div class="map-legend" aria-hidden="true">
+          <div class="legend-title">Altitude ({{ altitudeLegend.unit }})</div>
+          <div class="legend-body">
+            <div class="legend-bar" :style="{ background: altitudeLegend.gradient }"></div>
+            <div class="legend-ticks">
+              <span v-for="(tick, i) in altitudeLegend.ticks" :key="i">{{ tick.label }}</span>
+            </div>
           </div>
-        </div>
-        <div class="legend-ground">
-          <span class="legend-ground-swatch" :style="{ background: altitudeLegend.groundColor }"></span>Ground
+          <div class="legend-ground">
+            <span class="legend-ground-swatch" :style="{ background: altitudeLegend.groundColor }"></span>Ground
+          </div>
         </div>
       </div>
     </section>
@@ -1290,15 +1337,21 @@ onUnmounted(() => {
           </dl>
 
           <div class="history-panel">
-            <label class="select-row">
-              <span>History</span>
-              <select v-model.number="trackHours">
-                <option :value="1">1h</option>
-                <option :value="6">6h</option>
-                <option :value="24">24h</option>
-                <option :value="168">7d</option>
-              </select>
-            </label>
+            <div class="history-options">
+              <label class="history-toggle">
+                <input v-model="selectedHistoric" type="checkbox" />
+                <span>Historic</span>
+              </label>
+              <label class="select-row">
+                <span>History</span>
+                <select v-model.number="trackHours">
+                  <option :value="1">1h</option>
+                  <option :value="6">6h</option>
+                  <option :value="24">24h</option>
+                  <option :value="168">7d</option>
+                </select>
+              </label>
+            </div>
 
             <div class="history-chart-head">
               <span>Graph</span>
@@ -1459,7 +1512,6 @@ onUnmounted(() => {
             <div class="toggle-row">
               <label><input v-model="settings.flightLevels" type="checkbox" /> Flight levels</label>
               <label><input v-model="settings.terrainSatellite" type="checkbox" /> Satellite terrain</label>
-              <label><input v-model="settings.historicTracks" type="checkbox" /> Historic</label>
               <label><input v-model="settings.allAircraftTracks" type="checkbox" /> All aircraft trails</label>
             </div>
           </section>

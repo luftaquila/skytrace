@@ -118,12 +118,6 @@ select {
   box-shadow: 0 0 0 4px rgb(251 113 133 / 0.16);
 }
 
-.toolbar {
-  display: flex;
-  gap: 8px;
-  pointer-events: auto;
-}
-
 .icon-button {
   display: inline-flex;
   align-items: center;
@@ -387,6 +381,25 @@ select {
   border-radius: 6px;
   background: var(--panel-strong);
   color: var(--text);
+}
+
+.history-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.history-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #d6e2e0;
+  cursor: pointer;
+}
+
+.history-toggle input {
+  accent-color: var(--accent);
 }
 
 .controls {
@@ -821,11 +834,28 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
-.map-legend {
+.map-corner-controls {
   position: absolute;
-  left: 18px;
+  right: 18px;
   bottom: 18px;
   z-index: 500;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 9px;
+  pointer-events: none;
+}
+
+.map-track-button {
+  width: auto;
+  min-width: 38px;
+  padding: 0 11px;
+  gap: 7px;
+  font-weight: 700;
+  pointer-events: auto;
+}
+
+.map-legend {
   padding: 10px 12px;
   border: 1px solid rgb(238 245 244 / 0.12);
   border-radius: 8px;
@@ -1128,9 +1158,12 @@ select {
     right: 12px;
   }
 
-  .map-legend {
-    left: 12px;
+  .map-corner-controls {
+    right: 12px;
     bottom: 12px;
+  }
+
+  .map-legend {
     padding: 8px 10px;
   }
 

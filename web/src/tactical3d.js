@@ -390,7 +390,7 @@ export function createTactical3d({ container, deps }) {
     }
   }
   function clearOrbit() {
-    const hadOrbit = orbitAttached || orbitZ !== 0 || ["track-start", "wheel-orbit"].includes(cameraAnimation?.kind);
+    const hadOrbit = orbitAttached || orbitZ !== 0 || ["track-start", "track-switch", "wheel-orbit"].includes(cameraAnimation?.kind);
     setFollowActive(false);
     if (!hadOrbit) return;
     cancelCameraAnimation();
@@ -688,8 +688,8 @@ export function createTactical3d({ container, deps }) {
     const trails = [];
     const trailAnchors = new Map();
     const seen = new Set();
-    const addTrail = (hex, allPoints) => {
-      const pts = deps.getSettings().historicTracks ? allPoints : currentTrackRun(allPoints);
+    const addTrail = (hex, allPoints, historic = false) => {
+      const pts = historic ? allPoints : currentTrackRun(allPoints);
       let run = null;
       let runColor = null;
       let prevT = null;
@@ -716,8 +716,10 @@ export function createTactical3d({ container, deps }) {
       if (run && run.path.length >= 2) trails.push(run);
     };
     const selTrack = deps.getSelectedTrack();
-    if (selHex && selTrack.length) { addTrail(selHex, selTrack); seen.add(selHex); }
-    for (const { hex, points } of deps.getPinnedTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(hex, points); }
+    // The selected track is already reduced to either the current run or this aircraft's
+    // explicitly enabled historic range by App.vue. Do not apply a global trail mode here.
+    if (selHex && selTrack.length) { addTrail(selHex, selTrack, true); seen.add(selHex); }
+    for (const { hex, points, historic } of deps.getPinnedTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(hex, points, historic); }
     for (const { hex, points } of deps.getAllAircraftTracks()) if (!seen.has(hex) && points?.length) { seen.add(hex); addTrail(hex, points); }
 
     const ghost = deps.getPlaybackGhost();
@@ -818,7 +820,7 @@ export function createTactical3d({ container, deps }) {
     orbitZ = target.z;
     // Selection fly-in and wheel zoom own the camera timeline. Retarget their shared endpoint as
     // the aircraft advances instead of starting a competing animation on every display frame.
-    if (["track-start", "wheel-orbit"].includes(cameraAnimation?.kind)) {
+    if (["track-start", "track-switch", "wheel-orbit"].includes(cameraAnimation?.kind)) {
       cameraAnimation.end.center = new maplibregl.LngLat(target.lon, target.lat);
       cameraAnimation.end.elevation = target.z;
       return false;
@@ -1182,6 +1184,22 @@ export function createTactical3d({ container, deps }) {
 
   // --- Public API -------------------------------------------------------------------------
   let followingSelectionHex = null;
+  function transitionTrackedSelection(target, kind = "track-switch") {
+    if (!target) return false;
+    followingSelectionHex = target.hex;
+    setFollowActive(true);
+    attachOrbit(target.z);
+    animateCamera(
+      {
+        center: [target.lon, target.lat],
+        zoom: Math.max(map.getZoom(), 10.5),
+        elevation: target.z,
+      },
+      { duration: 900, easing: EASE_OUT, kind, onComplete: followSelected },
+    );
+    requestMotionFrame();
+    return true;
+  }
   function dataPass() {
     buildLayers();
     const selectedHex = deps.getSelectedHex();
@@ -1189,11 +1207,16 @@ export function createTactical3d({ container, deps }) {
       if (!selectedHex) followingSelectionHex = null;
       return;
     }
-    // A click only selects a data block. Changing/clearing selection while tracking stops tracking
-    // in place; it never transfers camera ownership to the newly clicked aircraft.
-    if (!selectedHex || selectedHex !== followingSelectionHex) {
+    if (!selectedHex) {
       followingSelectionHex = null;
       clearOrbit();
+      return;
+    }
+    // Track is a mode, not ownership by one hex. Switching selection while it is active keeps the
+    // mode enabled and moves the same orbit smoothly to the newly selected aircraft.
+    if (selectedHex !== followingSelectionHex) {
+      const next = lastList.find((d) => d.hex === selectedHex);
+      if (next) transitionTrackedSelection(next);
       return;
     }
     followSelected();
@@ -1214,12 +1237,6 @@ export function createTactical3d({ container, deps }) {
   }
   function setHoverClass(prev, next) { hoverHex = next; scheduleActive(next); }
   function resize() { map.resize(); }
-  // Aircraft clicks only select/show their data block. If another target was being tracked, release
-  // it without changing a single camera component; Locate is the sole owner of tracking start.
-  function panTo() {
-    followingSelectionHex = null;
-    clearOrbit();
-  }
   // The aircraft itself now absorbs sparse receiver ticks through the motion tracker. Once selection
   // fly-in finishes, keep the camera on that continuously moving visual target instead of layering a
   // second 600 ms follow animation on top of the correction.
@@ -1257,13 +1274,7 @@ export function createTactical3d({ container, deps }) {
       return false;
     }
     const z = (altFt ?? 0) * FT_TO_M * ALT_EXAGG;
-    followingSelectionHex = selectedHex;
-    setFollowActive(true); attachOrbit(z);
-    animateCamera(
-      { center: [lon, lat], zoom: Math.max(map.getZoom(), 10.5), elevation: z },
-      { duration: 900, easing: EASE_OUT, kind: "track-start", onComplete: followSelected },
-    );
-    return true;
+    return transitionTrackedSelection({ hex: selectedHex, lon, lat, z }, "track-start");
   }
   function fitAircraft(points) {
     if (!points.length) return;
@@ -1310,5 +1321,5 @@ export function createTactical3d({ container, deps }) {
     refreshSources();
     dataPass();
   });
-  return { resize, dataPass, drawCoverage, applySettings, setHoverClass, panTo, locateBrowser, toggleTracking, fitAircraft, destroy };
+  return { resize, dataPass, drawCoverage, applySettings, setHoverClass, locateBrowser, toggleTracking, fitAircraft, destroy };
 }
