@@ -169,6 +169,7 @@ test("coverage API returns a compact indexed occupancy mesh", async () => {
     assert.ok(mesh.origin[0] > 126 && mesh.origin[0] < 128);
     assert.ok(mesh.origin[1] > 37 && mesh.origin[1] < 38);
     assert.ok(Math.max(...mesh.positionBounds.map(Math.abs)) < 100000);
+    assert.equal(mesh.horizontalInterpolationCells, 2);
     assert.equal(coverage.areas[0].receiverLat, undefined);
     assert.equal(coverage.areas[0].receiverLon, undefined);
   });

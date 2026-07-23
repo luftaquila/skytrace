@@ -48,6 +48,7 @@ export function createApp({ db, config, sseHub }) {
       coverageVerticalStepFt: config.coverageVerticalStepFt,
       coverageHorizontalSupportNm: config.coverageHorizontalSupportNm,
       coverageVerticalSupportFt: config.coverageVerticalSupportFt,
+      coverageHorizontalInterpolationCells: config.coverageHorizontalInterpolationCells,
       coverageMaxCells: config.coverageMaxCells,
       coverageMaxTriangles: config.coverageMaxTriangles,
     }),

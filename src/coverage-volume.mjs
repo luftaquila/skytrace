@@ -163,6 +163,57 @@ function gridShape(bounds, horizontalStepNm, verticalStepFt) {
   return { nx, ny, nz, gridNodes: nx * ny * nz };
 }
 
+// Grayscale closing fills narrow valleys between nearby observed corridors without
+// expanding the outside boundary like a larger reception kernel would. Apply it only in
+// horizontal slices: nearby routes at a similar altitude may support interpolation, while
+// large lateral gaps and unobserved altitude bands remain empty.
+function interpolateNarrowHorizontalGaps(field) {
+  const radius = field.horizontalInterpolationCells;
+  if (radius < 1) return;
+
+  const planeSize = field.nx * field.ny;
+  const dilated = new Float32Array(planeSize);
+  const closed = new Float32Array(planeSize);
+  for (let z = 0; z < field.nz; z += 1) {
+    const zOffset = z * planeSize;
+    for (let y = 0; y < field.ny; y += 1) {
+      for (let x = 0; x < field.nx; x += 1) {
+        let maximum = 0;
+        for (let dy = -radius; dy <= radius; dy += 1) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= field.ny) continue;
+          for (let dx = -radius; dx <= radius; dx += 1) {
+            const nx = x + dx;
+            if (nx < 0 || nx >= field.nx) continue;
+            maximum = Math.max(maximum, field.values[zOffset + nx + field.nx * ny]);
+          }
+        }
+        dilated[x + field.nx * y] = maximum;
+      }
+    }
+
+    for (let y = 0; y < field.ny; y += 1) {
+      for (let x = 0; x < field.nx; x += 1) {
+        let minimum = Infinity;
+        for (let dy = -radius; dy <= radius; dy += 1) {
+          const ny = y + dy;
+          for (let dx = -radius; dx <= radius; dx += 1) {
+            const nx = x + dx;
+            const value = nx < 0 || nx >= field.nx || ny < 0 || ny >= field.ny
+              ? 0
+              : dilated[nx + field.nx * ny];
+            minimum = Math.min(minimum, value);
+          }
+        }
+        const index = x + field.nx * y;
+        closed[index] = Math.max(field.values[zOffset + index], minimum);
+      }
+    }
+
+    field.values.set(closed, zOffset);
+  }
+}
+
 export function sampleObservedCoverageField(field, eastNm, northNm, altitudeFt) {
   const gx = (eastNm - field.minEastNm) / field.horizontalStepNm;
   const gy = (northNm - field.minNorthNm) / field.horizontalStepNm;
@@ -194,6 +245,12 @@ export function buildObservedCoverageField(rows, origin, rawOptions = {}) {
   const supportVerticalRatio = Math.max(1.25, (Number(rawOptions.verticalSupportFt) || 2500) / verticalStepFt);
   const maxCells = Math.max(25000, Number(rawOptions.maxCells) || 1200000);
   const requestedIsoLevel = clamp(Number(rawOptions.isoLevel) || 0.16, 0.02, 0.8);
+  const rawInterpolationCells = Number(rawOptions.horizontalInterpolationCells);
+  const horizontalInterpolationCells = clamp(
+    Number.isFinite(rawInterpolationCells) ? Math.floor(rawInterpolationCells) : 2,
+    0,
+    3,
+  );
   const cosLat = Math.cos(Number(origin.lat) * Math.PI / 180) || 1e-6;
   const points = rows.map((row) => localPoint(row, origin, cosLat)).filter(Boolean);
   if (points.length < 4) return null;
@@ -207,6 +264,7 @@ export function buildObservedCoverageField(rows, origin, rawOptions = {}) {
       verticalStepFt,
       horizontalSupportNm: supportHorizontalRatio * horizontalStepNm,
       verticalSupportFt: supportVerticalRatio * verticalStepFt,
+      horizontalInterpolationCells,
       maxSegmentSeconds: Math.max(15, Number(rawOptions.maxSegmentSeconds) || 90),
       maxSegmentNm: Math.max(2, Number(rawOptions.maxSegmentNm) || 15),
       maxSegmentAltitudeFt: Math.max(1000, Number(rawOptions.maxSegmentAltitudeFt) || 6000),
@@ -257,6 +315,8 @@ export function buildObservedCoverageField(rows, origin, rawOptions = {}) {
       }
     }
   }
+
+  interpolateNarrowHorizontalGaps(field);
 
   let minObservedField = Infinity;
   for (const point of points) {
@@ -403,6 +463,7 @@ export function buildObservedCoverageMesh(rows, origin, options = {}) {
     verticalStepFt: Number(field.verticalStepFt.toFixed(1)),
     supportHorizontalNm: Number(field.horizontalSupportNm.toFixed(3)),
     supportVerticalFt: Number(field.verticalSupportFt.toFixed(1)),
+    horizontalInterpolationCells: field.horizontalInterpolationCells,
     isoLevel: Number(field.isoLevel.toFixed(6)),
     stats: {
       grid: [field.nx, field.ny, field.nz],

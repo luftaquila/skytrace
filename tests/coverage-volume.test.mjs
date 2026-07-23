@@ -79,6 +79,47 @@ test("short consecutive track segments fill their traversed cells without global
   assert.equal(sampleObservedCoverageField(separated, 0, 0, 10000), 0);
 });
 
+test("horizontal interpolation fills a narrow corridor gap without bridging a wide void", () => {
+  const nearbyCorridors = [
+    observation(-2, 0, 10000),
+    observation(-2, 0.1, 10000),
+    observation(2, 0, 10000),
+    observation(2, -0.1, 10000),
+  ];
+  const rawField = buildObservedCoverageField(nearbyCorridors, ORIGIN, {
+    horizontalStepNm: 1,
+    verticalStepFt: 500,
+    horizontalSupportNm: 1.5,
+    verticalSupportFt: 1000,
+    horizontalInterpolationCells: 0,
+  });
+  assert.ok(sampleObservedCoverageField(rawField, 0, 0, 10000) < rawField.isoLevel);
+
+  const interpolatedField = buildObservedCoverageField(nearbyCorridors, ORIGIN, {
+    horizontalStepNm: 1,
+    verticalStepFt: 500,
+    horizontalSupportNm: 1.5,
+    verticalSupportFt: 1000,
+    horizontalInterpolationCells: 1,
+  });
+  assert.ok(sampleObservedCoverageField(interpolatedField, 0, 0, 10000) >= interpolatedField.isoLevel);
+
+  const distantCorridors = [
+    observation(-8, 0, 10000),
+    observation(-8, 0.1, 10000),
+    observation(8, 0, 10000),
+    observation(8, -0.1, 10000),
+  ];
+  const separatedField = buildObservedCoverageField(distantCorridors, ORIGIN, {
+    horizontalStepNm: 1,
+    verticalStepFt: 500,
+    horizontalSupportNm: 1.5,
+    verticalSupportFt: 1000,
+    horizontalInterpolationCells: 1,
+  });
+  assert.equal(sampleObservedCoverageField(separatedField, 0, 0, 10000), 0);
+});
+
 test("surface-net mesh is watertight, indexed, and compact", () => {
   const rows = [];
   for (const altitudeFt of [6000, 9000, 12000, 15000]) {

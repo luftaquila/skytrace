@@ -82,6 +82,7 @@ export function loadConfig(env = process.env) {
     coverageVerticalStepFt: numberFromEnv(env, "SKYTRACE_COVERAGE_VERTICAL_STEP_FT", 1000),
     coverageHorizontalSupportNm: numberFromEnv(env, "SKYTRACE_COVERAGE_HORIZONTAL_SUPPORT_NM", 4.5),
     coverageVerticalSupportFt: numberFromEnv(env, "SKYTRACE_COVERAGE_VERTICAL_SUPPORT_FT", 2500),
+    coverageHorizontalInterpolationCells: intFromEnv(env, "SKYTRACE_COVERAGE_HORIZONTAL_INTERPOLATION_CELLS", 2),
     coverageMaxCells: intFromEnv(env, "SKYTRACE_COVERAGE_MAX_CELLS", 1200000),
     coverageMaxTriangles: intFromEnv(env, "SKYTRACE_COVERAGE_MAX_TRIANGLES", 200000),
   };
