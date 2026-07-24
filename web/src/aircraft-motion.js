@@ -84,18 +84,6 @@ export function extrapolateMotion(observation, elapsedMs, maxElapsedMs = DEFAULT
   };
 }
 
-export function blendMotion(from, to, amount) {
-  const t = smoothstep(amount);
-  return {
-    lon: from.lon + shortestAngleDelta(from.lon, to.lon) * t,
-    lat: from.lat + (to.lat - from.lat) * t,
-    z: from.z + (to.z - from.z) * t,
-    track: normalizeAngle(from.track + shortestAngleDelta(from.track, to.track) * t),
-    pitch: from.pitch + (to.pitch - from.pitch) * t,
-    roll: from.roll + shortestAngleDelta(from.roll, to.roll) * t,
-  };
-}
-
 function motionChanged(from, to) {
   return Math.abs(shortestAngleDelta(from.lon, to.lon)) > 1e-10
     || Math.abs(from.lat - to.lat) > 1e-10

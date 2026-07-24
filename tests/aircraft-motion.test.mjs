@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  blendMotion,
   createAircraftMotionTracker,
   extrapolateMotion,
   normalizeMotionObservation,
@@ -56,16 +55,6 @@ test("derives a coordinated turn rate from roll and speed when track rate is abs
 test("caps dead reckoning when the next observation is late", () => {
   const state = normalizeMotionObservation(base);
   assert.deepEqual(extrapolateMotion(state, 8000), extrapolateMotion(state, 30000));
-});
-
-test("blends headings and longitude across the wrap boundary", () => {
-  const from = { lon: 179.9, lat: 0, z: 0, track: 359, pitch: 0, roll: -5 };
-  const to = { lon: -179.9, lat: 2, z: 100, track: 1, pitch: 10, roll: 5 };
-  const halfway = blendMotion(from, to, 0.5);
-  assert.ok(Math.abs(Math.abs(halfway.lon) - 180) < 1e-9);
-  assert.equal(halfway.track, 0);
-  assert.equal(halfway.lat, 1);
-  assert.equal(halfway.z, 50);
 });
 
 test("a new sample starts at the current visual position and converges without a jump", () => {
