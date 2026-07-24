@@ -1416,20 +1416,3 @@ select {
 @keyframes t3d-pulse {
   50% { opacity: 0.35; }
 }
-
-.t3d-hint {
-  position: absolute;
-  left: 50%;
-  bottom: 22px;
-  z-index: 5;
-  transform: translateX(-50%);
-  padding: 7px 12px;
-  border: 1px solid rgb(238 245 244 / 0.14);
-  border-radius: 7px;
-  background: rgb(13 16 17 / 0.8);
-  color: var(--muted);
-  font-size: 12px;
-  pointer-events: none;
-  backdrop-filter: blur(8px);
-  white-space: nowrap;
-}

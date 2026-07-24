@@ -587,11 +587,7 @@ export function createTactical3d({ container, deps }) {
   const loadingEl = document.createElement("div");
   loadingEl.className = "t3d-loading";
   loadingEl.textContent = "LOADING TERRAIN…";
-  const hintEl = document.createElement("div");
-  hintEl.className = "t3d-hint";
-  hintEl.textContent = "Drag rotate & tilt · Right-drag pan · Scroll zoom";
-  container.append(overlayEl, afPinEl, afHoverEl, lockEl, loadingEl, hintEl);
-  setTimeout(() => { hintEl.style.display = "none"; }, 8000);
+  container.append(overlayEl, afPinEl, afHoverEl, lockEl, loadingEl);
 
   let hoverHex = null;
   let hoverAf = null;
@@ -1490,7 +1486,7 @@ export function createTactical3d({ container, deps }) {
     window.removeEventListener("mouseup", onUp);
     try { map.removeControl(overlay); } catch { /* gone */ }
     map.remove();
-    for (const el of [overlayEl, afPinEl, afHoverEl, lockEl, loadingEl, hintEl]) el.remove();
+    for (const el of [overlayEl, afPinEl, afHoverEl, lockEl, loadingEl]) el.remove();
   }
 
   const hideLoading = () => { loadingEl.style.display = "none"; };
