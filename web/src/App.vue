@@ -455,6 +455,14 @@ function aircraftAlert(item) {
   return null;
 }
 
+// Sidebar row accent: danger alerts (emergency/special squawks) stay red; warning alerts
+// (IDENT/ALERT) use the amber warning colour, matching the detail-panel alert styling.
+function aircraftAlertClass(item) {
+  const alert = aircraftAlert(item);
+  if (!alert) return null;
+  return alert.level === "warning" ? "is-alert is-alert-warning" : "is-alert";
+}
+
 function pointAltitude(point) {
   if (point.onGround) return "GND";
   return altText(point.altBaro ?? point.altGeom);
@@ -1503,7 +1511,7 @@ onUnmounted(() => {
           <button
             v-for="item in filteredAircraft"
             :key="item.hex"
-            :class="['aircraft-row', { active: selectedHex === item.hex, hovered: hoveredHex === item.hex, 'is-alert': !!aircraftAlert(item), coasting: isCoasting(item) }]"
+            :class="['aircraft-row', aircraftAlertClass(item), { active: selectedHex === item.hex, hovered: hoveredHex === item.hex, coasting: isCoasting(item) }]"
             @click="selectAircraft(item.hex)"
             @mouseenter="setHover(item.hex)"
             @mouseleave="clearHover(item.hex)"

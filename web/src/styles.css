@@ -497,6 +497,11 @@ select {
   box-shadow: inset 3px 0 0 var(--danger);
 }
 
+/* Warning-level alerts (IDENT/ALERT) use the amber accent, not the emergency red. */
+.aircraft-row.is-alert-warning {
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+
 /* Coasting (stale) list rows visually match their ghosted map target. */
 .aircraft-row.coasting {
   opacity: 0.56;
