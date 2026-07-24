@@ -131,7 +131,6 @@ test("ingests receiver aircraft and exposes current state and track", async () =
     assert.equal(coverage.areas[0].receiverLat, undefined);
     assert.equal(coverage.areas[0].receiverLon, undefined);
     assert.equal(coverage.points.length, 0);
-    assert.equal(coverage.areas[0].volume, null);
     assert.equal(coverage.areas[0].volumeMesh, null);
     assert.equal(coverage.refreshIntervalSeconds, 180);
     assert.equal(coverage.windowDays, 30);

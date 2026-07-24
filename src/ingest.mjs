@@ -72,15 +72,6 @@ const COVERAGE_SMOOTH_WINDOW = 0;
 const COVERAGE_MIN_POINTS = 8;
 const COVERAGE_GAP_FILL = 2;
 const COVERAGE_PINCH_FLOOR = 0.1;
-// Altitude bands (feet) for the per-altitude coverage outlines. Higher aircraft are in
-// line of sight from farther away, so each band typically reaches farther than the one
-// below it; drawing them separately shows that structure instead of one flat blob.
-const COVERAGE_ALTITUDE_BANDS = [
-  { label: "< 10k ft", min: 0, max: 10000 },
-  { label: "10–20k ft", min: 10000, max: 20000 },
-  { label: "20–30k ft", min: 20000, max: 30000 },
-  { label: "≥ 30k ft", min: 30000, max: Infinity },
-];
 
 // Polar-plot origin: the receiver when its location is known, otherwise the centroid of
 // receptions (the public feed hides receiver coordinates). A shared origin keeps the
@@ -182,57 +173,6 @@ function coverageRingForReceiver(rows, receiverLat, receiverLon) {
   if (positioned.length < 3) return closeRing(convexHull(positioned.map(pointCoord)));
   const origin = coverageOrigin(positioned, receiverLat, receiverLon);
   return coverageRing(positioned, origin) || closeRing(convexHull(positioned.map(pointCoord)));
-}
-
-// Per-altitude-band outlines sharing one origin, so they draw concentrically.
-function coverageBandsForReceiver(rows, receiverLat, receiverLon) {
-  const positioned = rows.filter((row) => finiteLatLon(row.lat, row.lon));
-  if (positioned.length < COVERAGE_MIN_POINTS) return [];
-  const origin = coverageOrigin(positioned, receiverLat, receiverLon);
-  return COVERAGE_ALTITUDE_BANDS.map((band) => {
-    const inBand = positioned.filter((row) => {
-      const alt = row.alt_baro ?? row.alt_geom;
-      return alt != null && alt >= band.min && alt < band.max;
-    });
-    const ring = coverageRing(inBand, origin);
-    if (!ring) return null;
-    return {
-      label: band.label,
-      minAltitude: band.min,
-      maxAltitude: Number.isFinite(band.max) ? band.max : null,
-      count: inBand.length,
-      polygon: { type: "Polygon", coordinates: [ring] },
-    };
-  }).filter(Boolean);
-}
-
-// Fine-grained per-altitude outlines for the 3D reception volume. Same robust polar
-// max-range ring as the 2D bands, sliced every COVERAGE_VOLUME_STEP feet and computed on
-// the server (once per coverage refresh) so the browser just renders the stacked rings
-// instead of binning tens of thousands of raw points every frame.
-const COVERAGE_VOLUME_STEP = 3000;
-function coverageVolumeForReceiver(rows, receiverLat, receiverLon) {
-  const positioned = rows.filter((row) => finiteLatLon(row.lat, row.lon));
-  if (positioned.length < COVERAGE_MIN_POINTS) return null;
-  const origin = coverageOrigin(positioned, receiverLat, receiverLon);
-  let maxAlt = 0;
-  for (const row of positioned) {
-    const alt = row.alt_baro ?? row.alt_geom;
-    if (alt != null && alt > maxAlt) maxAlt = alt;
-  }
-  const nLayer = Math.max(1, Math.min(20, Math.ceil(maxAlt / COVERAGE_VOLUME_STEP)));
-  const layers = [];
-  for (let l = 0; l < nLayer; l += 1) {
-    const min = l * COVERAGE_VOLUME_STEP;
-    const max = (l + 1) * COVERAGE_VOLUME_STEP;
-    const inBand = positioned.filter((row) => {
-      const alt = row.alt_baro ?? row.alt_geom;
-      return alt != null && alt >= min && alt < max;
-    });
-    const ring = coverageRing(inBand, origin);
-    if (ring) layers.push({ minAltitude: min, midAltitude: (min + max) / 2, count: inBand.length, ring });
-  }
-  return layers.length >= 2 ? { stepFt: COVERAGE_VOLUME_STEP, layers } : null;
 }
 
 function cross(o, a, b) {
@@ -706,9 +646,6 @@ export function getPublicReceivers(db, options = {}) {
       SELECT
         r.id,
         r.public_name,
-        r.lat,
-        r.lon,
-        r.show_position,
         r.last_seen_at,
         r.total_ingests,
         COUNT(c.hex) AS current_aircraft
@@ -824,11 +761,8 @@ export function buildCoverageSnapshotFromRows(rows, options = {}) {
         maxAltitude: group.maxAltitude,
         lastSeenAt: group.lastSeenAt,
         polygon: ring ? { type: "Polygon", coordinates: [ring] } : null,
-        bands: coverageBandsForReceiver(group.rows, group.receiverLat, group.receiverLon),
-        // Ring skins cannot represent internal observed/unobserved space. Keep the 2D summary
-        // polygons for API compatibility, but make the actual 3D representation an occupancy
+        // The 2D polygon above is a coarse summary; the real 3D representation is an occupancy
         // surface generated from observations and short continuous track segments.
-        volume: null,
         volumeMesh: buildObservedCoverageMesh(group.rows, meshOrigin, {
           horizontalStepNm: options.coverageHorizontalStepNm,
           verticalStepFt: options.coverageVerticalStepFt,

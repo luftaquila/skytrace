@@ -568,7 +568,3 @@ export function refreshCoverageSnapshot(db, rawOptions = {}) {
   const aggregation = syncCoverageCells(db, options);
   return buildCoverageFromCells(db, options, aggregation, rawOptions.receiverCache || null);
 }
-
-export function coverageCellSchemaKey(rawOptions = {}) {
-  return normalizeOptions(rawOptions).schemaKey;
-}

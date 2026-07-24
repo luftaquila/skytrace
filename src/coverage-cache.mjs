@@ -78,9 +78,6 @@ export function createCoverageCache({
       clearInterval(timer);
       if (typeof closeBuild === "function") await closeBuild();
     },
-    ageMs() {
-      return snapshot ? Math.max(0, now() - generatedAtMs) : null;
-    },
     state() {
       return {
         ready: Boolean(snapshot),

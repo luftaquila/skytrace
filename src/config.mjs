@@ -66,7 +66,6 @@ export function loadConfig(env = process.env) {
   return {
     port: intFromEnv(env, "PORT", 3000),
     dbPath: env.SKYTRACE_DB_PATH || path.resolve("data", "skytrace.db"),
-    publicOrigin: env.PUBLIC_ORIGIN || env.SKYTRACE_PUBLIC_ORIGIN || "http://localhost:3000",
     staticDir: env.SKYTRACE_STATIC_DIR || path.resolve("web", "dist"),
     trustProxy: boolFromEnv(env, "SKYTRACE_TRUST_PROXY", true),
     ingestTokens,
