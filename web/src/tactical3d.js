@@ -11,7 +11,6 @@ import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 import { createAircraftLayer } from "./aircraft-layer.js";
 import { createAircraftMotionTracker } from "./aircraft-motion.js";
-import { freeViewElevationForZoom } from "./camera-grounding.js";
 import { installGlobeCenterElevation } from "./globe-center-elevation.js";
 import { currentTrackRun } from "./track-runs.js";
 
@@ -181,7 +180,7 @@ export function createTactical3d({ container, deps }) {
   let terrainExagg = settingExaggeration(initialSettings, "terrainExaggeration", 5, 2);
   let altitudeExagg = settingExaggeration(initialSettings, "altitudeExaggeration", 10, 5);
   let pitchExagg = settingExaggeration(initialSettings, "aircraftPitchExaggeration", 5, 3);
-  let rollExagg = settingExaggeration(initialSettings, "aircraftRollExaggeration", 5, 1);
+  let rollExagg = settingExaggeration(initialSettings, "aircraftRollExaggeration", 5, 2);
   let disposed = false;
   let ready = false;
   ensureEsriProtocol();
@@ -272,7 +271,6 @@ export function createTactical3d({ container, deps }) {
   let airfieldOrbit = null; // { lon, lat } fixed ground pivot created by an airfield double-click
   // A free pan (right-drag) detaches so rotate/zoom then pivot on the current view, not teleport back.
   let cameraAnimation = null;
-  let freeGrounding = null; // released elevated pivot, lowered only while the user zooms in
   let trackedAircraftClick = null;
 
   function isRepeatedTrackedPointer(clientX, clientY, now = performance.now()) {
@@ -298,17 +296,27 @@ export function createTactical3d({ container, deps }) {
   }
   function interpolateAngle(from, to, t) { return from + wrapDelta(to - from) * t; }
 
-  // Direct transform updates avoid Camera._getTransformForUpdate(), whose terrain path overwrites
-  // center elevation before every jump/ease. One rAF owns all five camera dimensions, so center,
-  // zoom and altitude cannot land on different frames and produce the old ground→aircraft snap.
-  function applyCameraFrame({ center, zoom, bearing, pitch, elevation }) {
-    const tr = map.transform;
-    const previousZoom = tr.zoom;
+  function setCameraTransform(tr, { center, zoom, bearing, pitch, elevation }) {
+    if (!tr) return;
+    installGlobeCenterElevation(tr);
     if (center) tr.setCenter(center instanceof maplibregl.LngLat ? center : new maplibregl.LngLat(center[0], center[1]));
     if (zoom != null) tr.setZoom(Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), zoom)));
     if (bearing != null) tr.setBearing(bearing);
     if (pitch != null) tr.setPitch(Math.max(map.getMinPitch(), Math.min(map.getMaxPitch(), pitch)));
     if (elevation != null) tr.setElevation(elevation);
+  }
+
+  // Direct transform updates avoid Camera._getTransformForUpdate(), whose terrain path starts from
+  // a clone. Keep MapLibre's requested state synchronized as well as the rendered transform so the
+  // next native operation cannot resurrect an older surface-centred camera.
+  function applyCameraFrame({ center, zoom, bearing, pitch, elevation }) {
+    const tr = map.transform;
+    const previousZoom = tr.zoom;
+    const frame = { center, zoom, bearing, pitch, elevation };
+    setCameraTransform(tr, frame);
+    if (map._requestedCameraState && map._requestedCameraState !== tr) {
+      setCameraTransform(map._requestedCameraState, frame);
+    }
     // triggerRepaint() alone does not mark MapLibre's sources dirty. Direct transform animation
     // would then keep painting the old tile set while following/rotating into a new area. Mirror the
     // update normally requested by MapLibre's move/zoom events so every camera frame also selects
@@ -391,12 +399,6 @@ export function createTactical3d({ container, deps }) {
     orbitZ = target.z || 0;
     applyCameraFrame({ center: [target.lon, target.lat], elevation: target.z || 0 });
   }
-  function beginFreeGrounding() {
-    const elevation = Math.max(0, map.transform.elevation || 0);
-    if (!freeGrounding && elevation >= 0.5) {
-      freeGrounding = { anchorElevation: elevation, anchorZoom: map.getZoom() };
-    }
-  }
   function clearOrbit() {
     const hadOrbit = orbitAttached || orbitZ !== 0 || airfieldOrbit || ["track-start", "track-switch", "wheel-orbit", "airfield-orbit"].includes(cameraAnimation?.kind);
     const wasTracking = followActive || Boolean(airfieldOrbit);
@@ -406,21 +408,19 @@ export function createTactical3d({ container, deps }) {
     if (!hadOrbit) return;
     cancelCameraAnimation();
     map.stop();
-    beginFreeGrounding();
     orbitAttached = false;
     orbitZ = 0;
     // Deliberately preserve center, zoom, bearing, pitch AND elevation. The elevated target pivot
     // simply becomes the free-view pivot. Any attempt to convert it to a ground pivot changes the
     // globe camera matrix and visibly teleports the view to the aircraft's ground projection.
   }
-  function attachOrbit(z) { freeGrounding = null; airfieldOrbit = null; orbitAttached = true; orbitZ = z; } // orbit → aircraft-centred zoom
+  function attachOrbit(z) { airfieldOrbit = null; orbitAttached = true; orbitZ = z; } // orbit → aircraft-centred zoom
   function startAirfieldOrbit(field) {
     if (!field) return;
     followingSelectionHex = null;
     // An airport orbit is a tracking state for the UI, but it is deliberately not an aircraft
     // follow: selecting an airport alone must not move the camera.
     followActive = false;
-    freeGrounding = null;
     orbitAttached = true;
     orbitZ = 0;
     airfieldOrbit = { lon: field.lon, lat: field.lat };
@@ -462,7 +462,7 @@ export function createTactical3d({ container, deps }) {
       });
       if (target) orbitZ = target.z || 0;
     } else {
-      map.panBy([-(e.clientX - drag.x), -(e.clientY - drag.y)], { duration: 0, freezeElevation: true });
+      panCurrentCamera(e.clientX - drag.x, e.clientY - drag.y);
       drag.x = e.clientX; drag.y = e.clientY; // pan is incremental
     }
   };
@@ -474,31 +474,33 @@ export function createTactical3d({ container, deps }) {
   cv.addEventListener("mousedown", onDown);
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
-  // Ask MapLibre's projection-specific camera helper for the same cursor-anchored target its native
-  // wheel handler would produce. In globe mode this includes its horizon/pole heuristics, avoiding
-  // the distant-center jumps caused by calling setLocationAtPoint directly at a steep pitch.
-  function freeWheelCameraTarget(e, zoom, elevation) {
-    const rect = cv.getBoundingClientRect();
-    let around = new maplibregl.Point(e.clientX - rect.left, e.clientY - rect.top);
+  // Pan a detached aircraft view on a clone of the CURRENT elevated transform. Globe controls use
+  // angular pixel deltas directly; Mercator places the current elevated centre at the dragged pixel.
+  // Neither path intersects a ray with the ground or substitutes a zero-elevation pivot.
+  function panCurrentCamera(dx, dy) {
+    if (!dx && !dy) return;
     const tr = map.transform.clone();
-    if (map.cameraHelper.useGlobeControls && !tr.isPointOnMapSurface(around)) around = tr.centerPoint;
-    const preZoomAroundLoc = tr.screenPointToLocation(around);
-    const deltas = {
-      panDelta: undefined,
-      zoomDelta: zoom - tr.zoom,
-      bearingDelta: undefined,
-      pitchDelta: undefined,
-      rollDelta: undefined,
-      around,
-    };
-    map.cameraHelper.handleMapControlsRollPitchBearingZoom(deltas, tr);
-    map.cameraHelper.handleMapControlsPan(deltas, tr, preZoomAroundLoc);
+    installGlobeCenterElevation(tr);
+    const elevation = map.transform.elevation || 0;
+    const panDelta = new maplibregl.Point(dx, dy);
+    if (map.cameraHelper.useGlobeControls) {
+      map.cameraHelper.handleMapControlsPan({
+        panDelta,
+        zoomDelta: undefined,
+        bearingDelta: undefined,
+        pitchDelta: undefined,
+        rollDelta: undefined,
+        around: tr.centerPoint,
+      }, tr, tr.center);
+    } else {
+      tr.setLocationAtPoint(tr.center, tr.centerPoint.add(panDelta));
+    }
     tr.setElevation(elevation);
-    return { center: tr.center, zoom: tr.zoom, elevation };
+    applyCameraFrame({ center: tr.center, zoom: tr.zoom, elevation });
   }
 
-  // Zoom around the aircraft while attached, otherwise towards the mouse cursor. Repeated wheel
-  // events retarget one short camera tween, so zoom stays responsive without snapping.
+  // Zoom around the aircraft while attached. Once detached, the last elevated aircraft centre stays
+  // the zoom pivot; no wheel action gradually lowers it or swaps in the point beneath it on terrain.
   const onWheel = (e) => {
     e.preventDefault();
     const step = (e.deltaMode === 1 ? e.deltaY * 0.04 : e.deltaY * 0.0018);
@@ -510,25 +512,11 @@ export function createTactical3d({ container, deps }) {
       orbitZ = target.z || 0;
       animateCamera({ center: [target.lon, target.lat], zoom: z, elevation: target.z || 0 }, { duration: 150, easing: EASE_OUT, kind: "wheel-orbit" });
     } else {
-      beginFreeGrounding();
-      const grounding = freeGrounding;
-      const elevation = grounding
-        ? freeViewElevationForZoom({
-          ...grounding,
-          currentElevation: map.transform.elevation || 0,
-          targetZoom: z,
-          maxZoom: map.getMaxZoom(),
-        })
-        : (map.transform.elevation || 0);
-      animateCamera(
-        freeWheelCameraTarget(e, z, elevation),
-        {
-          duration: 150,
-          easing: EASE_OUT,
-          kind: "wheel-free",
-          onComplete: () => { if (elevation === 0 && freeGrounding === grounding) freeGrounding = null; },
-        },
-      );
+      animateCamera({
+        center: map.getCenter(),
+        zoom: z,
+        elevation: map.transform.elevation || 0,
+      }, { duration: 150, easing: EASE_OUT, kind: "wheel-free" });
     }
   };
   cv.addEventListener("wheel", onWheel, { passive: false });
@@ -649,9 +637,9 @@ export function createTactical3d({ container, deps }) {
       const bank = Math.max(-75, Math.min(75, reportedBank * rollExagg));
       const track = Number.isFinite(item.track) ? item.track : 0;
       const cls = deps.planeSizeScale(item.category); // 0.85 light · 1 · 1.18 heavy
-      // deck maps the nose (+X) to world-Z = -sin(pitch) and the right wing (+Y) to
-      // world-Z = cos(pitch)*sin(roll). ADS-B roll>0 = right wing DOWN and climb phi>0 = nose UP,
-      // both the opposite sign of what deck needs — so negate both pitch and roll.
+      // The model is right-handed: +X nose, +Y left wing, +Z up. Positive Rx raises the left wing
+      // and lowers the physical right wing (-Y), matching positive ADS-B bank. Pitch still needs
+      // negation because positive Ry sends the nose towards -Z.
       const z = altM * altitudeExagg;
       const motion = {
         lon: item.lon,
@@ -677,7 +665,7 @@ export function createTactical3d({ container, deps }) {
         airborne,
         rgb,
         cls,
-        orientation: [-phi, 90 - track, -bank],
+        orientation: [-phi, 90 - track, bank],
         motion,
         coasting,
         coastOpacity: coasting ? deps.coastOpacity?.(item) ?? 0.42 : 1,
@@ -693,7 +681,7 @@ export function createTactical3d({ container, deps }) {
     target.lon = state.lon;
     target.lat = state.lat;
     target.z = state.z;
-    target.orientation = [-state.pitch, 90 - state.track, -state.roll];
+    target.orientation = [-state.pitch, 90 - state.track, state.roll];
   }
 
   // --- deck layers ------------------------------------------------------------------------
@@ -1420,7 +1408,7 @@ export function createTactical3d({ container, deps }) {
     const nextTerrainExagg = settingExaggeration(settings, "terrainExaggeration", 5, 2);
     const nextAltitudeExagg = settingExaggeration(settings, "altitudeExaggeration", 10, 5);
     const nextPitchExagg = settingExaggeration(settings, "aircraftPitchExaggeration", 5, 3);
-    const nextRollExagg = settingExaggeration(settings, "aircraftRollExaggeration", 5, 1);
+    const nextRollExagg = settingExaggeration(settings, "aircraftRollExaggeration", 5, 2);
     const altitudeScaleChanged = nextAltitudeExagg !== altitudeExagg;
     terrainExagg = nextTerrainExagg;
     altitudeExagg = nextAltitudeExagg;
@@ -1462,7 +1450,6 @@ export function createTactical3d({ container, deps }) {
   function locateBrowser(lon, lat) {
     followingSelectionHex = null;
     clearOrbit();
-    freeGrounding = null;
     orbitAttached = false;
     orbitZ = 0;
     animateCamera(
@@ -1493,13 +1480,6 @@ export function createTactical3d({ container, deps }) {
     return true;
   }
   function clearAirfieldSelection() { clearPinned({ releaseOrbit: true }); }
-  function fitAircraft(points) {
-    if (!points.length) return;
-    clearOrbit();
-    const b = new maplibregl.LngLatBounds();
-    for (const p of points) b.extend([p.lon, p.lat]);
-    map.fitBounds(b, { padding: 80, maxZoom: 9, pitch: 55, duration: 900, freezeElevation: true });
-  }
   function destroy() {
     disposed = true;
     cancelCameraAnimation();
@@ -1538,5 +1518,5 @@ export function createTactical3d({ container, deps }) {
     refreshSources();
     dataPass();
   });
-  return { resize, dataPass, drawCoverage, applySettings, setHoverClass, locateBrowser, toggleTracking, toggleAirfieldTracking, clearAirfieldSelection, fitAircraft, destroy };
+  return { resize, dataPass, drawCoverage, applySettings, setHoverClass, locateBrowser, toggleTracking, toggleAirfieldTracking, clearAirfieldSelection, destroy };
 }

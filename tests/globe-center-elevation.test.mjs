@@ -139,3 +139,39 @@ test("installer wraps MapLibre's vertical transform exactly once", () => {
   assert.equal(calculations, 2); // one rebuild at install, one explicit call
   close(vertical._globeViewProjMatrixNoCorrection[14], -1000 / EARTH_RADIUS_M);
 });
+
+test("every MapLibre camera clone inherits the elevated-center globe adapter", () => {
+  function makeGlobe(elevation = 1000) {
+    const vertical = {
+      center: { lng: 0, lat: 0 },
+      elevation,
+      _globeViewProjMatrix32f: identity(Float32Array),
+      _globeViewProjMatrixNoCorrection: identity(),
+      _globeViewProjMatrixNoCorrectionInverted: identity(),
+      _cameraPosition: new Float64Array([0, 0, 2]),
+      _calcMatrices() {
+        this._globeViewProjMatrix32f = identity(Float32Array);
+        this._globeViewProjMatrixNoCorrection = identity();
+        this._globeViewProjMatrixNoCorrectionInverted = identity();
+        this._cameraPosition = new Float64Array([0, 0, 2]);
+      },
+    };
+    return {
+      _verticalPerspectiveTransform: vertical,
+      clone() {
+        return makeGlobe(this._verticalPerspectiveTransform.elevation);
+      },
+    };
+  }
+
+  const root = makeGlobe(2500);
+  assert.equal(installGlobeCenterElevation(root), true);
+
+  const firstClone = root.clone();
+  assert.equal(firstClone._verticalPerspectiveTransform.__skytraceCenterElevationInstalled, true);
+  close(firstClone._verticalPerspectiveTransform._globeViewProjMatrixNoCorrection[14], -2500 / EARTH_RADIUS_M);
+
+  const secondClone = firstClone.clone();
+  assert.equal(secondClone._verticalPerspectiveTransform.__skytraceCenterElevationInstalled, true);
+  close(secondClone._verticalPerspectiveTransform._globeViewProjMatrixNoCorrection[14], -2500 / EARTH_RADIUS_M);
+});

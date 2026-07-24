@@ -38,7 +38,7 @@ const DEFAULT_SETTINGS = {
   terrainExaggeration: 2,
   altitudeExaggeration: 5,
   aircraftPitchExaggeration: 3,
-  aircraftRollExaggeration: 1,
+  aircraftRollExaggeration: 2,
   allAircraftTracks: false,
 };
 
@@ -56,7 +56,7 @@ function loadSettings() {
     }
     settings.terrainExaggeration = clampSetting(settings.terrainExaggeration, 1, 5, 2);
     settings.aircraftPitchExaggeration = clampSetting(settings.aircraftPitchExaggeration, 1, 5, 3);
-    settings.aircraftRollExaggeration = clampSetting(settings.aircraftRollExaggeration, 1, 5, 1);
+    settings.aircraftRollExaggeration = clampSetting(settings.aircraftRollExaggeration, 1, 5, 2);
     // Merge the short-lived split settings from local development into the single shared
     // altitude scale. Aircraft, tracks, tracking camera, and coverage must stay co-located.
     settings.altitudeExaggeration = clampSetting(

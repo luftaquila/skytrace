@@ -25,6 +25,35 @@ test("releasing a free pan never rebases the camera to the ground", () => {
   assert.doesNotMatch(source.slice(onUpStart, onUpEnd), /setElevation|rebase|ground/i);
 });
 
+test("right-drag pans the current elevated camera without a ground projection", () => {
+  const pan = functionSource("panCurrentCamera", "scheduleActive");
+  assert.match(pan, /const tr = map\.transform\.clone\(\)/);
+  assert.match(pan, /installGlobeCenterElevation\(tr\)/);
+  assert.match(pan, /const elevation = map\.transform\.elevation \|\| 0/);
+  assert.match(pan, /handleMapControlsPan\(/);
+  assert.match(pan, /tr\.setLocationAtPoint\(tr\.center, tr\.centerPoint\.add\(panDelta\)\)/);
+  assert.match(pan, /applyCameraFrame\(\{ center: tr\.center, zoom: tr\.zoom, elevation \}\)/);
+  assert.doesNotMatch(pan, /screenPointToLocation|map\.panBy|setElevation\(0\)/);
+
+  const onMoveStart = source.indexOf("const onMove = (e) => {");
+  const onMoveEnd = source.indexOf("const onUp = () => {", onMoveStart);
+  const onMove = source.slice(onMoveStart, onMoveEnd);
+  assert.match(onMove, /panCurrentCamera\(e\.clientX - drag\.x, e\.clientY - drag\.y\)/);
+  assert.doesNotMatch(onMove, /map\.panBy/);
+});
+
+test("camera frames synchronize MapLibre's requested clone at aircraft elevation", () => {
+  const apply = functionSource("applyCameraFrame", "cancelCameraAnimation");
+  assert.match(apply, /setCameraTransform\(tr, frame\)/);
+  assert.match(apply, /map\._requestedCameraState/);
+  assert.match(apply, /setCameraTransform\(map\._requestedCameraState, frame\)/);
+  assert.doesNotMatch(apply, /elevation:\s*0/);
+});
+
+test("detached aircraft views have no camera-grounding path", () => {
+  assert.doesNotMatch(source, /freeGrounding|beginFreeGrounding|freeViewElevationForZoom|camera-grounding/);
+});
+
 test("dead reckoning is limited to selected and pinned aircraft", () => {
   const buildLayers = functionSource("buildLayers", "updateFollowingCamera");
   assert.match(buildLayers, /new Set\(deps\.getPinned\(\)\)/);
@@ -58,7 +87,7 @@ test("aircraft selection only moves the camera when tracking mode is already act
 });
 
 test("Locate toggles tracking without changing bearing or pitch", () => {
-  const aircraftBranch = functionSource("toggleTracking", "fitAircraft");
+  const aircraftBranch = functionSource("toggleTracking", "destroy");
   const transition = functionSource("transitionTrackedSelection", "dataPass");
   assert.match(aircraftBranch, /followActive && selectedHex && followingSelectionHex === selectedHex/);
   assert.match(aircraftBranch, /transitionTrackedSelection\(\{ hex: selectedHex, lon, lat, z \}, "track-start"\)/);

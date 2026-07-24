@@ -170,14 +170,31 @@ export function applyGlobeCenterElevation(verticalTransform) {
 export function installGlobeCenterElevation(transform) {
   const verticalTransform = transform?._verticalPerspectiveTransform;
   if (!verticalTransform || typeof verticalTransform._calcMatrices !== "function") return false;
-  if (verticalTransform.__skytraceCenterElevationInstalled) return true;
-  const originalCalcMatrices = verticalTransform._calcMatrices;
-  verticalTransform._calcMatrices = function skytraceGlobeMatrices() {
-    originalCalcMatrices.call(this);
-    applyGlobeCenterElevation(this);
-  };
-  verticalTransform.__skytraceCenterElevationInstalled = true;
-  // Rebuild once so installation is correct even if the initial center elevation is non-zero.
-  verticalTransform._calcMatrices();
+
+  if (!verticalTransform.__skytraceCenterElevationInstalled) {
+    const originalCalcMatrices = verticalTransform._calcMatrices;
+    verticalTransform._calcMatrices = function skytraceGlobeMatrices() {
+      originalCalcMatrices.call(this);
+      applyGlobeCenterElevation(this);
+    };
+    Object.defineProperty(verticalTransform, "__skytraceCenterElevationInstalled", { value: true });
+    // Rebuild once so installation is correct even if the initial center elevation is non-zero.
+    verticalTransform._calcMatrices();
+  }
+
+  // Camera updates made while terrain is enabled never operate on map.transform directly.
+  // MapLibre clones it into _requestedCameraState, then clones that state again while applying
+  // terrain safeguards. GlobeTransform.clone() constructs fresh nested transforms, so an
+  // instance-only matrix patch would silently disappear on the first pan/ease and put the
+  // camera back on the surface projection. Make every descendant clone inherit the adapter.
+  if (typeof transform.clone === "function" && !transform.__skytraceCenterElevationCloneInstalled) {
+    const originalClone = transform.clone;
+    transform.clone = function skytraceElevatedCenterClone(...args) {
+      const clone = originalClone.apply(this, args);
+      installGlobeCenterElevation(clone);
+      return clone;
+    };
+    Object.defineProperty(transform, "__skytraceCenterElevationCloneInstalled", { value: true });
+  }
   return true;
 }

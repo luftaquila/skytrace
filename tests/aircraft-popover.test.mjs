@@ -111,7 +111,10 @@ test("satellite is the only basemap and one bounded altitude scale keeps aircraf
   assert.match(app, /terrainExaggeration:\s*2/);
   assert.match(app, /altitudeExaggeration:\s*5/);
   assert.match(app, /aircraftPitchExaggeration:\s*3/);
-  assert.match(app, /aircraftRollExaggeration:\s*1/);
+  assert.match(app, /aircraftRollExaggeration:\s*2/);
+  assert.match(app, /clampSetting\(settings\.aircraftRollExaggeration, 1, 5, 2\)/);
+  assert.match(tactical, /settingExaggeration\(initialSettings, "aircraftRollExaggeration", 5, 2\)/);
+  assert.match(tactical, /settingExaggeration\(settings, "aircraftRollExaggeration", 5, 2\)/);
   assert.match(app, /settings\.terrainExaggeration" type="range" min="1" max="5" step="0\.1"/);
   assert.match(app, /settings\.altitudeExaggeration" type="range" min="1" max="10" step="0\.1"/);
   assert.match(app, /settings\.aircraftPitchExaggeration" type="range" min="1" max="5" step="0\.1"/);
@@ -123,6 +126,9 @@ test("satellite is the only basemap and one bounded altitude scale keeps aircraf
   assert.match(tactical, /const z = altM \* altitudeExagg/);
   assert.match(tactical, /Math\.atan2\(vs \* 0\.00508, gs\) \* pitchExagg \* 180/);
   assert.match(tactical, /reportedBank \* rollExagg/);
+  assert.match(tactical, /orientation: \[-phi, 90 - track, bank\]/);
+  assert.match(tactical, /target\.orientation = \[-state\.pitch, 90 - state\.track, state\.roll\]/);
+  assert.doesNotMatch(tactical, /90 - track, -bank|90 - state\.track, -state\.roll/);
 });
 
 test("Locate uses browser geolocation only when no aircraft is selected", () => {
@@ -165,18 +171,15 @@ test("the application has one 3D map and no Leaflet or view-switch path", () => 
   assert.doesNotMatch(tactical, /setCameraFromMap|getCameraForMap|flyToView/);
 });
 
-test("free wheel zoom follows the cursor while aircraft tracking keeps its orbit", () => {
-  const start = tactical.indexOf("function freeWheelCameraTarget(");
+test("wheel zoom preserves the elevated center while aircraft tracking keeps its orbit", () => {
+  const start = tactical.indexOf("const onWheel = (e) => {");
   const end = tactical.indexOf("cv.addEventListener(\"wheel\"", start);
-  assert.notEqual(start, -1, "free wheel target helper must exist");
+  assert.notEqual(start, -1, "wheel handler must exist");
   assert.notEqual(end, -1, "wheel listener must follow the target helper");
   const source = tactical.slice(start, end);
 
-  assert.match(source, /new maplibregl\.Point\(e\.clientX - rect\.left, e\.clientY - rect\.top\)/);
-  assert.match(source, /map\.transform\.clone\(\)/);
-  assert.match(source, /isPointOnMapSurface\(around\)/);
-  assert.match(source, /handleMapControlsRollPitchBearingZoom\(deltas, tr\)/);
-  assert.match(source, /handleMapControlsPan\(deltas, tr, preZoomAroundLoc\)/);
   assert.match(source, /if \(orbitAttached\)[\s\S]*const target = activeOrbitTarget\(\)[\s\S]*center: \[target\.lon, target\.lat\]/);
-  assert.match(source, /freeWheelCameraTarget\(e, z, elevation\)/);
+  assert.match(source, /center: map\.getCenter\(\)/);
+  assert.match(source, /elevation: map\.transform\.elevation \|\| 0/);
+  assert.doesNotMatch(source, /screenPointToLocation|freeWheelCameraTarget|freeViewElevationForZoom|freeGrounding/);
 });

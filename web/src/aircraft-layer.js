@@ -36,10 +36,11 @@ function rotZ(rad) {
 function scale(s) {
   return new Float64Array([s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1]);
 }
-// Rc = Rz(yaw)·Ry(pitch)·Rx(roll): model frame +X nose, +Y right wing, +Z up → local ENU
-// (X east, Y north, Z up). yaw=90-track aims the nose along the compass track; pitch=-phi is
-// nose-up on climb; roll=-bank is right-wing-down on a right bank (see aircraftList sign notes).
-function attitude(yawDeg, pitchDeg, rollDeg) {
+// Rc = Rz(yaw)·Ry(pitch)·Rx(roll): model frame +X nose, +Y left wing, +Z up → local ENU
+// (X east, Y north, Z up). In this right-handed model frame the right wing is -Y. yaw=90-track
+// aims the nose along the compass track; pitch=-phi is nose-up and roll=bank makes positive ADS-B
+// bank lower the physical right wing.
+export function aircraftAttitudeMatrix(yawDeg, pitchDeg, rollDeg) {
   return mul(mul(rotZ(yawDeg * DEG), rotY(pitchDeg * DEG)), rotX(rollDeg * DEG));
 }
 // project a local-meter point [x,y,z] through M (=mainMatrix·frame) to CSS pixels
@@ -375,9 +376,9 @@ export function createAircraftLayer({ id = "aircraft3d", getData, getSegments, g
         const px = aircraftPixelSize({ worldPixels: worldPx, classMultiplier: clsMul });
         d.screenPx = px; // lets the HTML target-lock follow the selected model's actual footprint
         const s = px / (mesh.span * ppm);
-        // attitude() orients the model in Z-up ENU; ENU_TO_FRAME re-expresses it in the frame's Y-up
-        // basis so the aircraft sits upright (not tipped 90° onto a wingtip).
-        const R = mul(ENU_TO_FRAME, attitude(d.yaw, d.pitch, d.roll));
+        // aircraftAttitudeMatrix() orients the model in Z-up ENU; ENU_TO_FRAME re-expresses it in
+        // the frame's Y-up basis so the aircraft sits upright (not tipped 90° onto a wingtip).
+        const R = mul(ENU_TO_FRAME, aircraftAttitudeMatrix(d.yaw, d.pitch, d.roll));
         const mvp = mul(mul(M0, R), scale(s));
         if (typeof window !== "undefined" && window.__T3D_DEBUG && !window.__t3dLastSize) {
           window.__t3dLastSize = { px: +px.toFixed(1), s: +s.toFixed(1), ppm: +ppm.toFixed(5), span: +mesh.span.toFixed(3), worldPx: +worldPx.toFixed(1), clsMul, cls: d.cls };
