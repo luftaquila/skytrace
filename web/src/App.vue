@@ -1372,7 +1372,7 @@ onUnmounted(() => {
 
         <section v-if="selectedAircraft" class="detail">
           <div v-if="selectedAlert" :class="['detail-alert', selectedAlert.level]">
-            <span class="detail-alert-label">{{ selectedAlert.label }}</span>
+            <span>{{ selectedAlert.label }}</span>
             <span v-if="selectedAlert.code" class="detail-alert-code">{{ selectedAlert.code }}</span>
           </div>
           <div class="detail-head">

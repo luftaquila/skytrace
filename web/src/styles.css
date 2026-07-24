@@ -554,15 +554,6 @@ select {
   border-top: 1px solid var(--border-soft);
 }
 
-.conflict-label {
-  font: 700 10.5px/1.1 system-ui, -apple-system, sans-serif;
-  color: #fecdd3;
-  white-space: nowrap;
-  text-shadow: 0 1px 2px #000, 0 0 3px #000;
-  transform: translate(8px, -50%);
-  pointer-events: none;
-}
-
 .airfield-tt .af-tt-name {
   font-weight: 700;
 }
@@ -679,10 +670,6 @@ select {
   background: transparent;
   color: var(--text);
   font-family: inherit;
-}
-
-.history-chart .u-title {
-  color: var(--text);
 }
 
 .history-chart .u-legend {
@@ -1197,12 +1184,6 @@ select {
   background: #050a0c;
 }
 
-.map-3d .t3d-canvas {
-  position: absolute;
-  inset: 0;
-  display: block;
-}
-
 .t3d-overlay {
   position: absolute;
   inset: 0;
@@ -1267,15 +1248,6 @@ select {
   box-shadow: 0 0 0 1px rgb(72 224 209 / 0.4), 0 4px 14px rgb(0 0 0 / 0.55);
 }
 
-.t3d-block.hovered .t3d-datablock b {
-  color: #ffffff;
-}
-
-.t3d-ghost {
-  opacity: 0.72;
-}
-.t3d-ghost .t3d-block { pointer-events: none; }
-
 /* Airfield hover popover, absolutely positioned in the 3D overlay. */
 .t3d-tt {
   position: absolute;
@@ -1299,92 +1271,6 @@ select {
   white-space: nowrap;
   box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
   backdrop-filter: blur(8px);
-}
-
-/* Airfield marker: the anchor sits at the geo point; the dot is centred on it and the code
-   sits to the right, both vertically centred. The whole marker is hoverable (dot OR code)
-   with a pointer cursor. */
-.t3d-airfield {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 0;
-  height: 0;
-  pointer-events: auto;
-  cursor: pointer;
-  --af-color: #c3ccd6;
-}
-
-/* Grade colours distinguish airport classes. */
-.t3d-airfield.kind-large { --af-color: #ffd23f; }
-.t3d-airfield.kind-medium { --af-color: #ff9f45; }
-.t3d-airfield.kind-small { --af-color: #c3ccd6; }
-.t3d-airfield.minor { --af-color: #8b98a5; }
-
-.t3d-af-dot {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 8px;
-  height: 8px;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  border: 1px solid #071012;
-  background: var(--af-color);
-  box-shadow: 0 0 7px color-mix(in srgb, var(--af-color) 65%, transparent), 0 0 0 1px rgb(255 255 255 / 0.3);
-}
-
-.t3d-airfield.kind-large .t3d-af-dot { width: 10px; height: 10px; }
-.t3d-airfield.kind-small .t3d-af-dot { width: 6px; height: 6px; }
-
-.t3d-airfield.minor .t3d-af-dot {
-  width: 5px;
-  height: 5px;
-  opacity: 0.55;
-  box-shadow: none;
-}
-
-.t3d-af-code {
-  position: absolute;
-  left: 8px;
-  top: 0;
-  transform: translateY(-50%);
-  white-space: nowrap;
-  font: 700 10px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  letter-spacing: 0.06em;
-  color: #cfe9e4;
-  text-shadow: 0 1px 3px #000;
-}
-
-.t3d-airfield.kind-large .t3d-af-code { font-size: 11px; color: #ffe8a3; }
-
-.t3d-ringlabel,
-.t3d-compass {
-  position: absolute;
-  top: 0;
-  left: 0;
-  margin: -6px 0 0 -10px;
-  pointer-events: none;
-  font: 600 10px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  letter-spacing: 0.08em;
-  color: rgb(72 224 209 / 0.5);
-}
-
-.t3d-compass {
-  margin: -8px 0 0 -5px;
-  font-size: 13px;
-  font-weight: 800;
-  color: rgb(72 224 209 / 0.78);
-  text-shadow: 0 0 8px rgb(72 224 209 / 0.55);
-}
-
-.conflict-label.t3d-pin {
-  position: absolute;
-  top: 0;
-  left: 0;
-  margin: -6px 0 0 -30px;
-  pointer-events: none;
-  z-index: 4000001;
 }
 
 /* Tactical target-lock reticle (HUD corner brackets) on the selected aircraft. */
