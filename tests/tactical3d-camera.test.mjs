@@ -153,6 +153,27 @@ test("double-clicking another aircraft while tracking is exactly one normal clic
   assert.ok(doubleClick.indexOf("if (repeatedTrackedClick || followActive) return") < doubleClick.indexOf("const hit = pickAircraftAt"));
 });
 
+test("re-clicking the already-selected aircraft tracks it instead of deselecting", () => {
+  const interactionStart = source.indexOf("// --- Interaction");
+  const interactionEnd = source.indexOf("// --- Native GeoJSON sources", interactionStart);
+  const interaction = source.slice(interactionStart, interactionEnd);
+  const clickStart = interaction.indexOf('map.on("click", (e) => {');
+  const doubleClickStart = interaction.indexOf('map.on("dblclick", (e) => {');
+  const click = interaction.slice(clickStart, doubleClickStart);
+  // A repeat click on the already-selected aircraft Tracks it (same intent as a double-click)
+  // rather than toggling the selection off.
+  assert.match(click, /if \(hit\.hex === deps\.getSelectedHex\(\)\) \{/);
+  assert.match(click, /deps\.onTrackAircraft\?\.\(hit\.hex\)/);
+  // The Track branch is evaluated before the plain select branch, so the repeat click never falls
+  // through to onSelect (which would deselect).
+  assert.ok(click.indexOf("deps.onTrackAircraft?.(hit.hex)") < click.indexOf("deps.onSelect(hit.hex)"));
+  // The Track branch must not run clearPinned, or toggleTracking would lose the real follow state.
+  const trackBranch = click.slice(click.indexOf("if (hit.hex === deps.getSelectedHex())"), click.indexOf("const wasFollowing"));
+  assert.doesNotMatch(trackBranch, /clearPinned/);
+  // It arms the repeat-pointer guard so the physical second click of a double-click cannot undo it.
+  assert.match(trackBranch, /trackedAircraftClick = \{ x: clickClientX, y: clickClientY, at: clickNow \};/);
+});
+
 test("selecting an airfield is camera-neutral until its Track action is invoked", () => {
   const pinStart = source.indexOf("function showPinned(field)");
   const pinEnd = source.indexOf("function clearPinned", pinStart);

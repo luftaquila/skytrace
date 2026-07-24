@@ -1275,6 +1275,14 @@ export function createTactical3d({ container, deps }) {
     // which waits ~300ms to disambiguate single- vs double-click — that lag was the select delay.
     const hit = pickAircraftAt(e.point.x, e.point.y, 40);
     if (hit) {
+      // Re-clicking the already-selected aircraft Tracks it (like a double-click) instead of
+      // deselecting. Skip clearPinned so toggleTracking reads the true follow state and toggles it,
+      // and arm the repeat-pointer guard so the physical second click can't undo the toggle.
+      if (hit.hex === deps.getSelectedHex()) {
+        deps.onTrackAircraft?.(hit.hex);
+        trackedAircraftClick = { x: clickClientX, y: clickClientY, at: clickNow };
+        return;
+      }
       const wasFollowing = followActive;
       clearPinned({ releaseOrbit: true });
       deps.onSelect(hit.hex);
