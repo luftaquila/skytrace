@@ -1218,7 +1218,6 @@ async function ensureTactical3d() {
         isCoasting,
         coastOpacity,
         altitudeColor,
-        altitudeColorFeet,
         trackSegmentColor,
         planeSizeScale,
         onSelect: toggleAircraft,

@@ -1,13 +1,11 @@
-// 3D satellite view on MapLibre GL v5 (raster-DEM terrain + LOD imagery, no key) with a
-// deck.gl overlay for the GPU objects: a solid altitude-gradient coverage volume, glTF
-// aircraft with altitude sticks/trails, and HTML data-block popovers with pins.
+// 3D satellite view on MapLibre GL v5 (raster-DEM terrain + LOD imagery, no key). All GPU
+// objects — the altitude-gradient coverage dome, aircraft with altitude sticks/trails, and
+// conflict links — are drawn by a MapLibre custom WebGL layer (web/src/aircraft-layer.js) so
+// they follow the real camera in globe; HTML data-block popovers with pins overlay the canvas.
 //
 // Loaded via dynamic import from App.vue. All app state and formatting comes through `deps`.
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { MapboxOverlay } from "@deck.gl/mapbox";
-import { ScenegraphLayer, SimpleMeshLayer } from "@deck.gl/mesh-layers";
-import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { AIRFIELDS, isMinorAirfield } from "./airfields.js";
 import { createAircraftLayer } from "./aircraft-layer.js";
 import { createAircraftMotionTracker } from "./aircraft-motion.js";
@@ -37,10 +35,8 @@ function ensureEsriProtocol() {
 // Terrain relief comes from Mapterhorn (higher-quality open DEM, terrarium-encoded webp, CORS *,
 // maxzoom 12 over Korea).
 const MAPTERHORN_TILES = ["https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"];
-const MODEL_URI = `${import.meta.env.BASE_URL}aircraft.glb`;
 const EMPTY_FC = { type: "FeatureCollection", features: [] };
 const M_PER_DEG_LAT = 111320;
-const COV_ANCHOR = [{ position: [127.33113, 36.36599, 0] }]; // dome anchored at HOME (mesh verts are metre offsets)
 
 function settingExaggeration(settings, key, max, fallback) {
   const value = Number(settings?.[key]);
@@ -62,94 +58,6 @@ function parseRgb(css) {
   const hex = css.replace("#", "");
   const n = hex.length === 3 ? hex.split("").map((c) => c + c).join("") : hex;
   return { r: parseInt(n.slice(0, 2), 16), g: parseInt(n.slice(2, 4), 16), b: parseInt(n.slice(4, 6), 16) };
-}
-
-// The coverage shell uses its own perceptually uniform altitude palette. Colour is
-// calculated per fragment from interpolated altitude instead of interpolating a few
-// sRGB vertex colours, which avoids the apparent cyan-to-blue brightness cliff.
-const coverageAltitudeShader = {
-  name: "coverageAltitude",
-  inject: {
-    "vs:#decl": /* glsl */ `
-out float coverageAltitudeFt;
-`,
-    "vs:#main-end": /* glsl */ `
-coverageAltitudeFt = max(positions.z / 0.3048, 0.0);
-`,
-    "fs:#decl": /* glsl */ `
-in float coverageAltitudeFt;
-
-float coverageLinearToSrgb(float value) {
-  value = max(value, 0.0);
-  return value <= 0.0031308
-    ? value * 12.92
-    : 1.055 * pow(value, 1.0 / 2.4) - 0.055;
-}
-
-vec3 coverageOklchToSrgb(float lightness, float chroma, float hueDegrees) {
-  float hue = radians(hueDegrees);
-  float a = chroma * cos(hue);
-  float b = chroma * sin(hue);
-  float lRoot = lightness + 0.3963377774 * a + 0.2158037573 * b;
-  float mRoot = lightness - 0.1055613458 * a - 0.0638541728 * b;
-  float sRoot = lightness - 0.0894841775 * a - 1.2914855480 * b;
-  float l = lRoot * lRoot * lRoot;
-  float m = mRoot * mRoot * mRoot;
-  float s = sRoot * sRoot * sRoot;
-  vec3 linearRgb = vec3(
-    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-    -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
-  );
-  return clamp(vec3(
-    coverageLinearToSrgb(linearRgb.r),
-    coverageLinearToSrgb(linearRgb.g),
-    coverageLinearToSrgb(linearRgb.b)
-  ), 0.0, 1.0);
-}
-
-vec3 coverageAltitudeColor(float altitudeFt) {
-  float t = clamp(altitudeFt / 40000.0, 0.0, 1.0);
-  // Preserve the existing low-orange to high-violet meaning while keeping
-  // perceptual lightness and chroma constant throughout the sweep.
-  return coverageOklchToSrgb(0.72, 0.18, mix(50.0, 300.0, t));
-}
-`,
-    "fs:#main-end": /* glsl */ `
-fragColor.rgb = coverageAltitudeColor(coverageAltitudeFt);
-`,
-  },
-};
-
-class CoverageMeshLayer extends SimpleMeshLayer {
-  getShaders() {
-    const shaders = super.getShaders();
-    return { ...shaders, modules: [...(shaders.modules || []), coverageAltitudeShader] };
-  }
-}
-
-// Aircraft self-glow: a fresnel RIM added in the target's OWN colour, computed per fragment from the
-// PBR world normal (pbr_vNormal) and the view direction (project.cameraPosition − pbr_vPosition).
-// Grazing edges (normal ⟂ view) light up, so the target reads as a luminous contact — a real glow
-// with NO extra geometry and NO second draw (just a few fragment ops on the existing model).
-// Whole-volume self-glow: a soft, UNIFORM emissive added in the fragment's OWN colour across the
-// entire model (not a fresnel rim — an edge-only glow reads as a silly bright outline). It lifts the
-// whole aircraft so it looks gently luminous against the dark scene while keeping its hue (additive
-// of its own colour, not a wash toward white).
-const aircraftGlowShader = {
-  name: "aircraftGlow",
-  inject: {
-    "fs:#main-end": /* glsl */ `
-  float glowLum = dot(fragColor.rgb, vec3(0.299, 0.587, 0.114));
-  fragColor.rgb += fragColor.rgb * (0.5 + (1.0 - glowLum) * 0.7);
-`,
-  },
-};
-class GlowScenegraphLayer extends ScenegraphLayer {
-  getShaders() {
-    const shaders = super.getShaders();
-    return { ...shaders, modules: [...(shaders.modules || []), aircraftGlowShader] };
-  }
 }
 
 // Tactical airfield glyph (aeronautical style): a glowing ring with crossed runways and a core,
@@ -198,8 +106,8 @@ export function createTactical3d({ container, deps }) {
   };
   const afPaint = { "text-color": "#8ff0e4", "text-halo-color": "#04211f", "text-halo-width": 1.7, "text-halo-blur": 0.6 };
 
-  // --- MapLibre map (mercator so the deck.gl overlay aligns). Satellite imagery is the
-  // sole basemap; terrain relief comes from the DEM beneath it. ---------------------------
+  // --- MapLibre map. Satellite imagery is the sole basemap; terrain relief comes from the
+  // DEM beneath it. ------------------------------------------------------------------------
   const map = new maplibregl.Map({
     container,
     attributionControl: false,
@@ -532,10 +440,6 @@ export function createTactical3d({ container, deps }) {
     const color = AF_ICON_COLORS[e.id];
     if (color && !map.hasImage(e.id)) map.addImage(e.id, makeAirfieldIcon(color), { pixelRatio: 2 });
   });
-  // pickingRadius widens the click/hover search around the pointer so selecting an aircraft is
-  // forgiving (on top of the invisible hit disc) — no pixel-perfect aim on the small model.
-  const overlay = new MapboxOverlay({ interleaved: true, pickingRadius: 16, layers: [] });
-  map.addControl(overlay);
   // Aircraft are drawn by a MapLibre custom WebGL layer (NOT deck) so they follow the map's real
   // camera — rotating & tilting with the globe, incl. pitch > 90° (bottom view). buildLayers keeps
   // `aircraftRenderList` in sync; the layer just reads it each frame.
@@ -552,7 +456,6 @@ export function createTactical3d({ container, deps }) {
   const aircraftLayer = createAircraftLayer({ getData: () => aircraftRenderList, getSegments: () => aircraftSegments, getDots: () => aircraftDots, getCoverage: () => aircraftCoverage });
   if (typeof window !== "undefined" && window.__T3D_DEBUG) {
     window.__t3dMap = map;
-    window.__t3dOverlay = overlay;
     window.__t3dAircraftLayer = aircraftLayer;
     window.__t3dCameraState = () => ({
       center: map.getCenter().toArray(),
@@ -759,8 +662,8 @@ export function createTactical3d({ container, deps }) {
 
     const covMesh = coverageMesh();
     // Aircraft grouped by size class so per-category size differences survive the pixel clamp
-    // (constant on-screen size per class). One solid glTF model per target in its TRUE altitude
-    // colour, with a per-fragment fresnel rim self-glow (GlowScenegraphLayer) — no extra geometry.
+    // (constant on-screen size per class). One solid model per target in its TRUE altitude colour,
+    // with a whole-volume self-glow — all drawn by the custom WebGL layer, no extra geometry.
     // Aircraft render list for the MapLibre custom WebGL layer (drawn with the map's real camera,
     // so it rotates/tilts with the globe incl. pitch > 90°). Colour resolves exactly as the old deck
     // getColor did: IDENT gold flash > conflict pink > true altitude colour. Coasting targets
@@ -814,42 +717,6 @@ export function createTactical3d({ container, deps }) {
     for (const g of ghostData) aircraftRenderList.push({ lon: g.lon, lat: g.lat, z: g.z, r: g.rgb.r, g: g.rgb.g, b: g.rgb.b, a: 150, pitch: g.orientation[0], yaw: g.orientation[1], roll: g.orientation[2], cls: "medium", clsMul: 1 });
     if (ready) map.triggerRepaint();
     requestMotionFrame();
-
-    const covMat = { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] };
-    const layers = [
-      // Coverage dome in TWO passes so its translucency is drawn exactly once per pixel (no
-      // front+back / overlapping-band stacking into brighter/white triangles). Pass 1 writes only
-      // depth (nearest surface); pass 2 colours only the fragments at that nearest depth.
-      // depthWrite alone can't fix it — a nearer triangle drawn later still blends over an earlier
-      // farther one. Aircraft/sticks/trails use depthCompare 'always', so the dome never hides them.
-      covMesh && new CoverageMeshLayer({
-        id: "coverage-depth", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [0, 0, 0, 0], getScale: [1, 1, altitudeExagg], sizeScale: 1, material: covMat, pickable: false,
-        // alpha 0 with blending on leaves colour untouched; the point of this pass is the depth write.
-        parameters: { depthWriteEnabled: true, depthCompare: "less-equal" },
-      }),
-      covMesh && new CoverageMeshLayer({
-        id: "coverage", data: COV_ANCHOR, mesh: covMesh, getPosition: (d) => d.position,
-        getColor: [255, 255, 255, 58], getScale: [1, 1, altitudeExagg], sizeScale: 1, material: covMat, pickable: false,
-        parameters: { depthWriteEnabled: false, depthCompare: "less-equal" },
-      }),
-      // Targets ignore the depth buffer (depthCompare 'always') so the dome/terrain never hide them.
-      // Trail: a single crisp altitude-gradient line (no glow/casing). billboard:true keeps the
-      // ribbon facing the camera, so it has the same thickness from the side as from above.
-      new PathLayer({ id: "trails", data: trails, getPath: (d) => d.path, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 2.1, widthMinPixels: 1.6, billboard: true, jointRounded: true, capRounded: true, parameters: { depthCompare: "always" } }),
-      new LineLayer({ id: "sticks", data: sticks, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: (d) => d.color, widthUnits: "pixels", getWidth: 1.6, widthMinPixels: 1.2, parameters: { depthCompare: "always" } }),
-      // Small dot at each stick's ground foot (the old view had these).
-      new ScatterplotLayer({ id: "ground-dots", data: sticks, getPosition: (d) => d.target, radiusUnits: "pixels", getRadius: 3, radiusMinPixels: 2.5, radiusMaxPixels: 4, filled: true, stroked: false, getFillColor: (d) => d.color, parameters: { depthCompare: "always" } }),
-      // Collision/proximity alert link between each conflicting pair (red, over everything).
-      conflictLines.length && new LineLayer({ id: "conflicts", data: conflictLines, getSourcePosition: (d) => d.source, getTargetPosition: (d) => d.target, getColor: [251, 113, 133, 235], widthUnits: "pixels", getWidth: 2.6, widthMinPixels: 2, parameters: { depthCompare: "always" } }),
-      ghostData.length && new ScenegraphLayer({ id: "ghost", data: ghostData, scenegraph: MODEL_URI, getPosition: (d) => [d.lon, d.lat, d.z], getOrientation: (d) => d.orientation, getColor: (d) => [d.rgb.r, d.rgb.g, d.rgb.b, 150], sizeScale: 150, sizeMinPixels: 38, sizeMaxPixels: 54, parameters: { depthCompare: "always" } }),
-    ].filter(Boolean)
-      // ALL of these deck object layers freeze on screen in globe (deck's GlobeView has no bearing/
-      // pitch — official limitation), so they are drawn by the MapLibre custom WebGL layer instead
-      // (aircraft, sticks, trails, conflict links, ground dots, coverage dome). Picking/hover is a CPU
-      // projection (pickAircraftAt). The deck overlay renders nothing while in globe.
-      .filter((l) => !["trails", "sticks", "ground-dots", "conflicts", "coverage", "coverage-depth", "hit", "ghost"].includes(l.id));
-    overlay.setProps({ layers });
     syncBlocks();
   }
 
@@ -915,10 +782,9 @@ export function createTactical3d({ container, deps }) {
     motionRaf = 0;
   }
 
-  // Solid altitude-gradient reception dome: skin the server's per-altitude rings into a single
-  // translucent triangle mesh (a real 3D volume, not a wireframe). Built in local metre offsets
-  // from HOME so a SimpleMeshLayer (which reliably renders arbitrary 3D geo meshes) can draw it;
-  // the fragment shader maps interpolated altitude to OKLCH colour, while getColor supplies alpha.
+  // Solid altitude-gradient reception dome: the server sends a pre-built translucent triangle mesh
+  // (area.volumeMesh, quantized-uint16 or float32 vertices). Decode it into local metre offsets from
+  // HOME and compute normals so the MapLibre custom WebGL layer can draw it as a real 3D volume.
   const M_PER_DEG_LON = M_PER_DEG_LAT * Math.cos((HOME.lat * Math.PI) / 180);
   let coverageMeshSource = null;
   let cachedCoverageMesh = null;
@@ -951,9 +817,6 @@ export function createTactical3d({ container, deps }) {
     coverageMeshSource = coverage;
     const positions = [];
     const indices = [];
-    // Metre offset of a ring vertex from HOME (the SimpleMeshLayer anchor).
-    const off = (pt, z) => [(pt[0] - HOME.lon) * M_PER_DEG_LON, (pt[1] - HOME.lat) * M_PER_DEG_LAT, z];
-    const pushV = (p) => { positions.push(p[0], p[1], p[2]); };
     for (const area of coverage?.areas || []) {
       const observed = area.volumeMesh;
       if (observed?.encoding === "quantized-uint16-le-base64"
@@ -984,29 +847,6 @@ export function createTactical3d({ container, deps }) {
           positions.push(decoded[i] + eastOffset, decoded[i + 1] + northOffset, decoded[i + 2]);
         }
         continue;
-      }
-      const vol = area.volume;
-      if (!vol?.layers?.length) continue;
-      const levels = [{ feet: 0, ring: vol.layers[0].ring }];
-      for (const l of vol.layers) levels.push({ feet: l.midAltitude, ring: l.ring });
-      const N = Math.min(...levels.map((lv) => lv.ring.length)) - 1; // azimuth samples (ring closes)
-      if (N < 3) continue;
-      // Keep raw altitude in the mesh. CoverageMeshLayer applies visual exaggeration through
-      // getScale, leaving the shader with the true altitude for its per-fragment colour lookup.
-      const zc = levels.map((lv) => lv.feet * FT_TO_M);
-      // Skin each altitude band into two triangles per azimuth cell (non-indexed triangle list).
-      for (let l = 0; l < levels.length - 1; l += 1) {
-        const r0 = levels[l].ring;
-        const r1 = levels[l + 1].ring;
-        for (let a = 0; a < N; a += 1) {
-          const a2 = (a + 1) % N;
-          const p00 = off(r0[a], zc[l]);
-          const p01 = off(r0[a2], zc[l]);
-          const p10 = off(r1[a], zc[l + 1]);
-          const p11 = off(r1[a2], zc[l + 1]);
-          pushV(p00); pushV(p01); pushV(p11);
-          pushV(p00); pushV(p11); pushV(p10);
-        }
       }
     }
     if (!positions.length) {
@@ -1492,7 +1332,6 @@ export function createTactical3d({ container, deps }) {
     if (identBlinkTimer) clearInterval(identBlinkTimer);
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);
-    try { map.removeControl(overlay); } catch { /* gone */ }
     map.remove();
     for (const el of [overlayEl, afPinEl, afHoverEl, lockEl, loadingEl]) el.remove();
   }
