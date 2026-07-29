@@ -1,0 +1,247 @@
+name: Build Image
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
+  IMAGE_TAG: ${{ github.ref_name }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A release tag is immutable work: a later tag must not cancel it midway.
+  cancel-in-progress: false
+
+jobs:
+  release-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Validate release version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" != "tag" ]]; then
+            echo "Run this workflow from a release tag, not a branch" >&2
+            exit 1
+          fi
+          if [[ ! "$IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "IMAGE_TAG must be a stable vMAJOR.MINOR.PATCH version tag" >&2
+            exit 1
+          fi
+          root_version=$(jq -r .version package.json)
+          web_version=$(jq -r .version web/package.json)
+          if [[ "$root_version" != "$web_version" ]]; then
+            echo "Root package version $root_version does not match web package version $web_version" >&2
+            exit 1
+          fi
+          if [[ "$IMAGE_TAG" != "v$root_version" ]]; then
+            echo "Tag $IMAGE_TAG does not match package version v$root_version" >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm --prefix web ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm audit --omit=dev
+      - run: npm --prefix web audit
+      - run: shellcheck scripts/package-agent.sh scripts/smoke-compose.sh receiver/readsb/install.sh
+      - run: docker compose config --quiet
+        env:
+          SKYTRACE_IMAGE: ghcr.io/example/skytrace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SKYTRACE_ENV_FILE: .env.example
+      - run: npm run check
+
+  docker-compose-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+      - run: scripts/smoke-compose.sh docker
+
+  podman-compose-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+      - name: Exercise the Compose contract on rootless Podman
+        run: |
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+          scripts/smoke-compose.sh podman
+
+  build:
+    needs: [release-test, docker-compose-test, podman-compose-test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            artifact: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            artifact: arm64
+    # Build each architecture natively; the manifest job publishes one multi-platform release tag.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - uses: docker/build-push-action@v7
+        id: build
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: VCS_REF=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.artifact }}
+          cache-to: type=gha,scope=${{ matrix.artifact }},mode=min,ignore-error=true
+      - name: Export image digest
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: image-digest-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          pattern: image-digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Publish multi-platform release tag
+        shell: bash
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          refs=()
+          for digest in *; do
+            refs+=("${REGISTRY_IMAGE}@sha256:${digest}")
+          done
+          if [[ "${#refs[@]}" -ne 2 ]]; then
+            echo "Expected two platform image digests, found ${#refs[@]}" >&2
+            exit 1
+          fi
+          docker buildx imagetools create \
+            --tag "${REGISTRY_IMAGE}:${IMAGE_TAG}" \
+            --metadata-file "$RUNNER_TEMP/manifest-metadata.json" \
+            "${refs[@]}"
+          digest=$(jq -r '."containerimage.descriptor".digest // empty' \
+            "$RUNNER_TEMP/manifest-metadata.json")
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid multi-platform manifest digest: $digest" >&2
+            exit 1
+          fi
+          docker buildx imagetools inspect "${REGISTRY_IMAGE}@${digest}"
+          printf '%s\n' "$digest" > "$RUNNER_TEMP/image-digest.txt"
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: release-image-digest
+          path: ${{ runner.temp }}/image-digest.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          name: release-image-digest
+          path: ${{ runner.temp }}/image
+      - name: Build direct server assets and the agent archive
+        shell: bash
+        run: |
+          image_digest=$(tr -d '\r\n' < "$RUNNER_TEMP/image/image-digest.txt")
+          if [[ ! "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid multi-platform manifest digest: $image_digest" >&2
+            exit 1
+          fi
+          image_ref="${REGISTRY_IMAGE}@${image_digest}"
+          install -m 0644 compose.yml "$RUNNER_TEMP/compose.yml"
+          sed "s|^SKYTRACE_IMAGE=.*|SKYTRACE_IMAGE=${image_ref}|" \
+            .env.example > "$RUNNER_TEMP/skytrace.env.example"
+          install -m 0644 docs/self-hosting.md "$RUNNER_TEMP/self-hosting.md"
+          scripts/package-agent.sh "$IMAGE_TAG" "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP"
+          for asset in compose.yml skytrace.env.example self-hosting.md; do
+            sha256sum "$asset" | cut -d ' ' -f 1 > "$asset.sha256"
+          done
+          printf '%s\n' "$image_digest" > "skytrace-${IMAGE_TAG}.image-digest"
+      - name: Publish release files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(
+            "$RUNNER_TEMP/compose.yml"
+            "$RUNNER_TEMP/compose.yml.sha256"
+            "$RUNNER_TEMP/skytrace.env.example"
+            "$RUNNER_TEMP/skytrace.env.example.sha256"
+            "$RUNNER_TEMP/self-hosting.md"
+            "$RUNNER_TEMP/self-hosting.md.sha256"
+            "$RUNNER_TEMP/skytrace-agent-${IMAGE_TAG}.tar.gz"
+            "$RUNNER_TEMP/skytrace-agent-${IMAGE_TAG}.tar.gz.sha256"
+            "$RUNNER_TEMP/skytrace-${IMAGE_TAG}.image-digest"
+          )
+          if release_is_draft=$(gh release view "$IMAGE_TAG" \
+            --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$release_is_draft" != "true" ]]; then
+              echo "Published release $IMAGE_TAG already exists" >&2
+              exit 1
+            fi
+          else
+            gh release create "$IMAGE_TAG" \
+              --draft \
+              --verify-tag \
+              --title "$IMAGE_TAG" \
+              --generate-notes
+          fi
+          gh release upload "$IMAGE_TAG" "${assets[@]}" --clobber
+          gh release edit "$IMAGE_TAG" --draft=false
