@@ -1,0 +1,212 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  EARTH_RADIUS_M,
+  applyGlobeCenterElevation,
+  installGlobeCenterElevation,
+  installGlobeTerrainFogMatrix,
+  invertMatrix4,
+  syncGlobeTileCoverFrustum,
+} from "../web/src/globe-center-elevation.js";
+
+const identity = (Type = Float64Array) => new Type([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+function multiply(a, b) {
+  const out = new Float64Array(16);
+  for (let col = 0; col < 4; col += 1) {
+    for (let row = 0; row < 4; row += 1) {
+      let value = 0;
+      for (let k = 0; k < 4; k += 1) value += a[k * 4 + row] * b[col * 4 + k];
+      out[col * 4 + row] = value;
+    }
+  }
+  return out;
+}
+
+function transformPoint(matrix, point) {
+  return [0, 1, 2, 3].map((row) => (
+    matrix[row] * point[0] + matrix[4 + row] * point[1]
+    + matrix[8 + row] * point[2] + matrix[12 + row] * point[3]
+  ));
+}
+
+function surfaceVector({ lng, lat }) {
+  const lambda = lng * Math.PI / 180;
+  const phi = lat * Math.PI / 180;
+  return [Math.sin(lambda) * Math.cos(phi), Math.sin(phi), Math.cos(lambda) * Math.cos(phi)];
+}
+
+function close(actual, expected, epsilon = 1e-9) {
+  assert.ok(Math.abs(actual - expected) <= epsilon, `${actual} != ${expected}`);
+}
+
+test("globe center elevation translates an elevated target onto the same camera pivot", () => {
+  const center = { lng: 127.33113, lat: 36.36599 };
+  const elevation = 18000 * 0.3048 * 5;
+  const radial = surfaceVector(center);
+  // Any projection/view/rotation may be on the left. If the adapter maps the elevated target to
+  // the original surface pivot before that matrix, the result is invariant across zoom and pitch.
+  const view = new Float64Array([
+    1.2, 0.2, -0.1, 0.03,
+    -0.3, 0.8, 0.15, -0.02,
+    0.05, -0.25, 1.1, 0.01,
+    2, -4, 0.5, 1,
+  ]);
+  const transform = {
+    center,
+    elevation,
+    _globeViewProjMatrix32f: new Float32Array(view),
+    _globeViewProjMatrixNoCorrection: view,
+    _globeViewProjMatrixNoCorrectionInverted: identity(),
+    _cameraPosition: new Float64Array(radial.map((value) => value * 2)),
+    _cachedClippingPlane: [0, 0, 1, -0.5],
+  };
+
+  applyGlobeCenterElevation(transform);
+
+  const radius = 1 + elevation / EARTH_RADIUS_M;
+  const elevatedTarget = [...radial.map((value) => value * radius), 1];
+  const projected = transformPoint(transform._globeViewProjMatrixNoCorrection, elevatedTarget);
+  const expectedPivot = transformPoint(view, [...radial, 1]);
+  expectedPivot.forEach((value, index) => close(projected[index], value));
+});
+
+test("globe elevation keeps the forward and inverse view matrices consistent", () => {
+  const base = new Float64Array([
+    1.2, 0.1, 0.2, 0,
+    -0.2, 0.9, 0.05, 0,
+    0.1, -0.1, 1.1, 0,
+    3, -2, 5, 1,
+  ]);
+  const inverse = invertMatrix4(base);
+  assert.ok(inverse);
+  const product = multiply(base, inverse);
+  for (let i = 0; i < 16; i += 1) close(product[i], i % 5 === 0 ? 1 : 0, 1e-8);
+});
+
+test("tile-cover frustum follows the same elevated globe camera without shrinking", () => {
+  const elevation = 36000 * 0.3048 * 5;
+  const normalizedElevation = elevation / EARTH_RADIUS_M;
+  const frustum = { points: [], planes: [], aabb: { min: [], max: [], center: [] } };
+  const transform = {
+    center: { lng: 0, lat: 0 },
+    elevation,
+    _globeViewProjMatrix32f: identity(Float32Array),
+    _globeViewProjMatrixNoCorrection: identity(),
+    _globeViewProjMatrixNoCorrectionInverted: identity(),
+    _cameraPosition: new Float64Array([0, 0, 2]),
+    _cachedClippingPlane: [0, 0, 1, -0.5],
+    _cachedFrustum: frustum,
+  };
+
+  applyGlobeCenterElevation(transform);
+
+  assert.equal(frustum.points.length, 8);
+  assert.equal(frustum.planes.length, 6);
+  close(frustum.aabb.center[0], 0);
+  close(frustum.aabb.center[1], 0);
+  close(frustum.aabb.center[2], normalizedElevation);
+  close(frustum.aabb.max[0] - frustum.aabb.min[0], 2);
+  close(frustum.aabb.max[1] - frustum.aabb.min[1], 2);
+  close(frustum.aabb.max[2] - frustum.aabb.min[2], 2);
+  assert.ok(frustum.planes.flat().every(Number.isFinite));
+  assert.equal(syncGlobeTileCoverFrustum({}), false);
+});
+
+test("installer wraps MapLibre's vertical transform exactly once", () => {
+  let calculations = 0;
+  const vertical = {
+    center: { lng: 0, lat: 0 },
+    elevation: 1000,
+    _globeViewProjMatrix32f: identity(Float32Array),
+    _globeViewProjMatrixNoCorrection: identity(),
+    _globeViewProjMatrixNoCorrectionInverted: identity(),
+    _cameraPosition: new Float64Array([0, 0, 2]),
+    _calcMatrices() {
+      calculations += 1;
+      this._globeViewProjMatrix32f = identity(Float32Array);
+      this._globeViewProjMatrixNoCorrection = identity();
+      this._globeViewProjMatrixNoCorrectionInverted = identity();
+      this._cameraPosition = new Float64Array([0, 0, 2]);
+    },
+  };
+  const globe = { _verticalPerspectiveTransform: vertical };
+  assert.equal(installGlobeCenterElevation(globe), true);
+  const installed = vertical._calcMatrices;
+  assert.equal(installGlobeCenterElevation(globe), true);
+  assert.equal(vertical._calcMatrices, installed);
+  vertical._calcMatrices();
+  assert.equal(calculations, 2); // one rebuild at install, one explicit call
+  close(vertical._globeViewProjMatrixNoCorrection[14], -1000 / EARTH_RADIUS_M);
+});
+
+test("globe terrain silences only the unsupported vertical fog path and preserves active-transform dispatch", () => {
+  let verticalCalls = 0;
+  let mercatorCalls = 0;
+  let active = "vertical";
+  const vertical = {
+    calculateFogMatrix() {
+      verticalCalls += 1;
+      return null;
+    },
+  };
+  const globe = {
+    _verticalPerspectiveTransform: vertical,
+    calculateFogMatrix() {
+      if (active === "vertical") return this._verticalPerspectiveTransform.calculateFogMatrix();
+      mercatorCalls += 1;
+      return "mercator-fog-matrix";
+    },
+  };
+  assert.equal(installGlobeTerrainFogMatrix(globe), true);
+  const dispatcher = globe.calculateFogMatrix;
+  const installed = vertical.calculateFogMatrix;
+  assert.equal(installGlobeTerrainFogMatrix(globe), true);
+  assert.equal(globe.calculateFogMatrix, dispatcher);
+  assert.equal(vertical.calculateFogMatrix, installed);
+  assert.deepEqual(
+    [...globe.calculateFogMatrix()],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+  );
+  active = "mercator";
+  assert.equal(globe.calculateFogMatrix(), "mercator-fog-matrix");
+  assert.equal(verticalCalls, 0);
+  assert.equal(mercatorCalls, 1);
+});
+
+test("every MapLibre camera clone inherits the elevated-center globe adapter", () => {
+  function makeGlobe(elevation = 1000) {
+    const vertical = {
+      center: { lng: 0, lat: 0 },
+      elevation,
+      _globeViewProjMatrix32f: identity(Float32Array),
+      _globeViewProjMatrixNoCorrection: identity(),
+      _globeViewProjMatrixNoCorrectionInverted: identity(),
+      _cameraPosition: new Float64Array([0, 0, 2]),
+      _calcMatrices() {
+        this._globeViewProjMatrix32f = identity(Float32Array);
+        this._globeViewProjMatrixNoCorrection = identity();
+        this._globeViewProjMatrixNoCorrectionInverted = identity();
+        this._cameraPosition = new Float64Array([0, 0, 2]);
+      },
+    };
+    return {
+      _verticalPerspectiveTransform: vertical,
+      clone() {
+        return makeGlobe(this._verticalPerspectiveTransform.elevation);
+      },
+    };
+  }
+
+  const root = makeGlobe(2500);
+  assert.equal(installGlobeCenterElevation(root), true);
+
+  const firstClone = root.clone();
+  assert.equal(firstClone._verticalPerspectiveTransform.__skytraceCenterElevationInstalled, true);
+  close(firstClone._verticalPerspectiveTransform._globeViewProjMatrixNoCorrection[14], -2500 / EARTH_RADIUS_M);
+
+  const secondClone = firstClone.clone();
+  assert.equal(secondClone._verticalPerspectiveTransform.__skytraceCenterElevationInstalled, true);
+  close(secondClone._verticalPerspectiveTransform._globeViewProjMatrixNoCorrection[14], -2500 / EARTH_RADIUS_M);
+});
