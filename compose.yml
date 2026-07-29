@@ -1,0 +1,148 @@
+services:
+  skytrace:
+    image: ${SKYTRACE_IMAGE:?set exact SKYTRACE_IMAGE in .env}
+    restart: unless-stopped
+    env_file: ${SKYTRACE_ENV_FILE:-.env}
+    ports:
+      - target: 3000
+        published: "${SKYTRACE_PORT:-3000}"
+        host_ip: "${SKYTRACE_BIND:-127.0.0.1}"
+        protocol: tcp
+    volumes:
+      - skytrace-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  backup:
+    profiles: [ops]
+    image: ${SKYTRACE_IMAGE:?set exact SKYTRACE_IMAGE in .env}
+    user: "0:0"
+    restart: "no"
+    environment:
+      SKYTRACE_BACKUP_FILE: ${SKYTRACE_BACKUP_FILE:-skytrace-data.tar.gz}
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        target="/backup/$$SKYTRACE_BACKUP_FILE"
+        target_dir=$$(dirname -- "$$target")
+        target_name=$$(basename -- "$$target")
+        backup_root=$$(readlink -f -- /backup)
+        target_dir=$$(readlink -f -- "$$target_dir") || {
+          echo "backup directory does not exist: $$target_dir" >&2
+          exit 1
+        }
+        case "$$target_dir" in
+          "$$backup_root"|"$$backup_root"/*) ;;
+          *)
+            echo "backup path escapes SKYTRACE_BACKUP_DIR" >&2
+            exit 1
+            ;;
+        esac
+        case "$$target_name" in
+          .|..)
+            echo "backup path must name a file" >&2
+            exit 1
+            ;;
+        esac
+        target="$$target_dir/$$target_name"
+        [ ! -e "$$target" ] && [ ! -L "$$target" ] || {
+          echo "backup already exists: $$target" >&2
+          exit 1
+        }
+        temporary="$$target.tmp.$$"
+        trap 'rm -f -- "$$temporary"' EXIT HUP INT TERM
+        tar -C /data -czf "$$temporary" .
+        tar -tzf "$$temporary" >/dev/null
+        tar -tzf "$$temporary" | grep -Eq '^(\./)?skytrace\.db$$' || {
+          echo "backup does not contain skytrace.db" >&2
+          exit 1
+        }
+        chmod 0600 "$$temporary"
+        mv -- "$$temporary" "$$target"
+        trap - EXIT HUP INT TERM
+        echo "backup written to $$target"
+    volumes:
+      - skytrace-data:/data:ro
+      - type: bind
+        source: ${SKYTRACE_BACKUP_DIR:-./backups}
+        target: /backup
+        bind:
+          selinux: Z
+
+  restore:
+    profiles: [ops]
+    image: ${SKYTRACE_IMAGE:?set exact SKYTRACE_IMAGE in .env}
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        archive_path="/backup/$$SKYTRACE_RESTORE_FILE"
+        [ -f "$$archive_path" ] && [ ! -L "$$archive_path" ] || {
+          echo "restore archive must be a regular file: $$archive_path" >&2
+          exit 1
+        }
+        backup_root=$$(readlink -f -- /backup)
+        archive=$$(readlink -f -- "$$archive_path")
+        case "$$archive" in
+          "$$backup_root"/*) ;;
+          *)
+            echo "restore path escapes SKYTRACE_BACKUP_DIR" >&2
+            exit 1
+            ;;
+        esac
+        [ -z "$$(find /data -mindepth 1 -maxdepth 1 -print -quit)" ] || {
+          echo "restore volume is not empty; select a new SKYTRACE_VOLUME" >&2
+          exit 1
+        }
+        tar -tzf "$$archive" >/dev/null
+        if tar -tzf "$$archive" | grep -Eq '(^/|(^|/)\.\.(/|$$))'; then
+          echo "restore archive contains an unsafe path" >&2
+          exit 1
+        fi
+        if ! tar -tvzf "$$archive" | awk '
+          substr($$0, 1, 1) != "-" && substr($$0, 1, 1) != "d" { exit 1 }
+        '; then
+          echo "restore archive contains an unsafe entry type" >&2
+          exit 1
+        fi
+        tar -tzf "$$archive" | grep -Eq '^(\./)?skytrace\.db$$' || {
+          echo "restore archive does not contain skytrace.db" >&2
+          exit 1
+        }
+        cleanup() {
+          find /data -mindepth 1 -maxdepth 1 -exec rm -rf '{}' ';'
+        }
+        trap cleanup EXIT HUP INT TERM
+        tar -C /data -xzf "$$archive"
+        [ -f /data/skytrace.db ] && [ ! -L /data/skytrace.db ] || {
+          echo "restored database is invalid" >&2
+          exit 1
+        }
+        chown -R node:node /data
+        chmod -R go-rwx /data
+        trap - EXIT HUP INT TERM
+        echo "restore completed in $$SKYTRACE_VOLUME_LABEL"
+    environment:
+      SKYTRACE_RESTORE_FILE: ${SKYTRACE_RESTORE_FILE:-skytrace-data.tar.gz}
+      SKYTRACE_VOLUME_LABEL: ${SKYTRACE_VOLUME:-skytrace-data}
+    volumes:
+      - skytrace-data:/data
+      - type: bind
+        source: ${SKYTRACE_BACKUP_DIR:-./backups}
+        target: /backup
+        read_only: true
+        bind:
+          selinux: Z
+
+volumes:
+  skytrace-data:
+    name: ${SKYTRACE_VOLUME:-skytrace-data}
