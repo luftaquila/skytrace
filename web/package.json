@@ -1,0 +1,21 @@
+{
+  "name": "skytrace-web",
+  "version": "0.1.12",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --mode production && node ../scripts/notices.mjs --packages . --scope web --out dist/third-party-notices.json && node scripts/verify-precompressed.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.27.0",
+    "maplibre-gl": "6.0.0",
+    "uplot": "^1.6.32",
+    "vue": "^3.5.26"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "vite": "^8.1.5"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "skytrace",
+  "version": "0.1.12",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "node --watch src/index.mjs",
+    "start": "node src/index.mjs",
+    "agent": "node bin/skytrace-agent.mjs",
+    "build": "npm --prefix web run build",
+    "test": "node --test --test-timeout=10000 tests/**/*.test.mjs",
+    "test:coverage": "node --test --experimental-test-coverage --test-timeout=10000 --test-coverage-lines=90 --test-coverage-branches=75 --test-coverage-functions=85 '--test-coverage-include=src/**/*.mjs' --test-coverage-exclude=src/index.mjs --test-coverage-include=web/src/settings.js --test-coverage-include=web/src/aircraft-view.js tests/**/*.test.mjs",
+    "pretest:e2e": "npm run build",
+    "test:e2e": "playwright test",
+    "check": "npm run test:coverage && npm run test:e2e"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.2",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.0"
+  }
+}
