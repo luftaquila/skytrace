@@ -188,7 +188,10 @@ fi
 compose_cmd --profile ops run --rm -e SKYTRACE_BACKUP_FILE="$backup_file" backup
 compose_cmd start skytrace
 wait_health || die "Skytrace did not recover after backup"
-tar -tzf "$work_directory/backups/$backup_file" >/dev/null
+compose_cmd --profile ops run --rm \
+  -e SKYTRACE_RESTORE_FILE="$backup_file" \
+  --entrypoint /bin/sh \
+  restore -c "tar -tzf /backup/$backup_file >/dev/null"
 
 echo "restoring through the same Compose file to a new volume"
 compose_cmd stop skytrace

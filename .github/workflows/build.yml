@@ -79,7 +79,14 @@ jobs:
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: 24
+      - name: Install the native Podman Compose provider
+        run: |
+          python3 -m venv "$RUNNER_TEMP/podman-compose"
+          "$RUNNER_TEMP/podman-compose/bin/pip" install podman-compose==1.6.0
+          "$RUNNER_TEMP/podman-compose/bin/podman-compose" version
       - name: Exercise the Compose contract on rootless Podman
+        env:
+          PODMAN_COMPOSE_PROVIDER: ${{ runner.temp }}/podman-compose/bin/podman-compose
         run: |
           test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
           scripts/smoke-compose.sh podman
