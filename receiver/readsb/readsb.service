@@ -1,0 +1,29 @@
+[Unit]
+Description=readsb ADS-B decoder (skytrace receiver)
+Documentation=https://github.com/wiedehopf/readsb
+Wants=network.target
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/readsb
+ExecStart=/usr/local/bin/readsb $RECEIVER_OPTIONS $DECODER_OPTIONS $JSON_OPTIONS $NET_OPTIONS --quiet
+User=readsb
+RuntimeDirectory=readsb
+RuntimeDirectoryMode=0755
+Restart=always
+RestartSec=5
+Nice=-5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/readsb
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
