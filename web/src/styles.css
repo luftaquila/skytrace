@@ -1,0 +1,2444 @@
+:root {
+  color-scheme: dark;
+  --bg: #0d1011;
+  --panel: #141719;
+  --panel-strong: #101315;
+  --surface: #1b2023;
+  --surface-2: #22282c;
+  --border: #30383d;
+  --border-soft: #273035;
+  --text: #eef5f4;
+  --muted: #96a3a4;
+  --accent: #48e0d1;
+  --accent-2: #f8d36c;
+  --warning: #f59e0b;
+  --danger: #fb7185;
+  /* Tactical chrome: one mono stack for every readout, two accent hairline weights, and one
+     translucent console glass shared by every surface floating over the scene. */
+  --mono: ui-monospace, "SF Mono", Menlo, "Roboto Mono", Consolas, monospace;
+  --rule: rgb(72 224 209 / 0.16);
+  --rule-strong: rgb(72 224 209 / 0.32);
+  --glass: linear-gradient(180deg, rgb(8 15 17 / 0.92), rgb(5 10 12 / 0.87));
+  /* One type ramp for the whole readout. The sizes are deliberately generous: this is a display
+     to be read at a glance across a room, not a settings dialog. */
+  --fs-tag: 12px;    /* uppercase micro labels */
+  --fs-micro: 13px;  /* secondary metadata */
+  --fs-small: 14px;  /* controls, notes */
+  --fs-body: 15px;   /* primary text */
+  --fs-value: 17px;  /* numeric readouts */
+  --fs-title: 19px;  /* block identities */
+  /* Phone station-tab row height; the sheets and the map chrome stack above it. */
+  --tabs-h: 54px;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  /* Weight synthesis stays ALLOWED: this UI is nearly all 600-800 mono, and on devices whose
+     monospace fallback ships only a regular weight (common on Android), `font-synthesis: none`
+     rendered the entire readout thin. Italic/small-caps synthesis stays off. */
+  font-synthesis: weight;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  /* Mobile browsers must not "boost" text: inflated labels overflowed the data blocks clean off
+     the screen on a real phone. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+/* Keyboard focus has to be visible on a dark, low-chrome UI — the browser default outline all but
+   disappears against these panels. Pointer clicks stay unringed. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* --- Shell ------------------------------------------------------------------------------------
+   One fixed command bar over a full-bleed map. Every console (station) floats OVER the scene, so
+   the map never gives up width to a layout column and toggling a console never reflows it. */
+.shell {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* --- Command bar ------------------------------------------------------------------------------
+   The permanent status board: identity + link LED, segmented live counts, Zulu clock, station
+   toggles. Everything on it is glanceable state; everything actionable lives in a station. */
+.cbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 46px;
+  padding: env(safe-area-inset-top, 0px) 14px 0;
+  border-bottom: 1px solid var(--rule-strong);
+  background:
+    repeating-linear-gradient(0deg, rgb(72 224 209 / 0.03) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, #0a1214, #060c0e);
+  font: 600 var(--fs-small)/1 var(--mono);
+  color: #9fe8df;
+  user-select: none;
+}
+
+/* Condition red: an active emergency or proximity pair recolours the board's live edge. */
+.cbar.alarm {
+  border-bottom-color: rgb(251 113 133 / 0.6);
+  background:
+    repeating-linear-gradient(0deg, rgb(251 113 133 / 0.03) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, #140b0e, #0b0608);
+}
+
+.cbar-ident {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.led {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 8px rgb(245 158 11 / 0.9);
+}
+
+.led.ok {
+  background: var(--accent);
+  box-shadow: 0 0 8px rgb(72 224 209 / 0.9);
+}
+
+.led.fail {
+  background: var(--danger);
+  box-shadow: 0 0 8px rgb(251 113 133 / 0.9);
+}
+
+.led.wait {
+  animation: led-blink 1s steps(1, end) infinite;
+}
+
+@keyframes led-blink {
+  50% { opacity: 0.25; }
+}
+
+.cbar-mark {
+  font-size: var(--fs-value);
+  font-weight: 800;
+  letter-spacing: 0.3em;
+  color: #eafffb;
+  text-shadow: 0 0 16px rgb(72 224 209 / 0.45);
+}
+
+/* Repo link: rides with the wordmark on both layouts. The wordmark's trailing letter-spacing is
+   pulled back so the icon sits at the ident cluster's own gap, and the padding buys a tap target
+   the 16px mark alone would not give. `pointer-events` is explicit because the phone bar is
+   transparent to the pointer so the map keeps the corner. */
+.cbar-repo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  margin-left: -9px;
+  padding: 4px;
+  color: var(--muted);
+  pointer-events: auto;
+}
+
+.cbar-repo:hover {
+  color: var(--accent);
+}
+
+/* Desktop alert chips sit right-aligned on the bar, just left of the console toggles; the phone
+   uses the centred condition strip instead. */
+.cbar-alerts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-right: 8px;
+}
+
+.cbar-spacer {
+  flex: 1 1 auto;
+}
+
+/* Station toggles: lit while that console is up. TGT arms (dot) once a target is selected. */
+.cbar-stations {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.cbar-stations button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: 700 var(--fs-micro)/1 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.cbar-stations button:hover:not(:disabled) {
+  border-color: var(--rule-strong);
+  color: var(--text);
+}
+
+.cbar-stations button.open {
+  border-color: var(--rule-strong);
+  background: rgb(72 224 209 / 0.14);
+  color: var(--accent);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.cbar-stations button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.cbar-stations button.avail:not(.open)::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 5px;
+  height: 5px;
+  background: var(--accent);
+  box-shadow: 0 0 6px rgb(72 224 209 / 0.9);
+}
+
+/* --- Map stage --------------------------------------------------------------------------------- */
+.map-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.map {
+  width: 100%;
+  height: 100%;
+  background: #11181a;
+}
+
+/* --- Condition strip (phone) --------------------------------------------------------------------
+   Alert chips centred under the bar; only rendered while an alert is live. A desktop shows the
+   same chips on the command bar itself, so the strip exists only in the phone layout. */
+.alert-strip {
+  display: none;
+}
+
+.alert-chip {
+  padding: 4px 9px;
+  border-left: 2px solid currentcolor;
+  font: 800 var(--fs-micro)/1.2 var(--mono);
+  letter-spacing: 0.12em;
+  backdrop-filter: blur(8px);
+}
+
+/* A danger chip pulses its fill, never its opacity: the label must stay readable in every
+   frame of the animation. */
+.alert-chip.danger {
+  background: rgb(251 113 133 / 0.22);
+  color: #ffd9df;
+  border-left-color: var(--danger);
+  animation: alert-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes alert-pulse {
+  50% {
+    background: rgb(251 113 133 / 0.5);
+    box-shadow: 0 0 14px rgb(251 113 133 / 0.45);
+  }
+}
+
+.alert-chip.warning {
+  background: rgb(245 158 11 / 0.22);
+  color: #ffe6b8;
+  border-left-color: var(--warning);
+}
+
+.alert-chip b {
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Stations -----------------------------------------------------------------------------------
+   A station is a framed glass console floating over the scene: notched corner, hairline border,
+   scanlined header, independently scrolling body. TARGET docks left, TRAFFIC right, SYSTEMS is a
+   wider right-side console layered above TRAFFIC while it is up. */
+.station {
+  position: absolute;
+  top: 12px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100% - 24px);
+  border: 1px solid var(--rule-strong);
+  background: var(--glass);
+  backdrop-filter: blur(12px);
+  box-shadow: inset 0 0 0 1px rgb(5 10 11 / 0.55);
+}
+
+.station-target {
+  left: 12px;
+  width: 430px;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+}
+
+.station-traffic {
+  right: 12px;
+  width: 340px;
+  /* However long the list, it stops above the corner chrome (compass/locate + altitude legend)
+     instead of running underneath it. */
+  max-height: calc(100% - 246px);
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
+}
+
+.station-systems {
+  right: 12px;
+  z-index: 40;
+  width: 400px;
+  /* One column, scrolled — and like TRAFFIC, it stops above the corner chrome. */
+  max-height: calc(100% - 246px);
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
+}
+
+.station-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--rule);
+  background:
+    repeating-linear-gradient(0deg, rgb(72 224 209 / 0.05) 0 1px, transparent 1px 3px),
+    rgb(5 10 11 / 0.6);
+  font: 700 var(--fs-micro)/1 var(--mono);
+}
+
+/* Corner bracket on the head — console framing, not a rounded card. */
+.station-head::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--rule-strong);
+  border-right: 0;
+  border-bottom: 0;
+  pointer-events: none;
+}
+
+.station-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  color: var(--accent);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.station-tag::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  box-shadow: 0 0 6px rgb(72 224 209 / 0.7);
+}
+
+.station-id {
+  flex: 0 0 auto;
+  font-size: var(--fs-value);
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  color: var(--text);
+}
+
+.station-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.05em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.station-count {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.station-spacer {
+  flex: 1 1 auto;
+}
+
+/* Full-width identity line under the TARGET head — never ellipsised next to the callsign. */
+.station-sub {
+  flex: 0 0 auto;
+  padding: 6px 12px 7px;
+  border-bottom: 1px solid var(--rule);
+  color: var(--muted);
+  font: 600 var(--fs-micro)/1.3 var(--mono);
+  letter-spacing: 0.05em;
+}
+
+.station-count i {
+  font-style: normal;
+  color: var(--muted);
+}
+
+.station-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.station-act:hover {
+  border-color: var(--rule-strong);
+  color: var(--text);
+}
+
+.station-act.on {
+  border-color: var(--rule-strong);
+  color: var(--accent);
+}
+
+.station-act.on svg {
+  fill: currentcolor;
+}
+
+.station-select {
+  margin-left: auto;
+  height: 28px;
+  padding: 0 4px;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: 700 var(--fs-tag)/1.2 var(--mono);
+  letter-spacing: 0.06em;
+}
+
+/* Search strip (TRAFFIC): a flush console line, not a floating field. */
+.station-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid var(--rule);
+  background: rgb(5 10 11 / 0.4);
+  color: var(--accent);
+}
+
+.station-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: 600 var(--fs-small)/1 var(--mono);
+  letter-spacing: 0.07em;
+}
+
+.station-search input::placeholder {
+  color: #5f6e70;
+  letter-spacing: 0.11em;
+}
+
+.station-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.station-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.station-search-clear:hover {
+  color: var(--text);
+}
+
+.station-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.station-body-flush {
+  padding: 0;
+}
+
+/* SETTINGS body: one column, one scroll — the cards stack in reading order. */
+.console-columns {
+  padding: 10px;
+}
+
+.console-columns .cblock {
+  margin: 0 0 10px;
+}
+
+.block-empty {
+  padding: 20px 12px;
+  color: var(--muted);
+  font: 600 var(--fs-micro)/1.5 var(--mono);
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
+/* --- TARGET readout ------------------------------------------------------------------------- */
+.target-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  border: 1px solid var(--rule);
+  background: var(--rule);
+}
+
+.target-grid > div {
+  min-width: 0;
+  padding: 5px 8px 6px;
+  background: rgb(5 10 11 / 0.55);
+}
+
+.target-grid dt {
+  color: var(--muted);
+  font: 700 var(--fs-tag)/1.2 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.target-grid dd {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 700 var(--fs-body)/1.2 var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Three composite values in one cell need the full row, or they ellipsise at 2-column width. */
+.target-wide {
+  grid-column: 1 / -1;
+}
+
+/* Live status tiles inside the Settings console. No bottom margin: whatever follows (the source
+   chips) brings its own padding, keeping the card's vertical rhythm even. */
+.status-grid {
+  margin: 10px 10px 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.cblock > .status-grid:last-child {
+  margin-bottom: 10px;
+}
+
+/* A metric cell whose value can be graphed: click toggles it into the history chart. */
+.target-metric {
+  cursor: pointer;
+}
+
+.target-metric:hover {
+  background: rgb(72 224 209 / 0.12);
+}
+
+.target-metric.metric-active {
+  background: rgb(248 211 108 / 0.13);
+  box-shadow: inset 2px 0 0 var(--accent-2);
+}
+
+.target-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 7px 10px;
+  font: 800 var(--fs-small)/1.2 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.target-alert.danger {
+  border-left: 3px solid var(--danger);
+  background: rgb(251 113 133 / 0.16);
+  color: #ffd9df;
+}
+
+.target-alert.warning {
+  border-left: 3px solid var(--warning);
+  background: rgb(245 158 11 / 0.16);
+  color: #ffe6b8;
+}
+
+.target-alert-code {
+  margin-left: auto;
+  padding: 1px 6px;
+  background: rgb(0 0 0 / 0.35);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- TRAFFIC rows -------------------------------------------------------------------------- */
+.target-row {
+  display: grid;
+  grid-template-columns: 3px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 5px 10px 5px 0;
+  border: 0;
+  border-bottom: 1px solid rgb(72 224 209 / 0.08);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Full-height altitude colour bar — the same scale as the map legend and the 3D targets. */
+.row-bar {
+  align-self: stretch;
+  width: 3px;
+}
+
+.row-id,
+.row-num {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.row-num {
+  align-items: flex-end;
+}
+
+.row-id strong,
+.row-num strong {
+  font: 700 var(--fs-body)/1.1 var(--mono);
+  letter-spacing: 0.08em;
+}
+
+.row-num strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.row-id small,
+.row-num small {
+  color: var(--muted);
+  font: 500 var(--fs-micro)/1.1 var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.row-trend {
+  margin-right: 3px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.row-trend.up { color: #34d399; }
+.row-trend.down { color: #fb7185; }
+.row-trend.level { color: #8aa0a0; }
+
+.target-row strong,
+.target-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-row:hover,
+.target-row.hovered {
+  background: rgb(72 224 209 / 0.07);
+}
+
+/* Selection uses `outline`, not box-shadow: an alerting row already owns its box-shadow, and a
+   selected emergency target must still read as selected. */
+.target-row.active {
+  background: rgb(72 224 209 / 0.13);
+  outline: 1px solid rgb(72 224 209 / 0.55);
+  outline-offset: -1px;
+}
+
+/* An alert tints the whole row and outlines it, rather than replacing the altitude colour bar:
+   both facts matter at once. Warning-level alerts (IDENT/ALERT) stay amber, not emergency red. */
+.target-row.is-alert {
+  background: rgb(251 113 133 / 0.15);
+  box-shadow: inset 0 0 0 1px rgb(251 113 133 / 0.5);
+}
+
+.target-row.is-alert-warning {
+  background: rgb(245 158 11 / 0.15);
+  box-shadow: inset 0 0 0 1px rgb(245 158 11 / 0.5);
+}
+
+/* Coasting (stale) rows visually match their ghosted map target. */
+.target-row.coasting {
+  opacity: 0.56;
+  filter: saturate(0.5);
+}
+
+/* --- Console blocks (receivers / feeds / filters / display) --------------------------------- */
+.cblock {
+  border: 1px solid var(--rule);
+  background: rgb(9 16 18 / 0.5);
+}
+
+/* Every card folds from its header, so one long list (receivers) can't bury the cards below. */
+.cblock > header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--rule);
+  background: rgb(5 10 11 / 0.6);
+  color: var(--accent);
+  font: 700 var(--fs-micro)/1 var(--mono);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cblock > header small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: var(--fs-tag);
+  letter-spacing: 0.08em;
+}
+
+/* Import failure floats OVER the console (position: absolute against .station) — a report that
+   must be seen, without ever reshaping the card it reports on. */
+.import-toast {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  left: 10px;
+  z-index: 5;
+  padding: 8px 10px;
+  border: 1px solid rgb(248 113 113 / 0.55);
+  background: rgb(26 7 9 / 0.94);
+  color: #fda4af;
+  font: 600 var(--fs-micro)/1.4 var(--mono);
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+
+.cblock-caret {
+  flex: none;
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.16s ease;
+}
+
+/* When a right-side header element already claimed the auto margin, the caret just follows it. */
+.cblock > header small + .cblock-caret,
+.cblock > header .cblock-reset + .cblock-caret {
+  margin-left: 0;
+}
+
+.cblock.collapsed > header {
+  border-bottom: 0;
+}
+
+.cblock.collapsed > :not(header) {
+  display: none;
+}
+
+.cblock.collapsed .cblock-caret {
+  transform: rotate(-90deg);
+}
+
+.cblock-reset {
+  margin-left: auto;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--accent-2);
+  cursor: pointer;
+  font: 700 var(--fs-tag)/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.cblock-reset:hover {
+  border-color: var(--accent-2);
+}
+
+.cblock .block-empty {
+  padding: 12px;
+}
+
+.receiver-light {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 0 4px rgb(245 158 11 / 0.16);
+}
+
+.receiver-light.on {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgb(45 212 191 / 0.16);
+}
+
+/* One receiver, one row: link state, traffic, coverage size, centre-on-reception and the dome
+   toggle. Everything about a receiver is answered without leaving the row. */
+.rx-row {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 5px 8px 5px 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.rx-row.off .rx-id strong {
+  color: var(--muted);
+}
+
+.rx-id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rx-id strong {
+  overflow: hidden;
+  color: var(--text);
+  font: 700 var(--fs-small)/1.2 var(--mono);
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rx-id small {
+  overflow: hidden;
+  color: var(--muted);
+  font: 500 var(--fs-micro)/1.2 var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rx-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.rx-act:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Lit = this receiver's dome is currently drawn. */
+.rx-act.on {
+  border-color: var(--rule-strong);
+  background: rgb(72 224 209 / 0.14);
+  color: var(--accent);
+}
+
+.rx-act:disabled {
+  opacity: 0.34;
+  cursor: default;
+}
+
+.control-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 9px 10px 0;
+}
+
+/* An enable checkbox sits ABOVE the inputs it gates; the pair keeps a single rhythm. */
+.toggle-row + .control-grid {
+  padding-top: 0;
+}
+
+/* Gated-off controls must LOOK off, not merely refuse input. */
+.control-grid input:disabled,
+.control-grid select:disabled {
+  opacity: 0.35;
+  border-color: var(--border-soft);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.unit-input:has(input:disabled) i {
+  opacity: 0.35;
+}
+
+.toggle-row label:has(input:disabled) {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Cards and sub-sections that end on a grid still close with even padding. */
+.cblock > .control-grid:last-child,
+.cblock > .slider-list:last-child {
+  padding-bottom: 10px;
+}
+
+/* Sub-section divider inside a settings card: micro label + hairline. */
+.csub {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 10px 0;
+  color: var(--accent);
+  font: 700 var(--fs-tag)/1 var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+
+.csub::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--rule);
+}
+
+/* Two sliders per row: name left, its value right-aligned on the same line, track below. */
+.slider-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px 10px;
+  padding: 9px 10px 0;
+}
+
+/* An odd leftover slider stretches across the row instead of leaving a hole — which also gives
+   the longest label (COVERAGE DOME OPACITY) the width it needs. */
+.slider-list .slider-row:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
+/* Two sliders share a row. The label wears the same voice as the checkbox rows (sentence case,
+   same weight/size/colour) so the Display card reads as one control family. */
+.slider-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  color: #cfdedc;
+  font: 600 var(--fs-micro)/1.2 var(--mono);
+  letter-spacing: 0.06em;
+}
+
+.slider-row > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.slider-row b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+/* Custom track and a deliberately small thumb: the native accent thumb read oversized against
+   the thin console controls. The pointer cursor and the hover/drag halo are what make the row
+   read as interactive at all once the native widget styling is gone. */
+.slider-row input[type="range"] {
+  width: 100%;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--accent);
+  appearance: none;
+  cursor: pointer;
+}
+
+.slider-row input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--rule);
+}
+
+.slider-row input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -4px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  transition: box-shadow 0.15s ease;
+}
+
+.slider-row input[type="range"]:hover::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px rgb(72 224 209 / 0.18);
+}
+
+.slider-row input[type="range"]:active::-webkit-slider-thumb {
+  box-shadow: 0 0 0 6px rgb(72 224 209 / 0.28);
+}
+
+.slider-row input[type="range"]::-moz-range-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--rule);
+}
+
+.slider-row input[type="range"]::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  transition: box-shadow 0.15s ease;
+}
+
+.slider-row input[type="range"]:hover::-moz-range-thumb {
+  box-shadow: 0 0 0 4px rgb(72 224 209 / 0.18);
+}
+
+.slider-row input[type="range"]:active::-moz-range-thumb {
+  box-shadow: 0 0 0 6px rgb(72 224 209 / 0.28);
+}
+
+.control-grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* The unit pickers are one short symbol each, so all four ride in a single row. The doubled
+   selector keeps the phone media block (which widens .control-grid to 2 columns) from
+   splitting them. */
+.control-grid.control-grid-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.cov-actions {
+  display: flex;
+  gap: 6px;
+  padding: 7px 10px;
+}
+
+.cov-actions button {
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: 700 var(--fs-tag)/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.cov-actions button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* The active preset reads as selected, not as just another button. */
+.cov-actions button.active {
+  border-color: var(--rule-strong);
+  background: rgb(72 224 209 / 0.14);
+  color: var(--accent);
+}
+
+.control-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font: 700 var(--fs-tag)/1.2 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.control-grid input,
+.control-grid select {
+  width: 100%;
+  height: 30px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: 600 var(--fs-small)/1 var(--mono);
+}
+
+.control-grid input[type="range"] {
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--accent);
+}
+
+/* No spinner arrows anywhere: they are unusable at this size and clutter the readout. */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* A numeric input with its unit rendered inside, right-aligned — the label stays clean. */
+.unit-input {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+.unit-input input {
+  padding-right: 36px;
+}
+
+.unit-input i {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font: 700 var(--fs-tag)/1 var(--mono);
+  font-style: normal;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+}
+
+.toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 9px 10px 10px;
+  color: #cfdedc;
+  font: 600 var(--fs-micro)/1 var(--mono);
+  letter-spacing: 0.06em;
+}
+
+.toggle-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+/* A toggle that always owns its whole line, wherever the row would otherwise fit two. */
+.toggle-row .toggle-full {
+  flex-basis: 100%;
+}
+
+.toggle-row input {
+  accent-color: var(--accent);
+}
+
+.select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font: 700 var(--fs-tag)/1.2 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.select-row select {
+  height: 26px;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: 600 var(--fs-small)/1 var(--mono);
+}
+
+.source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 9px 10px 10px;
+}
+
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  /* Wider than a mono space, so "Mode S 3" reads as label|count, not "Mode" + "S 3". */
+  gap: 9px;
+  padding: 2px 8px;
+  border: 1px solid var(--rule);
+  background: var(--panel-strong);
+  color: var(--muted);
+  font: 600 var(--fs-micro)/1.5 var(--mono);
+  letter-spacing: 0.06em;
+}
+
+.source-chip b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- History graph + playback (inside the TARGET station) ------------------------------------ */
+.history-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.history-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding-top: 11px;
+  margin-top: 11px;
+  border-top: 1px solid var(--rule);
+}
+
+.history-chart-head,
+.history-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.history-chart-head {
+  justify-content: space-between;
+  color: var(--muted);
+  font: 700 var(--fs-tag)/1.2 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.history-series {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.history-series button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--series-color) 55%, transparent);
+  background: var(--panel-strong);
+  color: var(--text);
+  cursor: pointer;
+  font: 700 var(--fs-tag)/1 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.history-series button::before {
+  width: 7px;
+  height: 7px;
+  background: var(--series-color);
+  content: "";
+}
+
+/* The plot reads as an instrument panel: hairline frame, corner brackets, no rounded card. */
+.history-chart-wrap {
+  position: relative;
+  min-height: 232px;
+  border: 1px solid var(--rule);
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgb(72 224 209 / 0.05), transparent 70%),
+    var(--panel-strong);
+  overflow: hidden;
+}
+
+.history-chart-wrap::before,
+.history-chart-wrap::after {
+  content: "";
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--rule-strong);
+  pointer-events: none;
+}
+
+.history-chart-wrap::before {
+  top: 3px;
+  left: 3px;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.history-chart-wrap::after {
+  right: 3px;
+  bottom: 3px;
+  border-left: 0;
+  border-top: 0;
+}
+
+.history-chart {
+  min-height: 232px;
+}
+
+.history-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  color: var(--muted);
+  font: 600 var(--fs-micro)/1.4 var(--mono);
+  letter-spacing: 0.1em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.history-chart .uplot {
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+/* Tactical crosshair instead of the default grey hairline. */
+.history-chart .u-cursor-x {
+  border-right: 1px dashed rgb(72 224 209 / 0.7);
+}
+
+.history-chart .u-cursor-y {
+  display: none;
+}
+
+/* Cursor tooltip riding the plot: one colour-keyed row per series. The strip under the chart
+   carries only the centred timestamp. */
+/* Two strict grid columns — labels left, values right — so mixed label/value widths cannot make
+   the alignment look ragged. */
+.chart-tip {
+  position: absolute;
+  top: 8px;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: max-content max-content;
+  gap: 3px 16px;
+  padding: 6px 9px;
+  border: 1px solid var(--rule-strong);
+  background: rgb(5 10 12 / 0.92);
+  pointer-events: none;
+  font: 600 var(--fs-micro)/1.25 var(--mono);
+  letter-spacing: 0.04em;
+}
+
+/* The tip extends away from the nearer plot edge, so it can never clip off either side. */
+.chart-tip.side-right {
+  transform: translateX(14px);
+}
+
+.chart-tip.side-left {
+  transform: translateX(calc(-100% - 14px));
+}
+
+.chart-tip-row {
+  display: contents;
+}
+
+.chart-tip-row i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 7px;
+  vertical-align: 0;
+}
+
+.chart-tip-row span {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: var(--fs-tag);
+  letter-spacing: 0.08em;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.chart-tip-row b {
+  justify-self: end;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chart-time {
+  color: var(--muted);
+  font: 600 var(--fs-micro)/1.2 var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+/* Playback scrub bar: a hairline track with an accent fill and a square slug, instead of the
+   browser's rounded pill. */
+.history-panel input[type="range"] {
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  appearance: none;
+  cursor: pointer;
+}
+
+.history-panel input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border: 1px solid var(--rule);
+  background: var(--panel-strong);
+}
+
+.history-panel input[type="range"]::-moz-range-track {
+  height: 4px;
+  border: 1px solid var(--rule);
+  background: var(--panel-strong);
+}
+
+.history-panel input[type="range"]::-moz-range-progress {
+  height: 4px;
+  background: var(--accent);
+}
+
+.history-panel input[type="range"]::-webkit-slider-thumb {
+  width: 8px;
+  height: 16px;
+  margin-top: -7px;
+  border: 0;
+  border-radius: 0;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgb(72 224 209 / 0.6);
+  appearance: none;
+}
+
+.history-panel input[type="range"]::-moz-range-thumb {
+  width: 8px;
+  height: 16px;
+  border: 0;
+  border-radius: 0;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgb(72 224 209 / 0.6);
+}
+
+.history-meta {
+  justify-content: space-between;
+  color: var(--muted);
+  font: 600 var(--fs-micro)/1.3 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.history-meta a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent-2);
+  text-decoration: none;
+}
+
+.chevron {
+  color: var(--muted);
+  transition: transform 140ms ease;
+}
+
+.chevron.open {
+  transform: rotate(180deg);
+}
+
+.tracklog {
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+
+.tracklog-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: 700 var(--fs-micro)/1.2 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.tracklog-toggle small {
+  color: var(--muted);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+}
+
+.tracklog-body {
+  margin-top: 8px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  background: var(--panel-strong);
+}
+
+.tracklog-body table {
+  width: 100%;
+  border-collapse: collapse;
+  font: 600 var(--fs-micro)/1.3 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tracklog-body thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 5px 7px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--fs-tag);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.tracklog-body td {
+  padding: 4px 7px;
+  border-top: 1px solid var(--border-soft);
+  white-space: nowrap;
+}
+
+.tracklog-body tbody tr {
+  cursor: pointer;
+}
+
+.tracklog-body tbody tr:hover {
+  background: var(--surface-2);
+}
+
+.tracklog-body tbody tr.active {
+  background: rgb(248 211 108 / 0.14);
+}
+
+.tracklog-empty,
+.tracklog-more {
+  padding: 8px;
+  color: var(--muted);
+  font: 600 var(--fs-micro)/1.4 var(--mono);
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+/* --- Map chrome (bottom-right): track/locate + the altitude legend ---------------------------
+   Pinned to the very corner, ALWAYS — it layers above the consoles rather than dodging them. */
+.map-chrome {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  pointer-events: none;
+}
+
+/* Compass + locate, side by side above the legend. */
+.map-chrome-buttons {
+  display: flex;
+  gap: 10px;
+}
+
+/* --- Map credits (bottom-left): the ⓘ and its popover ----------------------------------------
+   Mirrors .map-chrome on the opposite corner, and layers above the consoles the same way. The
+   popover grows upward so it never runs off the bottom of the map. */
+.map-credits {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+/* No box, no background — a bare glyph like the compass. The drop shadow is what keeps it legible
+   where the satellite imagery underneath runs bright. The hit area stays a full touch target even
+   though only the glyph is drawn. */
+.map-credits-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  pointer-events: auto;
+  filter: drop-shadow(0 2px 4px rgb(0 0 0 / 0.75));
+}
+
+.map-credits-button:hover,
+.map-credits-button.active {
+  color: var(--accent);
+}
+
+.credits-popover {
+  /* Near-opaque like the legend: this may layer over a console's corner and must stay readable. */
+  background: rgb(5 10 12 / 0.94);
+  border: 1px solid var(--rule-strong);
+  backdrop-filter: blur(10px);
+  padding: 10px 12px;
+  /* Narrow on purpose: this is a corner note, not a panel. Long credits wrap. */
+  width: max-content;
+  max-width: min(22rem, calc(100vw - 24px));
+  max-height: 60vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.credits-row {
+  display: flex;
+  /* The column has to clear the longest role ("AIRFIELDS") with air left over, not touch it. */
+  gap: 14px;
+}
+
+.credits-row + .credits-row {
+  margin-top: 6px;
+}
+
+.credits-role {
+  flex: 0 0 auto;
+  width: 5.25rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.credits-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.credits-text a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--rule-strong);
+}
+
+.credits-text a:hover {
+  text-decoration-color: currentColor;
+}
+
+/* Licence text needs more measure than a corner note does, so the popover widens for it — but only
+   while the section is open, so the collapsed state stays a note. */
+.credits-popover:has(.credits-licenses) {
+  max-width: min(34rem, calc(100vw - 24px));
+}
+
+.credits-licenses-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 8px 0 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.credits-licenses-toggle:hover {
+  color: var(--accent);
+}
+
+.credits-licenses-toggle svg {
+  flex: none;
+  transition: transform 0.16s ease;
+}
+
+.credits-licenses-toggle svg.turned {
+  transform: rotate(-180deg);
+}
+
+/* The package count sits where a header's right-side metadata would. */
+.credits-licenses-toggle i {
+  margin-left: auto;
+  font-style: normal;
+}
+
+.credits-licenses {
+  margin-top: 8px;
+  /* Its own scroller: 116 packages must not push the credits above it out of reach. */
+  max-height: 38vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.credits-note {
+  margin: 0;
+  color: var(--muted);
+}
+
+.credits-pkg summary {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 3px 0;
+  cursor: pointer;
+}
+
+.credits-pkg summary::marker {
+  color: var(--muted);
+}
+
+.credits-pkg-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.credits-pkg-meta {
+  margin-left: auto;
+  flex: none;
+  color: var(--muted);
+}
+
+.credits-pkg pre {
+  margin: 4px 0 10px;
+  padding: 8px 10px;
+  border-left: 1px solid var(--rule);
+  color: var(--muted);
+  font: inherit;
+  /* Licence files hard-wrap at their own width; re-wrap them to the panel instead of scrolling. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--rule-strong);
+  background: rgb(5 10 12 / 0.85);
+  color: var(--text);
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+}
+
+/* A gimbal compass: no box, no background — a 3D ring with real thickness (stacked Z layers)
+   leaning with the view pitch, the rose spinning inside it. */
+.map-compass-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  pointer-events: auto;
+  filter: drop-shadow(0 2px 4px rgb(0 0 0 / 0.75));
+  /* Gentle perspective: enough for the ball's rotateX to read as depth without distorting it. */
+  perspective: 150px;
+}
+
+/* One rigid wireframe ball: equator + two meridians + the rose, all in a single 3D frame that
+   tilts with the pitch and spins with the bearing as one body. */
+.compass-ball {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  transform-style: preserve-3d;
+  will-change: transform;
+  transition: transform 120ms linear;
+}
+
+.compass-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.4px solid rgb(238 245 244 / 0.85);
+}
+
+/* The meridians stand through the zenith at ±45° to the needle, at the SAME weight as the
+   equator: a hoop exactly edge-on reads as a bare line, so the X-cross keeps the cage visible
+   while the whole ball turns. */
+.compass-ring.ring-meridian {
+  transform: rotateZ(45deg) rotateX(90deg);
+}
+
+.compass-ring.ring-meridian-2 {
+  transform: rotateZ(-45deg) rotateX(90deg);
+}
+
+.icon-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.icon-button.active {
+  border-color: var(--accent);
+  background: rgb(72 224 209 / 0.18);
+  color: var(--accent);
+}
+
+.map-track-button {
+  pointer-events: auto;
+}
+
+.map-legend {
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  /* Near-opaque: the legend may layer over a console's corner and must stay readable. */
+  background: rgb(5 10 12 / 0.94);
+  color: var(--text);
+  font-family: var(--mono);
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+}
+
+.legend-title {
+  margin-bottom: 6px;
+  color: var(--accent);
+  font-size: var(--fs-tag);
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.legend-body {
+  display: flex;
+  gap: 8px;
+  height: 92px;
+}
+
+.legend-bar {
+  width: 8px;
+  height: 100%;
+  border: 1px solid rgb(0 0 0 / 0.4);
+}
+
+.legend-ticks {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: var(--fs-tag);
+  font-variant-numeric: tabular-nums;
+}
+
+.legend-ground {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: var(--fs-tag);
+  letter-spacing: 0.08em;
+}
+
+.legend-ground-swatch {
+  width: 9px;
+  height: 9px;
+  border: 1px solid rgb(0 0 0 / 0.4);
+}
+
+/* --- Phone station tabs -------------------------------------------------------------------- */
+.station-tabs {
+  display: none;
+}
+
+/* --- 3D data blocks and popovers (map objects) ----------------------------------------------- */
+/* Keep the compact update age right-aligned immediately before the pin instead of spending
+   horizontal space on the data row below. */
+.tt-top-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.tt-top-actions .tt-age {
+  color: var(--muted);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Altitude token: keeps the trend arrow vertically centred on the altitude digits. */
+.tt-alt { display: inline-flex; align-items: center; }
+/* Vertical-trend arrow: green climbing, red descending, muted level. */
+.tt-trend { font-weight: 900; margin-right: 0.4em; line-height: 1; }
+.tt-trend.up { color: #34d399; }
+.tt-trend.down { color: #fb7185; }
+.tt-trend.level { color: #8aa0a0; }
+
+/* Small inline pin toggle in a popover's top-right; solid when pinned. */
+.tt-pin {
+  display: inline-flex;
+  align-items: center;
+  pointer-events: auto;
+  cursor: pointer;
+  color: var(--muted);
+  opacity: 0.7;
+}
+.tt-pin:hover { opacity: 1; color: var(--accent); }
+.tt-pin.on { color: var(--accent); opacity: 1; }
+.tt-pin.on svg { fill: var(--accent); }
+
+/* Popover close: dismisses just this label; selection, tracking and the target itself survive. */
+.tt-close {
+  display: inline-flex;
+  align-items: center;
+  pointer-events: auto;
+  cursor: pointer;
+  color: var(--muted);
+  opacity: 0.7;
+}
+.tt-close:hover { opacity: 1; color: var(--text); }
+
+.airfield-tt .af-tt-name {
+  font-weight: 700;
+}
+
+.airfield-tt .af-tt-meta {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.airfield-tt .af-tt-runways {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgb(238 245 244 / 0.12);
+  font-variant-numeric: tabular-nums;
+}
+
+.airfield-tt .af-tt-runway-title {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.airfield-tt .af-tt-runway {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.airfield-tt .af-tt-runway-empty {
+  color: var(--muted);
+}
+
+/* --- Phone layout -----------------------------------------------------------------------------
+   The command bar keeps identity + TRK + clock; the rest of the readout lives one tap away. The
+   stations become bottom sheets over the full-bleed scene, driven by a thumb-row of tabs, one
+   sheet at a time. Every control grows to thumb size. */
+@media (max-width: 900px) {
+  /* One grid row: with the bar floating, the map stage must own the whole column (otherwise it
+     lands in the collapsed auto row and its 100% height resolves to zero). */
+  .shell {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  /* No bar on a phone: the identity floats over the scene so the map owns every pixel. */
+  .cbar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 40;
+    gap: 10px;
+    min-height: 0;
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) 12px 8px;
+    border-bottom: 0;
+    background: none;
+    pointer-events: none;
+  }
+
+  .cbar.alarm {
+    border-bottom: 0;
+    background: none;
+  }
+
+  /* Desktop-only bar clusters: the alert chips and the station toggles. */
+  .cbar-wide {
+    display: none;
+  }
+
+  .cbar-mark {
+    font-size: var(--fs-body);
+    letter-spacing: 0.2em;
+    text-shadow: 0 1px 3px rgb(0 0 0 / 0.85), 0 0 16px rgb(72 224 209 / 0.45);
+  }
+
+  /* Over the bare scene the icon needs the wordmark's shadow to stay legible, and a thumb-sized
+     hit area since there is no hover to aim with. */
+  .cbar-repo {
+    padding: 8px;
+    color: #d7ece9;
+    filter: drop-shadow(0 1px 3px rgb(0 0 0 / 0.85));
+  }
+
+  /* The tab row is the phone's station switcher. */
+  .station-tabs {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 60;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-top: 1px solid var(--rule-strong);
+    background: rgb(5 10 12 / 0.92);
+    backdrop-filter: blur(12px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .station-tabs button {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-height: var(--tabs-h);
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font: 700 var(--fs-tag)/1 var(--mono);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+
+  .station-tabs button.open {
+    background: rgb(72 224 209 / 0.1);
+    box-shadow: inset 0 2px 0 var(--accent);
+    color: var(--accent);
+  }
+
+  .station-tabs button:disabled {
+    opacity: 0.35;
+  }
+
+  .station-tabs button.avail:not(.open)::after {
+    content: "";
+    position: absolute;
+    top: 8px;
+    right: calc(50% - 22px);
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    box-shadow: 0 0 6px rgb(72 224 209 / 0.9);
+  }
+
+  /* Stations become bottom sheets docked to the tab row, shallow enough to keep a real map strip. */
+  .station {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--tabs-h) + env(safe-area-inset-bottom, 0px));
+    z-index: 50;
+    width: auto;
+    max-height: none;
+    height: 52vh;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    clip-path: none;
+  }
+
+  /* The settings console is a reading surface: give it most of the screen. */
+  .station-systems {
+    height: 76vh;
+  }
+
+  .station-head {
+    min-height: 44px;
+  }
+
+  .station-act {
+    width: 36px;
+    height: 36px;
+  }
+
+  .station-select {
+    height: 36px;
+    padding: 0 6px;
+  }
+
+  .station-search {
+    min-height: 44px;
+  }
+
+  .station-search input {
+    font-size: var(--fs-body);
+  }
+
+  .station-search-clear {
+    width: 36px;
+    height: 36px;
+  }
+
+  /* Thumb-sized traffic rows. */
+  .target-row {
+    min-height: 54px;
+    gap: 12px;
+  }
+
+  /* Two columns, not one: a full-width field per row made the settings sheet six screens long. */
+  .control-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .control-grid input,
+  .control-grid select,
+  .select-row select {
+    height: 40px;
+  }
+
+  .control-grid input[type="range"],
+  .slider-row input[type="range"] {
+    height: 34px;
+  }
+
+  /* Checkboxes and their rows scale up together, so the whole row is the target. */
+  .toggle-row {
+    gap: 4px 14px;
+  }
+
+  .toggle-row label {
+    min-height: 36px;
+  }
+
+  .toggle-row input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+  }
+
+  .rx-row {
+    min-height: 48px;
+  }
+
+  .rx-act {
+    width: 38px;
+    height: 38px;
+  }
+
+  .cblock-reset,
+  .cov-actions button {
+    height: 34px;
+    padding: 0 12px;
+  }
+
+  .history-series button {
+    min-height: 30px;
+  }
+
+  /* The 6-column track log is ~100px wider than a phone sheet, so its last column (Lat, Lon) was
+     stranded behind a horizontal scroll nobody finds. Drop Trk and V/S — both are one tap away in
+     the graph above — and the remaining four fit. */
+  .tracklog-body thead th:nth-child(4),
+  .tracklog-body thead th:nth-child(5),
+  .tracklog-body tbody td:nth-child(4),
+  .tracklog-body tbody td:nth-child(5) {
+    display: none;
+  }
+
+  /* Map chrome sits above the tab row; the legend shrinks so the scene keeps the corner. */
+  .map-chrome {
+    right: 10px;
+    bottom: calc(var(--tabs-h) + env(safe-area-inset-bottom, 0px) + 10px);
+  }
+
+  /* The credits ⓘ clears the tab row on the opposite corner. */
+  .map-credits {
+    left: 10px;
+    bottom: calc(var(--tabs-h) + env(safe-area-inset-bottom, 0px) + 10px);
+  }
+
+  .icon-button,
+  .map-compass-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .map-credits-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .map-legend {
+    padding: 7px 9px;
+  }
+
+  .map-legend .legend-body {
+    height: 64px;
+  }
+
+  /* The phone's condition strip: centred chips under the bar, over the full-bleed scene. */
+  .alert-strip {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    z-index: 45;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+    max-width: calc(100% - 20px);
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+}
+
+/* --- 3D tactical view ------------------------------------------------------------------ */
+
+.map-3d {
+  position: relative;
+  overflow: hidden;
+  background: #050a0c;
+}
+
+.t3d-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  pointer-events: none;
+  contain: layout style;
+}
+
+/* Aircraft themselves are 3D meshes in the WebGL scene; this DOM node is just the anchor
+   for the data-block label, positioned at the target's projected screen point. */
+.t3d-marker {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.t3d-block {
+  position: absolute;
+  /* left/top are written per frame by syncBlocks(): normally clear of the aircraft mesh's largest
+     on-screen radius on its right, flipped or clamped when the viewport edge is in the way. */
+  left: 48px;
+  top: -16px;
+  pointer-events: auto; /* interactive so its pin is clickable and hovering keeps it up */
+}
+
+.t3d-datablock {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+  border-left: 3px solid rgb(72 224 209 / 0.55);
+  background: rgb(5 10 12 / 0.85);
+  /* A notch below the panel ramp: the data block annotates the scene, it is not a console. */
+  font: 600 12.5px/1.4 var(--mono);
+  color: #9fe8df;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px #000;
+}
+
+.t3d-datablock .db-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.t3d-datablock b {
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  color: #eafffb;
+}
+
+/* Selected: a MORE opaque, accented panel (was washed-out translucent teal). */
+.t3d-block.selected .t3d-datablock {
+  border-left-color: var(--accent);
+  background: rgb(9 20 22 / 0.95);
+  box-shadow: 0 0 0 1px rgb(72 224 209 / 0.4), 0 4px 14px rgb(0 0 0 / 0.55);
+}
+
+/* Airfield hover popover, absolutely positioned in the 3D overlay. */
+.t3d-tt {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 4000002;
+  pointer-events: none;
+}
+
+.t3d-tt.airfield-tt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--rule-strong);
+  background: rgb(13 16 17 / 0.94);
+  color: var(--text);
+  font-size: var(--fs-small);
+  line-height: 1.25;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
+  backdrop-filter: blur(8px);
+}
+
+/* Tactical target-lock reticle (HUD corner brackets) on the selected aircraft. */
+.t3d-lock {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 3;
+  pointer-events: none;
+  color: var(--accent);
+  filter: drop-shadow(0 0 4px rgb(72 224 209 / 0.7));
+  will-change: transform;
+  animation: t3d-lock-pulse 1.6s ease-in-out infinite;
+}
+
+/* Block, not inline: the inline baseline gap added ~4px below the svg, so the centred container
+   drew the brackets slightly HIGH — which made every label beside it read as slightly low. */
+.t3d-lock svg {
+  display: block;
+}
+
+@keyframes t3d-lock-pulse {
+  50% { opacity: 0.55; }
+}
+
+.t3d-loading {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 5;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  font: 700 var(--fs-body)/1 var(--mono);
+  letter-spacing: 0.35em;
+  color: var(--accent);
+  text-shadow: 0 0 12px rgb(72 224 209 / 0.6);
+  animation: t3d-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes t3d-pulse {
+  50% { opacity: 0.35; }
+}
+
+/* Phone-specific 3D overlay adjustments (after the base rules above so they win). */
+@media (max-width: 900px) {
+  /* iOS renders `-webkit-font-smoothing: antialiased` visibly thinner; let the platform pick. */
+  :root {
+    -webkit-font-smoothing: auto;
+  }
+
+  /* Data blocks shrink harder on a phone: they annotate a small scene, and at panel size they
+     buried the aircraft they belong to. */
+  .t3d-datablock {
+    font-size: 11.5px;
+    padding: 5px 8px;
+  }
+
+  .t3d-datablock .db-top {
+    font-size: 12.5px;
+  }
+}
