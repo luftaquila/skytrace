@@ -1,24 +1,22 @@
 # Skytrace self-hosting
 
-Skytrace uses one deployment contract for Docker and Podman: a release-tagged `compose.yml`, `.env`
-and the OCI image from the same release. Each GitHub Release body provides the versioned image
-setting. There is no server launcher or server archive.
+The Skytrace server is distributed as an OCI image and runs with `compose.yml`. Docker and Podman
+use the same Compose and `.env` files. For a tagged release, use the Compose file and image listed
+in that release.
 
 ## Requirements
 
 - Docker Engine with Docker Compose v2, or Podman with a Compose provider that supports profiles
 - `curl` and OpenSSL
-- A current browser with WebGL 2
-- Host port `1024` through `65535`; the release default is `3000`
-- A domain-root URL such as `https://sky.example.com/`; reverse-proxy subpaths such as
-  `/skytrace/` are not supported
+- A current browser with WebGL 2 support
+- An available host port from `1024` through `65535` (default: `3000`)
 
-Run rootless engines without `sudo`. For rootful operation, use `sudo` consistently when required.
-The two modes have separate image and volume stores, but use the same Compose and environment files.
+Do not use `sudo` with a rootless engine. Use it consistently with a rootful engine. Rootless and
+rootful engines have separate image and volume stores.
 
 ## Install
 
-Choose a GitHub Release, use its tag for both the Compose file and image, and create `.env`:
+Choose a GitHub Release and use its tag for both the Compose file and image:
 
 ```sh
 VERSION=vX.Y.Z
@@ -31,8 +29,7 @@ printf '%s\n' \
   "SKYTRACE_RECEIVER_TOKENS={\"roof-01\":\"$TOKEN\"}" > .env
 ```
 
-Replace `vX.Y.Z` with the selected stable release tag. Do not combine a Compose file from `main` or
-another tag with a versioned image.
+Replace `vX.Y.Z` with the release tag. Do not mix Compose and image versions.
 
 Docker:
 
@@ -50,54 +47,51 @@ podman compose --env-file .env pull
 podman compose --env-file .env up -d
 ```
 
-Open `http://127.0.0.1:3000`. The Compose health check reports success only after the required
-SQLite schema is readable.
+The remaining examples use `docker compose`. Replace it with `podman compose` for Podman.
 
-The default bind is loopback. Set `SKYTRACE_BIND=0.0.0.0`, `::` or a specific interface address
-only for an intentional LAN listener protected by a firewall. Each additional installation needs
-a unique Compose project name, port, `SKYTRACE_VOLUME` and `SKYTRACE_BACKUP_DIR`.
+Open `http://127.0.0.1:3000`. The health check passes after the SQLite schema is ready.
+
+By default, Skytrace listens only on loopback. Set `SKYTRACE_BIND=0.0.0.0`, `::` or a specific
+interface address only for a firewall-protected LAN. For multiple instances, use a different
+Compose project name, port, `SKYTRACE_VOLUME` and `SKYTRACE_BACKUP_DIR` for each one.
 
 ## Public and private access
 
-The traffic, history, KML, coverage and event-stream read APIs are intentionally unauthenticated.
-Receiver ingestion requires its configured bearer token. Put authentication in the reverse proxy
-when the deployment must be private.
+Traffic, history, KML, coverage and event-stream APIs are public by default. Receiver uploads
+require bearer tokens. Add authentication at the reverse proxy for a private deployment.
 
-Terminate TLS and set HSTS in the external reverse proxy or tunnel. Skytrace itself stays on plain
-HTTP behind that boundary and does not trust forwarding headers by default.
+When using a domain, serve Skytrace at the domain root, such as `https://sky.example.com/`.
+Reverse-proxy subpaths such as `/skytrace/` are not supported.
 
-Set `SKYTRACE_TRUST_PROXY` only to the exact proxy address or narrow proxy-network CIDR observed by
-the Skytrace process. The destination may be a loopback-published port while the container still
-sees a Docker or Podman bridge address as its socket peer, so do not assume `127.0.0.1` merely
-because the proxy connects to `http://127.0.0.1:3000`.
+Terminate TLS and enable HSTS at the reverse proxy or tunnel. Keep Skytrace on plain HTTP behind
+it. Forwarding headers are ignored by default.
 
-The trusted proxy must overwrite client-supplied `X-Forwarded-*` headers. Do not use a boolean or a
-hop count. A wrong value either ignores the real client address or trusts spoofed forwarding data,
-which can defeat per-IP request and event-stream limits.
+Set `SKYTRACE_TRUST_PROXY` to one or more proxy IP addresses or narrow CIDRs, separated by commas.
+Use the address seen by the Skytrace container, which may be a Docker or Podman bridge address even
+when the proxy connects to `127.0.0.1` on the host.
+
+Configure the proxy to overwrite client-supplied `X-Forwarded-*` headers. Do not use a boolean or
+hop count for `SKYTRACE_TRUST_PROXY`. A wrong value can break per-IP limits or allow spoofed client
+addresses.
 
 ## Status and logs
-
-Docker:
 
 ```sh
 docker compose --env-file .env ps
 docker compose --env-file .env logs -f skytrace
 ```
 
-Podman uses the same arguments with `podman compose`.
-
 ## Podman reboot persistence
 
-Podman's restart policy needs `podman-restart.service` to start eligible containers after a host
-reboot. For rootless Podman, enable the user service and keep that user's systemd manager alive:
+Enable `podman-restart.service` to restart the containers after a reboot. For rootless Podman:
 
 ```sh
 systemctl --user enable podman-restart.service
 loginctl enable-linger "$USER"
 ```
 
-If enabling linger is not permitted, an administrator can run
-`sudo loginctl enable-linger USER`. For rootful Podman, enable the system service instead:
+If `enable-linger` needs administrator access, run `sudo loginctl enable-linger USER`. For rootful
+Podman:
 
 ```sh
 sudo systemctl enable podman-restart.service
@@ -105,8 +99,8 @@ sudo systemctl enable podman-restart.service
 
 ## Backup
 
-Create the host backup directory first. The backup service refuses to overwrite an existing
-archive and verifies the complete gzip-compressed tar plus `skytrace.db`.
+Create the backup directory first. Backups do not overwrite existing files. The command verifies
+the archive and checks for `skytrace.db`.
 
 ```sh
 install -d -m 0700 backups
@@ -116,13 +110,12 @@ docker compose --env-file .env --profile ops run --rm \
 docker compose --env-file .env start skytrace
 ```
 
-If the backup command fails, start `skytrace` explicitly before troubleshooting. Podman uses the
-same arguments with `podman compose`.
+If the backup fails, restart `skytrace` before troubleshooting.
 
 ## Restore to a new volume
 
-Never restore over the active volume. Stop Skytrace, preserve the current `.env`, then set a new
-unused `SKYTRACE_VOLUME` value:
+Never restore over the active volume. Stop Skytrace, copy `.env`, then choose an unused
+`SKYTRACE_VOLUME`:
 
 ```sh
 docker compose --env-file .env stop skytrace
@@ -133,15 +126,19 @@ docker compose --env-file .env --profile ops run --rm \
 docker compose --env-file .env up -d --force-recreate
 ```
 
-The restore service requires an empty target volume, rejects unsafe archive paths and removes
-partially extracted files when it fails. It never removes the previous volume. To return to the
-old data, run `cp -p .env.before-restore .env`, then run the matching Docker or Podman
-`compose up -d --force-recreate` command.
+The target volume must be empty. The restore rejects unsafe paths and removes partial files after a
+failure. It does not remove the previous volume. To return to the old data, restore `.env` and
+recreate the service:
+
+```sh
+cp -p .env.before-restore .env
+docker compose --env-file .env up -d --force-recreate
+```
 
 ## Upgrade and rollback
 
-Back up first, select the new release, save the deployment files, and use the same new tag for the
-Compose file and image. Keep the receiver tokens and other local settings in `.env`:
+Back up first. Save the deployment files, then use the same release tag for the Compose file and
+image. Keep receiver tokens and other local settings in `.env`:
 
 ```sh
 NEW_VERSION=vX.Y.Z
@@ -155,8 +152,8 @@ docker compose --env-file .env pull
 docker compose --env-file .env up -d --force-recreate
 ```
 
-Compose does not provide automatic rollback. If startup fails, select the previous GitHub Release,
-download its Compose file, and set `.env` to the version shown in that release body:
+For a rollback, download the previous release's Compose file and set `SKYTRACE_IMAGE` to the image
+from that release:
 
 ```sh
 PREVIOUS_VERSION=vX.Y.Z
@@ -167,10 +164,10 @@ docker compose --env-file .env pull
 docker compose --env-file .env up -d --force-recreate
 ```
 
-Both versions use the selected named volume. Read release notes before any schema-changing upgrade;
-an old image may not understand a schema already changed by a newer image.
+The volume does not change during an upgrade or rollback. Check the release notes before upgrading;
+an older image may not read a schema written by a newer one.
 
 ## Configuration
 
-See `docs/configuration.md`. Coverage resolution and retention settings can materially change CPU,
-memory and disk use.
+See [configuration](configuration.md). Coverage resolution and retention affect CPU, memory and
+disk use.

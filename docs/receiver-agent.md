@@ -1,15 +1,15 @@
 # Skytrace receiver agent
 
-The receiver agent reads one readsb or dump1090 `aircraft.json` source and uploads bounded batches
-to a Skytrace server. Each release archive contains a self-contained Go binary, so the receiver
-does not need Node.js, npm or a container runtime.
+The agent reads local, readsb-compatible `aircraft.json` from tar1090, ultrafeeder, dump1090-fa or
+readsb and sends it to Skytrace. Each archive contains one Go binary; the receiver host does not
+need Node.js, npm or a container runtime.
 
 ## Requirements
 
-- Linux on one of the released CPU architectures
-- systemd when using the supplied service unit
-- One readable local JSON file or credential-free loopback HTTP JSON URL
-- HTTPS access to the Skytrace server, except for explicitly allowed LAN HTTP
+- Linux on a supported CPU architecture
+- systemd, if using the supplied service unit
+- A readable local `aircraft.json` file or a credential-free loopback HTTP URL
+- Access to Skytrace over HTTPS; loopback HTTP is allowed, and LAN HTTP requires explicit opt-in
 
 ## Select an archive
 
@@ -43,16 +43,15 @@ sudo install -o root -g root -m 0600 \
 sudoedit /etc/skytrace-agent.env
 ```
 
-Set the required identity and destination:
+Set the required connection and identity values:
 
-- `SKYTRACE_SERVER_URL`: absolute HTTP or HTTPS base URL without credentials; the agent appends
+- `SKYTRACE_SERVER_URL`: an absolute HTTP or HTTPS base URL without credentials; the agent appends
   `/api/ingest/readsb`
-- `SKYTRACE_RECEIVER_ID`: ID matching `[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}`
-- `SKYTRACE_TOKEN`: matching token of at least 32 characters from the server's
+- `SKYTRACE_RECEIVER_ID`: an ID matching `[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}`
+- `SKYTRACE_TOKEN`: the token assigned to this receiver in the server's
   `SKYTRACE_RECEIVER_TOKENS`
 
-Select exactly one source. `SKYTRACE_AIRCRAFT_URL`, when used, must be credential-free loopback
-HTTP.
+Select exactly one source. `SKYTRACE_AIRCRAFT_URL` accepts only credential-free loopback HTTP URLs.
 
 Local file:
 
@@ -68,10 +67,10 @@ SKYTRACE_AIRCRAFT_FILE=
 SKYTRACE_AIRCRAFT_URL=http://127.0.0.1/tar1090/data/aircraft.json
 ```
 
-The server URL must use HTTPS unless it is loopback. For an intentional non-loopback LAN HTTP
-server, set `SKYTRACE_ALLOW_INSECURE_SERVER=1`; the agent logs a warning. For a private certificate
-authority, set `SKYTRACE_CA_FILE=/absolute/path/to/ca.pem` instead of disabling TLS validation.
-The certificate file and its parent directories must be readable by the service's dynamic user.
+Use HTTPS for `SKYTRACE_SERVER_URL` unless Skytrace runs on loopback. For HTTP on a trusted LAN, set
+`SKYTRACE_ALLOW_INSECURE_SERVER=1`. To use a private certificate authority, set
+`SKYTRACE_CA_FILE=/absolute/path/to/ca.pem`. The systemd service must be able to read the
+certificate and traverse its parent directories.
 
 Optional metadata:
 
@@ -81,7 +80,7 @@ Optional metadata:
 - `SKYTRACE_RECEIVER_LON`: receiver longitude from `-180` through `180`
 - `SKYTRACE_INTERVAL_MS`: upload interval from `1000` to `60000`, default `3000`
 
-Test one upload before installing the service:
+Run a test upload before installing the service:
 
 ```sh
 set -a
@@ -100,14 +99,13 @@ sudo systemctl enable --now skytrace-agent
 sudo systemctl status skytrace-agent
 ```
 
-The supplied service uses a dynamic user, a read-only system, a private temporary directory,
-`ProtectHome=yes` and read-only access to `/run/readsb`. The default source and every parent
-directory must be readable by an unprivileged dynamic user.
+The service runs as a dynamic user with a read-only filesystem, `PrivateTmp`, `ProtectHome=yes` and
+read-only access to `/run/readsb`. The source file and its parent directories must be accessible to
+an unprivileged user.
 
-Keep alternate file sources in a dedicated world-readable directory under `/run`, then add that
-exact directory to `ReadOnlyPaths` in a systemd override. Host files under `/tmp` are hidden by
-`PrivateTmp`, and paths under `/home`, `/root` or `/run/user` are hidden by `ProtectHome`; use a
-dedicated `/run` directory instead of weakening those protections.
+For another file location, create a dedicated directory under `/run` and add it to `ReadOnlyPaths`
+in a systemd override. Do not use `/tmp`, `/home`, `/root` or `/run/user`; the service cannot see
+those host paths.
 
 Inspect failures with:
 
@@ -115,13 +113,13 @@ Inspect failures with:
 sudo journalctl -u skytrace-agent -n 100 --no-pager
 ```
 
-Startup errors identify invalid settings. Request failures report a bounded class such as timeout,
-HTTP status or body-too-large without logging the token.
+Errors report invalid settings, timeouts, HTTP status codes and oversized responses. The token is
+not logged.
 
 ## Upgrade or roll back
 
-Stop the service, extract the desired architecture-specific archive over `/opt/skytrace`, and
-restart it. The environment file stays in `/etc` and is not replaced:
+Stop the service, extract the selected archive into `/opt/skytrace`, and restart it. This does not
+replace `/etc/skytrace-agent.env`:
 
 ```sh
 sudo systemctl stop skytrace-agent
