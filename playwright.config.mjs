@@ -16,7 +16,7 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "node scripts/e2e-server.mjs",
+    command: "scripts/e2e-server.sh",
     url: "http://127.0.0.1:4173/healthz",
     reuseExistingServer: false,
     timeout: 30_000,

@@ -1,5 +1,5 @@
-// Viewport-driven airfield feed. The server maintains the OurAirports-derived dataset (see
-// server/airfields-store.mjs) as a two-tier static layout:
+// Viewport-driven airfield feed. The Go server maintains the OurAirports-derived dataset (see
+// internal/airfields) as a two-tier static layout:
 //
 //   tier 1  index.json  every open large/medium airport — always loaded, they are what the low
 //                        zooms draw

@@ -27,12 +27,15 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm audit --omit=dev
       - run: npm --prefix web audit
-      - run: shellcheck scripts/package-agent.sh scripts/smoke-compose.sh receiver/readsb/install.sh
+      - run: shellcheck scripts/e2e-server.sh scripts/package-agent.sh scripts/smoke-compose.sh receiver/readsb/install.sh
       - run: docker compose config --quiet
         env:
           SKYTRACE_IMAGE: ghcr.io/example/skytrace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           SKYTRACE_ENV_FILE: /dev/null
-      - run: npm run check
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: npm run test:coverage
+      - run: npm run test:e2e
 
   agent-architectures:
     strategy:

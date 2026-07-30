@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ALTITUDE_UNITS,
   DEFAULT_SETTINGS,
+  DISTANCE_UNITS,
   RATE_UNITS,
   SETTINGS_KEY,
   SETTING_BOUNDS,
+  SPEED_UNITS,
+  TEMP_UNITS,
   UNIT_PRESETS,
   convertSettingsUnit,
   loadSettings,
@@ -32,6 +36,34 @@ test("operator defaults expose independent units and bounded display settings", 
   assert.equal(DEFAULT_SETTINGS.aircraftPitchExaggeration, 3);
   assert.equal(DEFAULT_SETTINGS.aircraftRollExaggeration, 2);
   assert.deepEqual(SETTING_BOUNDS.aircraftRollExaggeration, [1, 5, 2]);
+});
+
+test("every published unit converter preserves its documented base quantity", () => {
+  const closeTo = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9);
+
+  closeTo(ALTITUDE_UNITS.ft.toFeet(123), 123);
+  closeTo(ALTITUDE_UNITS.ft.fromFeet(123), 123);
+  closeTo(ALTITUDE_UNITS.m.toFeet(304.8), 1000);
+  closeTo(ALTITUDE_UNITS.m.fromFeet(1000), 304.8);
+
+  closeTo(SPEED_UNITS.kt.toKnots(123), 123);
+  closeTo(SPEED_UNITS.kt.fromKnots(123), 123);
+  closeTo(SPEED_UNITS.kmh.toKnots(185.2), 100);
+  closeTo(SPEED_UNITS.kmh.fromKnots(100), 185.2);
+  closeTo(SPEED_UNITS.mph.toKnots(115.078), 100);
+  closeTo(SPEED_UNITS.mph.fromKnots(100), 115.078);
+
+  closeTo(DISTANCE_UNITS.nm.toNm(123), 123);
+  closeTo(DISTANCE_UNITS.nm.fromNm(123), 123);
+  closeTo(DISTANCE_UNITS.km.toNm(185.2), 100);
+  closeTo(DISTANCE_UNITS.km.fromNm(100), 185.2);
+  closeTo(DISTANCE_UNITS.mi.toNm(115.078), 100);
+  closeTo(DISTANCE_UNITS.mi.fromNm(100), 115.078);
+
+  closeTo(RATE_UNITS.ft.fromFpm(1000), 1000);
+  closeTo(RATE_UNITS.m.fromFpm(1000), 5.08);
+  closeTo(TEMP_UNITS.c.fromC(20), 20);
+  closeTo(TEMP_UNITS.f.fromC(20), 68);
 });
 
 test("normalization rejects unknown values and enforces dependent bounds", () => {

@@ -10,8 +10,8 @@ const webVersion = JSON.parse(readFileSync(new URL("./package.json", import.meta
 const developmentApiTarget = process.env.SKYTRACE_DEV_API_TARGET || "http://127.0.0.1:3000";
 
 // In a build the notices file is written into dist by scripts/notices.mjs; dev never has a dist, so
-// the licence panel would 404 on a dev server. Generate it on request instead — and from BOTH package
-// trees, which only coexist outside Docker, so dev sees the whole list the image ships.
+// the licence panel would 404 on a dev server. Generate the browser package list on request. The
+// Docker build merges the linked Go server modules into the deployed notice file.
 function developmentNotices() {
   const repoRoot = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
   return {
@@ -22,7 +22,6 @@ function developmentNotices() {
         try {
           const packages = collectNotices([
             { root: path.join(repoRoot, "web"), scope: "web" },
-            { root: repoRoot, scope: "server" },
           ]);
           res.setHeader("content-type", "application/json");
           res.end(JSON.stringify({ packages }));
