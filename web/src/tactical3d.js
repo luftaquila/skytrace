@@ -38,6 +38,7 @@ import {
   mapTransform,
   requestedCameraTransform,
 } from "./maplibre-internals.js";
+import { loadMapView, saveMapView } from "./map-view.js";
 import { FALLBACK_SITE } from "./site.js";
 import {
   createEsriTileProtocol,
@@ -137,6 +138,7 @@ function makeAirfieldIcon(color) {
 
 export function createTactical3d({ container, deps }) {
   const initialSettings = deps.getSettings();
+  const restoredMapView = loadMapView();
   const referenceLanguage = window.navigator.language;
   const referenceLabelsEnabled = initialSettings.mapReferenceLabels !== false;
   let terrainExagg = settingExaggeration(initialSettings, "terrainExaggeration", 5, 2);
@@ -157,7 +159,15 @@ export function createTactical3d({ container, deps }) {
     return value && Number.isFinite(value.lon) && Number.isFinite(value.lat) ? value : HOME;
   }
   let appliedSiteKey = null;
-  let userMovedCamera = false; // once the operator touches the camera, the site never yanks it
+  // A restored view is operator-owned too: live coverage must not replace it on reload.
+  let userMovedCamera = restoredMapView != null;
+  // A fresh page must first complete the existing coverage/default opening path. Otherwise the
+  // temporary pre-coverage HOME frame could be persisted and suppress that opening next visit.
+  let mapViewPersistenceReady = restoredMapView != null;
+  function claimMapView() {
+    userMovedCamera = true;
+    mapViewPersistenceReady = true;
+  }
   ensureResilientTileProtocols();
 
   // Shared airfield symbol layout/paint. Split into per-class layers (below) so the worldwide
@@ -204,8 +214,10 @@ export function createTactical3d({ container, deps }) {
     // elevation alone. This also avoids recalculateZoomAndCenter fly-aways at very high pitch.
     centerClampedToGround: false,
     pitch: 55,
-    zoom: 8,
-    center: [HOME.lon, HOME.lat],
+    zoom: restoredMapView?.zoom ?? 8,
+    center: restoredMapView
+      ? [restoredMapView.lon, restoredMapView.lat]
+      : [HOME.lon, HOME.lat],
     style: {
       version: 8,
       // Globe projection so the camera can tilt past vertical (pitch > 90°) for a bottom view.
@@ -255,6 +267,16 @@ export function createTactical3d({ container, deps }) {
       sky: { "sky-color": "#0a1a2b", "horizon-color": "#0d1618", "fog-color": "#0b1416", "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.6, "atmosphere-blend": 0 },
     },
   });
+  function persistMapView() {
+    if (!mapViewPersistenceReady) return;
+    const centre = map.getCenter();
+    saveMapView({
+      lon: centre.lng,
+      lat: centre.lat,
+      zoom: map.getZoom(),
+    });
+  }
+  window.addEventListener("pagehide", persistMapView);
   let referenceSourceErrorLogged = false;
   let referenceSourceRetryTimer = 0;
   let referenceSourceRetryCount = 0;
@@ -574,7 +596,7 @@ export function createTactical3d({ container, deps }) {
     if (leveling && startPitch < 0.1) return;
     cancelCameraAnimation();
     map.stop();
-    userMovedCamera = true;
+    claimMapView();
     const started = performance.now();
     const anim = { raf: 0 };
     northAnimation = anim;
@@ -693,7 +715,7 @@ export function createTactical3d({ container, deps }) {
   function attachOrbit(z) { freeGrounding = null; airfieldOrbit = null; orbitAttached = true; orbitZ = z; } // orbit → aircraft-centred zoom
   function startAirfieldOrbit(field) {
     if (!field) return;
-    userMovedCamera = true;
+    claimMapView();
     followingSelectionHex = null;
     // An airport orbit is a tracking state for the UI, but it is deliberately not an aircraft
     // follow: selecting an airport alone must not move the camera.
@@ -763,7 +785,7 @@ export function createTactical3d({ container, deps }) {
     clearCanvasHoverForCamera();
     cancelCameraAnimation();
     map.stop();
-    userMovedCamera = true;
+    claimMapView();
     dragMoved = false;
     if (e.button === 0) drag = { mode: "rotate", x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, bearing: map.getBearing(), pitch: map.getPitch() };
     else if (e.button === 2) {
@@ -934,7 +956,7 @@ export function createTactical3d({ container, deps }) {
   // on the mouse cursor instead, like a chart plotter; the centre is only the fallback pivot.
   const onWheel = (e) => {
     e.preventDefault();
-    userMovedCamera = true;
+    claimMapView();
     const step = (e.deltaMode === 1 ? e.deltaY * 0.04 : e.deltaY * 0.0018);
     const baseZoom = cameraAnimation?.kind?.startsWith("wheel") ? cameraAnimation.end.zoom : map.getZoom();
     const z = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), baseZoom - step));
@@ -1103,7 +1125,7 @@ export function createTactical3d({ container, deps }) {
     }
     if (!zoom.on && !bearing.on && !pitch.on) return;
     touchMoved = true;
-    userMovedCamera = true;
+    claimMapView();
 
     // Zoom and rotation stay anchored on the active orbit pivot, matching the mouse rotate path;
     // only a pan detaches it.
@@ -1233,7 +1255,7 @@ export function createTactical3d({ container, deps }) {
       if (!touchMoved) {
         if (Math.hypot(e.clientX - touchPan.sx, e.clientY - touchPan.sy) <= TAP_SLOP_PX) return;
         touchMoved = true;
-        userMovedCamera = true;
+        claimMapView();
         clearOrbit(); // a free pan detaches tracking, exactly like the mouse right-drag
       }
       queueCameraPan(e.clientX - touchPan.x, e.clientY - touchPan.y);
@@ -2357,9 +2379,9 @@ export function createTactical3d({ container, deps }) {
   const viewportWantsTimer = setInterval(() => {
     if (disposed || !ready) return;
     airfieldsFeed.ensureViewport(map.getBounds(), map.getZoom(), Boolean(deps.getSettings().airfields));
-    // View-settle for the on-demand area feed. The key is QUANTIZED (~1 km, 0.1 zoom): a slow
-    // drift — a followed aircraft carrying the camera — still settles between key steps, so
-    // the area keeps refreshing instead of never settling.
+    // View-settle for the on-demand area feed and persisted location. The feed key is QUANTIZED
+    // (~1 km, 0.1 zoom): a slow drift — a followed aircraft carrying the camera — still settles
+    // between key steps, so the area keeps refreshing instead of never settling.
     const now = performance.now();
     const centre = map.getCenter();
     const key = `${centre.lng.toFixed(2)}:${centre.lat.toFixed(2)}:${map.getZoom().toFixed(1)}`;
@@ -2368,6 +2390,7 @@ export function createTactical3d({ container, deps }) {
       viewSettleAt = now;
     } else if (now - viewSettleAt > 700 && viewSettleNotified !== key) {
       viewSettleNotified = key;
+      persistMapView();
       deps.onViewSettled?.(viewArea());
     }
   }, 300);
@@ -2662,7 +2685,8 @@ export function createTactical3d({ container, deps }) {
   // The CAMERA, while the operator has not touched it, opens on the merged coverage BOUNDS —
   // several receivers far apart would otherwise open on the empty mean point between them. A
   // deployment with no receiver coverage at all (network feed only, or nothing yet) opens on a
-  // world view instead of a hardcoded somewhere, so the operator picks their own region.
+  // world view instead of a hardcoded somewhere, so the operator picks their own region. A saved
+  // location returns before this function, leaving the operator's last centre and zoom untouched.
   let appliedViewKey = null;
   function syncSiteReference() {
     const key = siteKey(site());
@@ -2693,13 +2717,14 @@ export function createTactical3d({ container, deps }) {
     }
     if (opening) applyCameraFrame(frame);
     else animateCamera(frame, { duration: 600, easing: EASE_OUT, kind: "site-recentre" });
+    mapViewPersistenceReady = true;
   }
 
   // --- Public API -------------------------------------------------------------------------
   let followingSelectionHex = null;
   function transitionTrackedSelection(target, kind = "track-switch") {
     if (!target) return false;
-    userMovedCamera = true;
+    claimMapView();
     followingSelectionHex = target.hex;
     setFollowActive(true);
     attachOrbit(target.z);
@@ -2814,7 +2839,7 @@ export function createTactical3d({ container, deps }) {
   // Centre on one receiver's reception area. Unlike Locate this keeps the current bearing and pitch,
   // so the operator stays in the same tactical orientation and only travels.
   function focusReceiver(lon, lat) {
-    userMovedCamera = true;
+    claimMapView();
     followingSelectionHex = null;
     clearOrbit();
     freeGrounding = null;
@@ -2829,7 +2854,7 @@ export function createTactical3d({ container, deps }) {
   // Browser location is a broad, near-vertical north-up ground view. It may zoom out, so locating
   // from a close aircraft view restores geographic context instead of retaining that close zoom.
   function locateBrowser(lon, lat) {
-    userMovedCamera = true;
+    claimMapView();
     followingSelectionHex = null;
     clearOrbit();
     freeGrounding = null;
@@ -2864,6 +2889,7 @@ export function createTactical3d({ container, deps }) {
   }
   function clearAirfieldSelection() { clearPinned({ releaseOrbit: true }); }
   function destroy() {
+    persistMapView();
     disposed = true;
     clearInterval(viewportWantsTimer);
     if (airfieldSourceTimer) clearTimeout(airfieldSourceTimer);
@@ -2888,6 +2914,7 @@ export function createTactical3d({ container, deps }) {
     window.removeEventListener("pointermove", onTouchMove);
     window.removeEventListener("pointerup", onTouchUp);
     window.removeEventListener("pointercancel", onTouchUp);
+    window.removeEventListener("pagehide", persistMapView);
     container.removeEventListener("pointerdown", onTouchDown);
     cv.removeEventListener("click", onCanvasClick);
     cv.removeEventListener("dblclick", onCanvasDoubleClick);

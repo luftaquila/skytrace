@@ -232,11 +232,12 @@ test("the route validates coordinates and serves normalized traffic uncached", a
 test("the area-feed request lifecycle stays bounded and its rows are tagged NET", () => {
   // Source precedence is behavior-tested in aircraft-view.test.mjs; this test keeps only the
   // App/tactical integration contract that cannot be exercised without a real map viewport.
-  // The settled viewport drives the fetch. Views up to twice the upstream cap still fetch the
-  // centre circle (partial fill); continental/world views stay own-receivers-only.
+  // The settled viewport drives the fetch. Any wider view still fetches the largest upstream
+  // circle around its centre rather than switching the network feed off.
   assert.match(app, /onViewSettled: \(area\) => \{ void refreshAreaTraffic\(area\); \}/);
   assert.match(app, /AREA_FEED_RADIUS_CAP_NM = 250/);
-  assert.match(app, /AREA_FEED_MAX_VIEW_NM = 520/);
+  assert.doesNotMatch(app, /AREA_FEED_MAX_VIEW_NM/);
+  assert.doesNotMatch(app, /lastViewArea\.radiusNm >/);
   assert.match(app, /Math\.min\(AREA_FEED_RADIUS_CAP_NM, lastViewArea\.radiusNm\)/);
   // A 404 (feature off server-side) backs off instead of hammering.
   assert.match(app, /areaFeedBlockedUntil = performance\.now\(\) \+ 5 \* 60 \* 1000/);

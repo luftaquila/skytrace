@@ -209,6 +209,43 @@ test("phone licence list uses one scroller and reaches the final package", async
   expect(pageErrors).toEqual([]);
 });
 
+test("the last settled map centre and zoom survive a reload in localStorage", async ({ page, request }) => {
+  await page.addInitScript(() => {
+    window.__T3D_DEBUG = true;
+    if (localStorage.getItem("skytrace.mapView") == null) {
+      localStorage.setItem("skytrace.mapView", JSON.stringify({
+        lon: 128.25,
+        lat: 36.75,
+        zoom: 9.4,
+      }));
+    }
+  });
+  const pageErrors = await openApp(page, request);
+  await expect.poll(() => page.evaluate(() => {
+    const map = window.__t3dMap;
+    if (!map) return null;
+    const centre = map.getCenter();
+    return [centre.lng, centre.lat, map.getZoom()];
+  })).toEqual([128.25, 36.75, 9.4]);
+
+  await page.evaluate(() => {
+    window.__t3dMap.jumpTo({ center: [129.1, 35.2], zoom: 7.6 });
+  });
+  await expect.poll(() => page.evaluate(() => {
+    const view = JSON.parse(localStorage.getItem("skytrace.mapView") || "null");
+    return view && [view.lon, view.lat, view.zoom];
+  })).toEqual([129.1, 35.2, 7.6]);
+
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => {
+    const map = window.__t3dMap;
+    if (!map) return null;
+    const centre = map.getCenter();
+    return [centre.lng, centre.lat, map.getZoom()];
+  })).toEqual([129.1, 35.2, 7.6]);
+  expect(pageErrors).toEqual([]);
+});
+
 test("configuration import rejects noise, applies valid settings, and exports a file", async ({ page, request }) => {
   const pageErrors = await openApp(page, request);
   await page.locator(".cbar-stations").getByRole("button", { name: "Settings" }).click();

@@ -1364,12 +1364,9 @@ async function fetchJson(url, init = {}) {
 // --- On-demand area traffic --------------------------------------------------------------
 // The camera's settled viewport is the query; the server proxies a community aggregator and
 // caches per area. Display-only data: nothing is stored server-side, so these targets carry no
-// history or trails. The upstream area APIs answer a point+radius capped at 250 NM, so one call
-// can never cover a wide view: up to twice the cap the centre circle is still fetched (partial
-// fill beats a suddenly empty region), beyond that — continental and world views — the display
-// deliberately stays own-receivers-only rather than showing a lonely disc of traffic.
+// history or trails. The upstream area APIs answer a point+radius capped at 250 NM, so a view wider
+// than one request still fetches the largest possible circle around its centre.
 const AREA_FEED_RADIUS_CAP_NM = 250;
-const AREA_FEED_MAX_VIEW_NM = 520;
 let lastViewArea = null;
 let areaFeedBlockedUntil = 0;
 let areaFetchSeq = 0;
@@ -1377,7 +1374,7 @@ let areaFetchSeq = 0;
 async function refreshAreaTraffic(area = null) {
   if (area) lastViewArea = area;
   if (!areaFeedConfigured.value || !settings.value.areaFeed) return;
-  if (!lastViewArea || lastViewArea.radiusNm > AREA_FEED_MAX_VIEW_NM) {
+  if (!lastViewArea) {
     if (areaAircraft.value.length) areaAircraft.value = [];
     return;
   }
