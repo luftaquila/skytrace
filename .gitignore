@@ -7,6 +7,5 @@ data/
 *.db-wal
 .env
 .DS_Store
-scratchpad/
+.cache/
 playwright-report/
-test-results/

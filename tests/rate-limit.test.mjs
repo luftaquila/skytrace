@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { createRequestLimits, TokenBucketPool } from "../src/rate-limit.mjs";
+import { createRequestLimits, TokenBucketPool } from "../server/rate-limit.mjs";
 
 class FakeResponse extends EventEmitter {
   constructor() {

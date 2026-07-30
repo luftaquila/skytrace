@@ -8,8 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-
-	"github.com/luftaquila/skytrace/internal/receiveragent"
 )
 
 var version = "dev"
@@ -35,14 +33,14 @@ func run(args []string) int {
 		return 0
 	}
 
-	config, err := receiveragent.LoadConfig(receiveragent.Environment())
+	config, err := LoadConfig(Environment())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skytrace-agent: startup failed: %s\n", receiveragent.RedactError(err))
+		fmt.Fprintf(os.Stderr, "skytrace-agent: startup failed: %s\n", RedactError(err))
 		return 1
 	}
-	client, err := receiveragent.NewHTTPClient(config.CAFile)
+	client, err := NewHTTPClient(config.CAFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skytrace-agent: startup failed: %s\n", receiveragent.RedactError(err))
+		fmt.Fprintf(os.Stderr, "skytrace-agent: startup failed: %s\n", RedactError(err))
 		return 1
 	}
 	if config.InsecureServer {
@@ -51,14 +49,14 @@ func run(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	agent := receiveragent.New(config, client, os.Stdout, os.Stderr)
+	agent := New(config, client, os.Stdout, os.Stderr)
 	err = agent.Run(ctx, *once)
 	if err == nil {
 		return 0
 	}
-	if errors.Is(err, receiveragent.ErrOnceFailed) {
+	if errors.Is(err, ErrOnceFailed) {
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "skytrace-agent: failed: %s\n", receiveragent.RedactError(err))
+	fmt.Fprintf(os.Stderr, "skytrace-agent: failed: %s\n", RedactError(err))
 	return 1
 }

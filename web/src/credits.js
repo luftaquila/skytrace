@@ -61,7 +61,7 @@ export const AIRFIELDS_CREDIT = {
 // (features.areaFeedHost) and that name is what gets credited.
 //
 // ODbL — which adsb.lol publishes under — requires identifying the source database rather than
-// describing it, so a host is the minimum honest credit. Nothing is stored (src/area-feed.mjs
+// describing it, so a host is the minimum honest credit. Nothing is stored (server/area-feed.mjs
 // touches no table), so only that notice applies, not the licence's share-alike terms, which reach
 // derivative databases rather than a display.
 //

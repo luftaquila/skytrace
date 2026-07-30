@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Offline software rasterizer → PNG, so meshes can be eyeballed without a browser. Reads
-// scratchpad/type-meshes.json and renders a grid: each mesh as [3/4 view | side view | top view]
+// .cache/meshes/type-meshes.json and renders a grid: each mesh as [3/4 view | side view | top view]
 // with z-buffered flat shading. Frame: +X nose, +Y span, +Z up.
 //   node scripts/build-type-meshes.mjs && node scripts/render-mesh-png.mjs [name1 name2 ...]
 import fs from "node:fs";
@@ -9,8 +9,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const IN = path.join(HERE, "../scratchpad/type-meshes.json");
-const OUT = path.join(HERE, "../scratchpad/mesh-render.png");
+const IN = path.join(HERE, "../.cache/meshes/type-meshes.json");
+const OUT = path.join(HERE, "../.cache/meshes/mesh-render.png");
 
 const meshes = JSON.parse(fs.readFileSync(IN, "utf8"));
 const names = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(meshes);

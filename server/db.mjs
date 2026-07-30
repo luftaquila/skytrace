@@ -51,7 +51,7 @@ export function openDatabase(dbPath, options = {}) {
   if (dbPath === ":memory:") {
     const db = new Database(dbPath);
     db.pragma("foreign_keys = ON");
-    if (options.migrate !== false) migrate(db);
+    if (options.ensureSchema !== false) ensureSchema(db);
     return db;
   }
   const resolved = path.resolve(dbPath);
@@ -62,7 +62,7 @@ export function openDatabase(dbPath, options = {}) {
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
     db.pragma("busy_timeout = 5000");
-    if (options.migrate !== false) migrate(db);
+    if (options.ensureSchema !== false) ensureSchema(db);
     for (const file of [resolved, `${resolved}-wal`, `${resolved}-shm`]) secureDatabaseFile(file);
     return db;
   } catch (error) {
@@ -308,7 +308,7 @@ function normalizedObjectSql(row) {
   );
 }
 
-export function schemaFingerprint(db) {
+function schemaFingerprint(db) {
   const objects = db.prepare(`
     SELECT type, name, tbl_name, sql
     FROM sqlite_master
@@ -404,11 +404,7 @@ function canonicalSchemaProblems(db) {
   return problems;
 }
 
-export function isCanonicalSchema(db) {
-  return canonicalSchemaProblems(db).length === 0;
-}
-
-export function migrate(db) {
+export function ensureSchema(db) {
   const tableCount = db.prepare(`
     SELECT count(*) AS count FROM sqlite_master
     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -419,7 +415,7 @@ export function migrate(db) {
   const problems = canonicalSchemaProblems(db);
   if (problems.length > 0) {
     throw new Error(
-      `database schema is not canonical; run the offline migration first (${problems.join("; ")})`,
+      `database schema does not match this Skytrace version (${problems.join("; ")})`,
     );
   }
 }

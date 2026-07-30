@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isFreshObservation, normalizeReadsbPayload, sanitizeReceiverId } from "../src/normalize-readsb.mjs";
+import { isFreshObservation, normalizeReadsbPayload, sanitizeReceiverId } from "../server/normalize-readsb.mjs";
 
 test("normalizes readsb aircraft fields", () => {
   const result = normalizeReadsbPayload({

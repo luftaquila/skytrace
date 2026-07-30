@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import Database from "better-sqlite3";
-import { migrate } from "../src/db.mjs";
-import { getCurrentAircraft, ingestReadsb } from "../src/ingest.mjs";
+import { ensureSchema } from "../server/db.mjs";
+import { getCurrentAircraft, ingestReadsb } from "../server/ingest.mjs";
 
 function database() {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
-  migrate(db);
+  ensureSchema(db);
   return db;
 }
 

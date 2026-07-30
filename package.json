@@ -7,13 +7,13 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "dev": "node --watch src/index.mjs",
-    "start": "node src/index.mjs",
-    "agent": "go run ./cmd/skytrace-agent",
+    "dev": "node --watch server/index.mjs",
+    "start": "node server/index.mjs",
+    "agent": "go run ./receiver/agent",
     "build": "npm --prefix web run build",
     "test:agent": "go test ./... && go vet ./...",
     "test": "node --test --test-timeout=10000 tests/**/*.test.mjs",
-    "test:coverage": "node --test --experimental-test-coverage --test-timeout=10000 --test-coverage-lines=90 --test-coverage-branches=75 --test-coverage-functions=85 '--test-coverage-include=src/**/*.mjs' --test-coverage-exclude=src/index.mjs --test-coverage-include=web/src/settings.js --test-coverage-include=web/src/aircraft-view.js --test-coverage-include=web/src/map-view.js tests/**/*.test.mjs",
+    "test:coverage": "node --test --experimental-test-coverage --test-timeout=10000 --test-coverage-lines=90 --test-coverage-branches=75 --test-coverage-functions=85 '--test-coverage-include=server/**/*.mjs' --test-coverage-exclude=server/index.mjs --test-coverage-include=web/src/settings.js --test-coverage-include=web/src/aircraft-view.js --test-coverage-include=web/src/map-view.js tests/**/*.test.mjs",
     "pretest:e2e": "npm run build",
     "test:e2e": "playwright test",
     "check": "npm run test:agent && npm run test:coverage && npm run test:e2e"

@@ -5,7 +5,7 @@ import {
   buildObservedCoverageMesh,
   sampleObservedCoverageField,
   smoothIndexedCoverageSurface,
-} from "../src/coverage-volume.mjs";
+} from "../server/coverage-volume.mjs";
 
 const ORIGIN = { lat: 36.372628, lon: 127.333295 };
 

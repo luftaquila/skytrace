@@ -88,7 +88,7 @@ env \
     -trimpath \
     -ldflags="-s -w -X main.version=$version" \
     -o "$stage_root/$agent/bin/skytrace-agent" \
-    ./cmd/skytrace-agent
+    ./receiver/agent
 chmod 0755 "$stage_root/$agent/bin/skytrace-agent"
 go version -m "$stage_root/$agent/bin/skytrace-agent" \
   | grep -F $'\tbuild\tGOOS='"$goos" >/dev/null \
@@ -100,8 +100,8 @@ go version -m "$stage_root/$agent/bin/skytrace-agent" \
   | grep -F $'\tbuild\t'"$variant_name"'='"$variant_value" >/dev/null \
   || die "built binary does not report $variant_name=$variant_value"
 install -m 0644 \
-  "$repository_root/receiver/skytrace-agent.service" \
-  "$repository_root/receiver/skytrace-agent.env.example" \
+  "$repository_root/receiver/agent/skytrace-agent.service" \
+  "$repository_root/receiver/agent/skytrace-agent.env.example" \
   "$stage_root/$agent/receiver/"
 install -m 0644 "$repository_root/docs/receiver-agent.md" "$stage_root/$agent/README.md"
 install -m 0644 "$repository_root/LICENSE" "$stage_root/$agent/LICENSE"

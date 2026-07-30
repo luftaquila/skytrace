@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import Database from "better-sqlite3";
-import { loadConfig } from "../src/config.mjs";
-import { migrate, syncReceiverTokens } from "../src/db.mjs";
-import { authenticateIngest } from "../src/ingest.mjs";
+import { loadConfig } from "../server/config.mjs";
+import { ensureSchema, syncReceiverTokens } from "../server/db.mjs";
+import { authenticateIngest } from "../server/ingest.mjs";
 
 const TOKEN_A = "a".repeat(64);
 const TOKEN_B = "b".repeat(64);
@@ -91,7 +91,7 @@ test("receiver token configuration accepts one JSON-object form only", () => {
 test("the configured token map is authoritative for rotation and deletion", () => {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
-  migrate(db);
+  ensureSchema(db);
   try {
     syncReceiverTokens(db, [{ receiverId: "rx-1", token: TOKEN_A }]);
     assert.equal(authenticateIngest(db, TOKEN_A, "rx-1").ok, true);

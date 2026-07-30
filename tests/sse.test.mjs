@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { createSseHub } from "../src/sse.mjs";
+import { createSseHub } from "../server/sse.mjs";
 
 function request(ip) {
   const req = new EventEmitter();

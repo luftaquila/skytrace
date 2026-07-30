@@ -1,4 +1,4 @@
-package receiveragent
+package main
 
 import (
 	"os"

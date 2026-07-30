@@ -26,7 +26,7 @@ ENV SKYTRACE_DB_PATH=/data/skytrace.db
 COPY --from=deps /app/node_modules node_modules/
 COPY package.json ./
 COPY LICENSE ./
-COPY src/ src/
+COPY server/ server/
 COPY --from=web /build/web/dist web/dist/
 # The web half already sits in dist; this merges the server's prod tree into the same file. It has to
 # run after the dist copy, because it reads that file back.
@@ -37,4 +37,4 @@ RUN node scripts/notices.mjs --packages . --scope server --out web/dist/third-pa
 RUN install -d -o node -g node -m 0700 /data && chmod -R a-w /app
 USER node
 EXPOSE 3000
-CMD ["node", "src/index.mjs"]
+CMD ["node", "server/index.mjs"]

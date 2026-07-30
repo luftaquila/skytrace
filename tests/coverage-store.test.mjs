@@ -3,12 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { openDatabase } from "../src/db.mjs";
+import { openDatabase } from "../server/db.mjs";
 import {
   buildCoverageFromCells,
   snapCoverageDatum,
   syncCoverageCells,
-} from "../src/coverage-store.mjs";
+} from "../server/coverage-store.mjs";
 
 async function withDatabase(fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "skytrace-coverage-store-"));

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Reads scratchpad/type-meshes.json and writes scratchpad/mesh-preview.html — an Artifact-ready
+// Reads .cache/meshes/type-meshes.json and writes .cache/meshes/mesh-preview.html — an Artifact-ready
 // (no <html>/<head>/<body> wrapper) self-contained WebGL2 turntable viewer for confirming each
 // per-type mesh in a real browser. Shading mirrors web/src/aircraft-layer.js (two-sided diffuse +
 // whole-volume glow) so the preview reads like the live 3D view. Model frame: +X nose, +Y right
@@ -11,8 +11,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const IN = path.join(HERE, "../scratchpad/type-meshes.json");
-const OUT = path.join(HERE, "../scratchpad/mesh-preview.html");
+const IN = path.join(HERE, "../.cache/meshes/type-meshes.json");
+const OUT = path.join(HERE, "../.cache/meshes/mesh-preview.html");
 
 const LABELS = {
   small: "JET · SMALL (P-51)",

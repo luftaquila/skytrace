@@ -12,7 +12,7 @@
 // from closed primitives, with each part interpenetrating its neighbour rather than merely touching.
 // Run:  node scripts/build-type-meshes.mjs
 //   → validates every mesh (watertight / no degenerate triangles / outward normals / triangle budget),
-//     writes web/src/aircraft-geometry.js (what the app renders) and scratchpad/type-meshes.json (what
+//     writes web/src/aircraft-geometry.js (what the app renders) and .cache/meshes/type-meshes.json (what
 //     build-mesh-preview.mjs and render-mesh-png.mjs read to look at the result). The generated module
 //     is committed, so `git diff web/src/aircraft-geometry.js` is the regression guard: a shape that
 //     already has sign-off cannot move without showing up there.
@@ -22,7 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PREVIEW_JSON = path.join(HERE, "../scratchpad/type-meshes.json");
+const PREVIEW_JSON = path.join(HERE, "../.cache/meshes/type-meshes.json");
 const GEOMETRY_JS = path.join(HERE, "../web/src/aircraft-geometry.js");
 
 // ---- vector helpers ----------------------------------------------------------------------------

@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import Database from "better-sqlite3";
-import { migrate } from "../src/db.mjs";
-import { queryAircraftHistory } from "../src/history-query.mjs";
+import { ensureSchema } from "../server/db.mjs";
+import { queryAircraftHistory } from "../server/history-query.mjs";
 
 const NOW = Date.parse("2026-07-28T12:00:00.000Z");
 
 function database() {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
-  migrate(db);
+  ensureSchema(db);
   db.prepare("INSERT INTO receivers (id) VALUES ('rx-1')").run();
   return db;
 }

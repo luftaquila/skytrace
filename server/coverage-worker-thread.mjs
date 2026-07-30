@@ -4,7 +4,7 @@ import { refreshCoverageSnapshot } from "./coverage-store.mjs";
 
 if (!parentPort) throw new Error("coverage worker requires a parent port");
 
-const db = openDatabase(workerData.dbPath, { migrate: false });
+const db = openDatabase(workerData.dbPath, { ensureSchema: false });
 const options = workerData.options || {};
 const receiverCache = new Map();
 

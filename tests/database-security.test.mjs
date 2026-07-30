@@ -4,7 +4,7 @@ import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { openDatabase } from "../src/db.mjs";
+import { openDatabase } from "../server/db.mjs";
 
 function permissions(file) {
   return fs.statSync(file).mode & 0o777;

@@ -1,10 +1,10 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createApp } from "../src/app.mjs";
-import { loadConfig } from "../src/config.mjs";
-import { openDatabase, syncReceiverTokens } from "../src/db.mjs";
-import { createSseHub } from "../src/sse.mjs";
+import { createApp } from "../server/app.mjs";
+import { loadConfig } from "../server/config.mjs";
+import { openDatabase, syncReceiverTokens } from "../server/db.mjs";
+import { createSseHub } from "../server/sse.mjs";
 
 const TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "skytrace-e2e-"));

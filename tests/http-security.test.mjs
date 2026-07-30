@@ -4,11 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
-import { createApp } from "../src/app.mjs";
-import { loadConfig } from "../src/config.mjs";
-import { openDatabase } from "../src/db.mjs";
-import { encodeJsonForRequest, negotiateEncoding } from "../src/http-response.mjs";
-import { createSseHub } from "../src/sse.mjs";
+import { createApp } from "../server/app.mjs";
+import { loadConfig } from "../server/config.mjs";
+import { openDatabase } from "../server/db.mjs";
+import { encodeJsonForRequest, negotiateEncoding } from "../server/http-response.mjs";
+import { createSseHub } from "../server/sse.mjs";
 import { closeTestApp } from "./helpers/server.mjs";
 
 function coverageSnapshot(now) {

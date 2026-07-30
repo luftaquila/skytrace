@@ -3,8 +3,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { openDatabase } from "../src/db.mjs";
-import { createRetention } from "../src/retention.mjs";
+import { openDatabase } from "../server/db.mjs";
+import { createRetention } from "../server/retention.mjs";
 
 const NOW = Date.parse("2026-07-28T12:00:00.000Z");
 const isoBefore = (milliseconds) => new Date(NOW - milliseconds).toISOString();

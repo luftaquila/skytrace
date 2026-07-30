@@ -101,7 +101,7 @@ function runRetention(db, request) {
   };
 }
 
-const db = openDatabase(workerData.dbPath, { migrate: false });
+const db = openDatabase(workerData.dbPath, { ensureSchema: false });
 parentPort.on("message", (message) => {
   if (message.type === "run") {
     try {

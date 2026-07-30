@@ -6,11 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import zlib from "node:zlib";
-import { buildAirfieldTuples, cellId, createAirfieldsStore, parseCsv } from "../src/airfields-store.mjs";
-import { createApp } from "../src/app.mjs";
-import { loadConfig } from "../src/config.mjs";
-import { openDatabase } from "../src/db.mjs";
-import { createSseHub } from "../src/sse.mjs";
+import { buildAirfieldTuples, cellId, createAirfieldsStore, parseCsv } from "../server/airfields-store.mjs";
+import { createApp } from "../server/app.mjs";
+import { loadConfig } from "../server/config.mjs";
+import { openDatabase } from "../server/db.mjs";
+import { createSseHub } from "../server/sse.mjs";
 import { closeTestApp } from "./helpers/server.mjs";
 
 // --- Fixture dataset: large enough to clear the sanity floors, small enough to stay fast. ----
