@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/database"
-	"github.com/luftaquila/skytrace/internal/ingest"
+	"github.com/luftaquila/skytrace/server/database"
+	"github.com/luftaquila/skytrace/server/ingest"
 )
 
 func TestCurrentAircraftAndHistory(t *testing.T) {

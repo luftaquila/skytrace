@@ -14,7 +14,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-go build -o "$server" ./cmd/skytrace
+go build -o "$server" ./server
 
 export PORT="${SKYTRACE_E2E_PORT:-4173}"
 export SKYTRACE_DB_PATH="$work_directory/skytrace.db"

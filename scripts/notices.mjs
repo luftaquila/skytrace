@@ -8,7 +8,7 @@
 // artifact carries the notice; the source repo does not need a copy.
 //
 // Browser npm dependencies are collected while building web/dist. Linked Go module notices are
-// generated separately by cmd/notices and merged during the Docker build.
+// generated separately by scripts/go-notices and merged during the Docker build.
 //
 //   node scripts/notices.mjs --packages web --scope web --out web/dist/third-party-notices.json
 //

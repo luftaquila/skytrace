@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/database"
+	"github.com/luftaquila/skytrace/server/database"
 )
 
 func testCoverageDB(t *testing.T) *database.DB {

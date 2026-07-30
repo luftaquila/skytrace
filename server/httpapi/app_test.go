@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/config"
-	"github.com/luftaquila/skytrace/internal/coverage"
-	"github.com/luftaquila/skytrace/internal/database"
+	"github.com/luftaquila/skytrace/server/config"
+	"github.com/luftaquila/skytrace/server/coverage"
+	"github.com/luftaquila/skytrace/server/database"
 )
 
 func TestHealthAndSecurityHeaders(t *testing.T) {

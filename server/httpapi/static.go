@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/luftaquila/skytrace/internal/representation"
+	"github.com/luftaquila/skytrace/server/representation"
 )
 
 func (app *App) registerStatic(mux *http.ServeMux) {

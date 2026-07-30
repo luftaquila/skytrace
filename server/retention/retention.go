@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/database"
+	"github.com/luftaquila/skytrace/server/database"
 )
 
 const chunkSize = 2000
