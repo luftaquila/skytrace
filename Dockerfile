@@ -1,5 +1,5 @@
-ARG NODE_IMAGE=node:24.18.0-alpine3.24
-ARG GO_IMAGE=golang:1.26.5-alpine3.24
+ARG NODE_IMAGE=docker.io/library/node:24.18.0-alpine3.24
+ARG GO_IMAGE=docker.io/library/golang:1.26.5-alpine3.24
 FROM ${NODE_IMAGE} AS web
 WORKDIR /build
 COPY web/package*.json web/
@@ -24,7 +24,7 @@ RUN go list -m -json all \
           --scope server \
           --out web/dist/third-party-notices.json
 
-FROM alpine:3.24
+FROM docker.io/library/alpine:3.24
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.revision=$VCS_REF \
       org.opencontainers.image.licenses=GPL-3.0-only
