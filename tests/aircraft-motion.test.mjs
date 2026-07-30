@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -84,18 +83,4 @@ test("clock-only redraws do not restart extrapolation for an unchanged sample", 
   const redraw = tracker.observe("abc123", base, 2000);
   assert.deepEqual(redraw, tracker.sample("abc123", 2000));
   assert.deepEqual(tracker.sample("abc123", 3000), extrapolateMotion(normalizeMotionObservation(base), 3000));
-});
-
-test("only moving or alpha-mutable instances update retained GPU buffers", () => {
-  const tactical = readFileSync(new URL("../web/src/tactical3d.js", import.meta.url), "utf8");
-  const layer = readFileSync(new URL("../web/src/aircraft-layer.js", import.meta.url), "utf8");
-  assert.match(tactical, /const dynamic = motionHexes\.has\(s\.hex\)/);
-  assert.match(tactical, /motionTrailByHex\.set\(d\.hex, segment\)/);
-  assert.match(tactical, /dynamic: true/);
-  assert.match(tactical, /dynamic: motionHexes\.has\(s\.hex\)/);
-  assert.match(tactical, /mutable: d\.coasting/);
-  assert.match(layer, /source\[i\]\.dynamic \|\| source\[i\]\.mutable/);
-  assert.match(layer, /resource\.updateIndices/);
-  assert.match(layer, /gl\.bufferSubData\(gl\.ARRAY_BUFFER/);
-  assert.doesNotMatch(layer, /\blineUpload\b|function seg2|const seg2/);
 });

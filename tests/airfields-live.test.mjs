@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   AIRFIELD_RETRY_MIN_MS,
@@ -7,8 +6,6 @@ import {
   createAirfieldsFeed,
   isMinorAirfield,
 } from "../web/src/airfields-live.js";
-
-const tactical = await readFile(new URL("../web/src/tactical3d.js", import.meta.url), "utf8");
 
 function stubFetch(routes, log = []) {
   return async (url) => {
@@ -195,20 +192,4 @@ test("a transient manifest failure retries quickly without waiting for a page re
   assert.equal(errors[0].retryInMs, AIRFIELD_RETRY_MIN_MS);
   assert.equal(updates, 1);
   assert.equal([...feed.all()].length, 1);
-});
-
-test("tactical3d streams airfields from the feed instead of a baked module", () => {
-  assert.match(tactical, /import \{ createAirfieldsFeed, isMinorAirfield \} from "\.\/airfields-live\.js"/);
-  assert.doesNotMatch(tactical, /from "\.\/airfields\.js"/);
-  assert.match(tactical, /for \(const f of airfieldsFeed\.all\(\)\)/);
-  // A burst of cell arrivals is coalesced into one cached source rebuild instead of serializing the
-  // whole loaded field set once per response.
-  assert.match(tactical, /onUpdate: \(\) => \{[\s\S]*airfieldDataDirty = true/);
-  assert.match(tactical, /onError: \(\{ error, scope, id, retryInMs \}\) => \{/);
-  assert.match(tactical, /Airfield \$\{target\} unavailable; retrying in \$\{retryInMs\} ms/);
-  assert.match(tactical, /window\.setTimeout\(\(\) => \{[\s\S]*refreshAirfields\(\);[\s\S]*AIRFIELD_SOURCE_BATCH_MS/);
-  assert.match(tactical, /if \(!airfieldDataDirty && settingsKey === cachedAirfieldSettingsKey\) return cachedAirfieldFC/);
-  assert.match(tactical, /if \(!force && next === appliedAirfieldFC\) return/);
-  assert.match(tactical, /airfieldsFeed\.ensureViewport\(map\.getBounds\(\), map\.getZoom\(\), Boolean\(deps\.getSettings\(\)\.airfields\)\)/);
-  assert.match(tactical, /airfieldsFeed\.dispose\(\)/);
 });

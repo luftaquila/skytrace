@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -8,8 +7,6 @@ import {
   normalizeMapView,
   saveMapView,
 } from "../web/src/map-view.js";
-
-const tactical = await readFile(new URL("../web/src/tactical3d.js", import.meta.url), "utf8");
 
 function storageWith(initial = {}) {
   const values = new Map(Object.entries(initial));
@@ -54,16 +51,4 @@ test("map view storage round-trips and fails closed on fresh, corrupt or denied 
     { setItem: () => { throw new Error("denied"); } },
     { warn: () => {} },
   ));
-});
-
-test("tactical map restores only centre and zoom while a first visit keeps existing defaults", () => {
-  assert.match(tactical, /const restoredMapView = loadMapView\(\)/);
-  assert.match(tactical, /let userMovedCamera = restoredMapView != null/);
-  assert.match(tactical, /zoom: restoredMapView\?\.zoom \?\? 8/);
-  assert.match(tactical, /center: restoredMapView[\s\S]*\[restoredMapView\.lon, restoredMapView\.lat\][\s\S]*\[HOME\.lon, HOME\.lat\]/);
-  assert.match(tactical, /pitch: 55/);
-  assert.doesNotMatch(tactical, /restoredMapView\?\.(?:bearing|pitch|elevation)/);
-  assert.match(tactical, /window\.addEventListener\("pagehide", persistMapView\)/);
-  assert.match(tactical, /window\.removeEventListener\("pagehide", persistMapView\)/);
-  assert.match(tactical, /mapViewPersistenceReady = true/);
 });

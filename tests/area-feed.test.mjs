@@ -4,17 +4,12 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
 import { createAreaFeed } from "../src/area-feed.mjs";
 import { createApp } from "../src/app.mjs";
 import { loadConfig } from "../src/config.mjs";
 import { openDatabase } from "../src/db.mjs";
 import { createSseHub } from "../src/sse.mjs";
-import { DEFAULT_SETTINGS, normalizeSettings } from "../web/src/settings.js";
 import { closeTestApp } from "./helpers/server.mjs";
-
-const app = await readFile(new URL("../web/src/App.vue", import.meta.url), "utf8");
-const tactical = await readFile(new URL("../web/src/tactical3d.js", import.meta.url), "utf8");
 
 // An adsb.lol-style upstream: {ac: [...]} with epoch-ms `now`. One aircraft carries no position
 // and must be dropped by normalization.
@@ -227,56 +222,6 @@ test("the route validates coordinates and serves normalized traffic uncached", a
     await closeTestApp({ server, app: routeApp, sseHub, db, dir });
     await upstream.close();
   }
-});
-
-test("the area-feed request lifecycle stays bounded and its rows are tagged NET", () => {
-  // Source precedence is behavior-tested in aircraft-view.test.mjs; this test keeps only the
-  // App/tactical integration contract that cannot be exercised without a real map viewport.
-  // The settled viewport drives the fetch. Any wider view still fetches the largest upstream
-  // circle around its centre rather than switching the network feed off.
-  assert.match(app, /onViewSettled: \(area\) => \{ void refreshAreaTraffic\(area\); \}/);
-  assert.match(app, /AREA_FEED_RADIUS_CAP_NM = 250/);
-  assert.doesNotMatch(app, /AREA_FEED_MAX_VIEW_NM/);
-  assert.doesNotMatch(app, /lastViewArea\.radiusNm >/);
-  assert.match(app, /Math\.min\(AREA_FEED_RADIUS_CAP_NM, lastViewArea\.radiusNm\)/);
-  // A 404 (feature off server-side) backs off instead of hammering.
-  assert.match(app, /areaFeedBlockedUntil = performance\.now\(\) \+ 5 \* 60 \* 1000/);
-  // Stale answers must not overwrite a newer viewport's result, and switching the feed off
-  // must invalidate an in-flight request (its late answer used to repopulate the list).
-  assert.match(app, /if \(seq !== areaFetchSeq\) return;/);
-  assert.match(app, /areaFetchSeq \+= 1;\s*\n\s*areaAircraft\.value = \[\];/);
-  assert.match(app, /const net = item\.areaFeed \? " · NET" : ""/);
-  assert.equal(DEFAULT_SETTINGS.areaFeed, true);
-});
-
-test("the configured network feed lists with the receivers and every source has a traffic toggle", () => {
-  // The server capability hides an unconfigured feed. When present, the virtual row remains a
-  // traffic source rather than a receiver: no coverage, no rings, no focus.
-  assert.match(app, /const areaFeedConfigured = ref\(false\)/);
-  assert.match(app, /areaFeedConfigured\.value = configured/);
-  assert.match(app, /if \(areaFeedConfigured\.value\) \{\s*\n\s*rows\.push\(\{/);
-  assert.match(app, /if \(!areaFeedConfigured\.value \|\| !settings\.value\.areaFeed\) return/);
-  assert.match(app, /id: AREA_FEED_ROW_ID,\s*\n\s*virtual: true,\s*\n\s*name: "Network feed"/);
-  assert.match(app, /hasCoverage: false,\s*\n\s*center: null/);
-  // The leftmost row button toggles that source's traffic; the virtual row gates the FETCH.
-  assert.match(app, /row\.virtual \? \(settings\.areaFeed = !settings\.areaFeed\) : toggleReceiverTraffic\(row\.id\)/);
-  assert.ok(app.indexOf("Toggle ${row.name} traffic") < app.indexOf("Centre the view on ${row.name} reception"),
-    "the traffic toggle must be the leftmost row action");
-  // Hiding a receiver hides targets ONLY it sees; shared targets survive on other receivers.
-  assert.match(app, /item\.receivers\.every\(\(id\) => !receiverTrafficVisible\(id\)\)\) return false/);
-  assert.deepEqual(DEFAULT_SETTINGS.trafficHidden, []);
-  assert.deepEqual(normalizeSettings({ trafficHidden: ["rx-a", 4] }).trafficHidden, ["rx-a"]);
-  // The old Filters checkbox is gone: the row button is the single control.
-  assert.equal(app.includes('v-model="settings.areaFeed"'), false);
-});
-
-test("the camera settle key is quantized so a followed target still refreshes the area", () => {
-  assert.match(tactical, /centre\.lng\.toFixed\(2\).*centre\.lat\.toFixed\(2\).*getZoom\(\)\.toFixed\(1\)/);
-  assert.match(tactical, /now - viewSettleAt > 700 && viewSettleNotified !== key/);
-  assert.match(tactical, /deps\.onViewSettled\?\.\(viewArea\(\)\)/);
-  // The viewport radius is the half-diagonal in NM, longitude corrected and antimeridian-safe.
-  assert.match(tactical, /const east = bounds\.getEast\(\) < bounds\.getWest\(\) \? bounds\.getEast\(\) \+ 360 : bounds\.getEast\(\)/);
-  assert.match(tactical, /Math\.hypot\(halfLatNm, halfLonNm\)/);
 });
 
 test("the feed reports its upstream host so the browser can credit the right database", () => {

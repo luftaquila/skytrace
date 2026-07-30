@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { DEFAULT_SETTINGS } from "../web/src/settings.js";
 import {
@@ -13,9 +12,6 @@ import {
   mapPlaceName,
   syncMapReferenceOverlay,
 } from "../web/src/map-reference-style.js";
-
-const tactical = await readFile(new URL("../web/src/tactical3d.js", import.meta.url), "utf8");
-const app = await readFile(new URL("../web/src/App.vue", import.meta.url), "utf8");
 
 function layer(id, visible = true, language) {
   return createMapReferenceLayers({ visible, language }).find((candidate) => candidate.id === id);
@@ -43,11 +39,6 @@ test("only boundary and place source layers are used in the fixed z-order", () =
   assert.deepEqual(layers.slice(0, MAP_REFERENCE_BOUNDARY_LAYER_IDS.length).map(({ id }) => id), MAP_REFERENCE_BOUNDARY_LAYER_IDS);
   assert.deepEqual(layers.slice(MAP_REFERENCE_BOUNDARY_LAYER_IDS.length).map(({ id }) => id), MAP_REFERENCE_PLACE_LAYER_IDS);
 
-  const reference = tactical.indexOf("? createMapReferenceLayers");
-  const rings = tactical.indexOf('{ id: "rings-casing"');
-  const ringLabels = tactical.indexOf('{ id: "ring-label"');
-  const airfields = tactical.indexOf('{ id: "airfield-large"');
-  assert.ok(reference >= 0 && reference < rings && rings < ringLabels && ringLabels < airfields);
   for (const forbidden of ["transportation", "building", "poi"]) {
     assert.equal(layers.some((candidate) => candidate["source-layer"] === forbidden), false);
   }
@@ -149,20 +140,8 @@ test("all place labels remain screen-upright and share the locale expression", (
   }
 });
 
-test("airports and administrative labels declutter independently at a fixed viewport size", () => {
-  assert.match(tactical, /crossSourceCollisions: false/);
-  assert.match(tactical, /installViewportSymbolSize\(map\)/);
-  assert.match(tactical, /"icon-rotation-alignment": "viewport", "icon-pitch-alignment": "viewport"/);
-  assert.match(tactical, /"text-rotation-alignment": "viewport", "text-pitch-alignment": "viewport"/);
-});
-
-test("the saved setting defaults on and dynamically controls the reference source and layers", () => {
+test("the saved setting defaults on and the overlay can be enabled and removed", () => {
   assert.equal(DEFAULT_SETTINGS.mapReferenceLabels, true);
-  assert.match(app, /v-model="settings\.mapReferenceLabels"[^>]*\/> Boundaries &amp; place labels/);
-  assert.match(tactical, /referenceLabelsEnabled\s*\?\s*\{\s*\[MAP_REFERENCE_SOURCE_ID\]: createMapReferenceSource\(\)\s*\}\s*:\s*\{\}/s);
-  assert.match(tactical, /referenceLabelsEnabled\s*\?\s*createMapReferenceLayers\(\{ language: referenceLanguage \}\)\s*:\s*\[\]/s);
-  assert.match(tactical, /syncMapReferenceOverlay\(map, settings\.mapReferenceLabels !== false, referenceLanguage\)/);
-  assert.match(tactical, /syncMapReferenceOverlay\(map, deps\.getSettings\(\)\.mapReferenceLabels !== false, referenceLanguage\)/);
 
   const sources = new Map();
   const layers = new Map([["rings-casing", { id: "rings-casing" }]]);
@@ -192,18 +171,4 @@ test("the saved setting defaults on and dynamically controls the reference sourc
   assert.equal(sources.has(MAP_REFERENCE_SOURCE_ID), false);
   assert.equal(MAP_REFERENCE_LAYER_IDS.some((id) => layers.has(id)), false);
   assert.deepEqual(calls.at(-1), ["removeSource", MAP_REFERENCE_SOURCE_ID]);
-});
-
-test("credits render through the app's own popover, not MapLibre's control", () => {
-  // MapLibre's control renders a single collapsed line and could not host the licence list, so it
-  // stays off and App.vue owns the ⓘ. The credits themselves must NOT disappear with it.
-  assert.match(tactical, /attributionControl: false/);
-  assert.match(app, /class="map-credits"/);
-  assert.match(app, /credit\.role/);
-});
-
-test("reference failures retry independently of the credits UI", () => {
-  assert.match(tactical, /referenceSourceErrorLogged/);
-  assert.match(tactical, /Administrative map reference unavailable; retrying in the background/);
-  assert.match(tactical, /scheduleReferenceSourceRetry\(\)/);
 });

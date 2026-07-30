@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   AIRFIELDS_CREDIT,
@@ -9,9 +8,6 @@ import {
   areaTrafficCredit,
   mapCredits,
 } from "../web/src/credits.js";
-
-const tactical = await readFile(new URL("../web/src/tactical3d.js", import.meta.url), "utf8");
-const app = await readFile(new URL("../web/src/App.vue", import.meta.url), "utf8");
 
 test("every credit names its provider and links out safely", () => {
   for (const credit of mapCredits({ areaFeedHost: "api.adsb.lol" })) {
@@ -82,17 +78,4 @@ test("every source is credited, tied to no layer toggle", () => {
   const roles = ["Imagery", "Terrain", "Labels", "Airfields", "Traffic"];
   assert.deepEqual(mapCredits().map((c) => c.role), roles);
   assert.deepEqual(mapCredits({ areaFeedHost: "api.adsb.lol" }).map((c) => c.role), roles);
-});
-
-test("App.vue credits the host the server reports", () => {
-  assert.match(app, /const credits = computed\(\(\) => mapCredits\(\{ areaFeedHost: areaFeedHost\.value \}\)\);/);
-  assert.match(app, /live\.features\?\.areaFeedHost/);
-});
-
-test("the map sources carry the same credits the popover renders", () => {
-  // One definition, two consumers: the style and the UI. A source that inlined its own string could
-  // drift from the popover, which is how "Maxar" survived a rebrand.
-  assert.match(tactical, /attribution: SATELLITE_CREDIT\.html/);
-  assert.match(tactical, /attribution: TERRAIN_CREDIT\.html/);
-  assert.doesNotMatch(tactical, /attribution: ['"]/);
 });

@@ -2,12 +2,37 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DEFAULT_SETTINGS,
+  RATE_UNITS,
   SETTINGS_KEY,
+  SETTING_BOUNDS,
+  UNIT_PRESETS,
   convertSettingsUnit,
   loadSettings,
   normalizeSettings,
   saveSettings,
 } from "../web/src/settings.js";
+
+test("operator defaults expose independent units and bounded display settings", () => {
+  assert.equal(DEFAULT_SETTINGS.unitAltitude, "ft");
+  assert.equal(DEFAULT_SETTINGS.unitSpeed, "kt");
+  assert.equal(DEFAULT_SETTINGS.unitDistance, "nm");
+  assert.deepEqual(UNIT_PRESETS.metric, {
+    unitAltitude: "m",
+    unitSpeed: "kmh",
+    unitDistance: "km",
+    unitTemperature: "c",
+  });
+  assert.equal(RATE_UNITS.ft.label, "ft/min");
+  assert.equal(RATE_UNITS.m.label, "m/s");
+  assert.equal(SETTINGS_KEY, "skytrace.settings");
+  assert.equal(DEFAULT_SETTINGS.coastSeconds, 20);
+  assert.equal(DEFAULT_SETTINGS.dropSeconds, 60);
+  assert.equal(DEFAULT_SETTINGS.terrainExaggeration, 2);
+  assert.equal(DEFAULT_SETTINGS.altitudeExaggeration, 5);
+  assert.equal(DEFAULT_SETTINGS.aircraftPitchExaggeration, 3);
+  assert.equal(DEFAULT_SETTINGS.aircraftRollExaggeration, 2);
+  assert.deepEqual(SETTING_BOUNDS.aircraftRollExaggeration, [1, 5, 2]);
+});
 
 test("normalization rejects unknown values and enforces dependent bounds", () => {
   const normalized = normalizeSettings({

@@ -17,6 +17,9 @@ test("security and retention settings use strict first-release defaults", () => 
   assert.equal(config.liveMaxAircraft, 5000);
   assert.equal(config.liveMaxBytes, 8 * 1024 * 1024);
   assert.deepEqual(config.receiverTokens, []);
+  assert.equal(config.trackMinIntervalSeconds, 3);
+  assert.equal(config.coverageRefreshSeconds, 180);
+  assert.equal(config.coverageWindowHours, 24 * 30);
 
   assert.throws(
     () => loadConfig({ SKYTRACE_TRACK_RETENTION_DAYS: "30" }),

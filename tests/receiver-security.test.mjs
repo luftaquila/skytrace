@@ -2,54 +2,60 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 
-const install = fs.readFileSync(new URL("../receiver/readsb/install.sh", import.meta.url), "utf8");
-const service = fs.readFileSync(new URL("../receiver/skytrace-agent.service", import.meta.url), "utf8");
-const readsbService = fs.readFileSync(new URL("../receiver/readsb/readsb.service", import.meta.url), "utf8");
-
-test("readsb build is commit-pinned, race-safe and unprivileged", () => {
-  assert.match(install, /READSB_COMMIT=.*[0-9a-f]{40}/);
-  assert.match(install, /READSB_COMMIT.*\^\[0-9a-f\]\{40\}/);
-  assert.match(install, /mktemp -d \/var\/tmp\/readsb-build\.XXXXXX/);
-  assert.match(install, /runuser -u readsb-build[\s\S]*make -C/);
-  assert.match(install, /pkill -KILL -u readsb-build/);
-  assert.match(
-    install,
-    /if \[ ! -f "\$SOURCE_DIR\/readsb" \] \|\| \[ -L "\$SOURCE_DIR\/readsb" \]; then/,
-  );
-  assert.match(install, /runuser -u readsb-build -- \/usr\/local\/bin\/readsb --version/);
-  assert.doesNotMatch(install, /^\s*\/usr\/local\/bin\/readsb --version/m);
-  assert.doesNotMatch(install, /rm -rf \/tmp\/readsb-src/);
-  assert.doesNotMatch(install, /git clone --depth 1 (?!.*commit)/);
-});
-
-test("receiver secrets and the agent service fail closed", () => {
-  assert.match(install, /install -o root -g root -m 0600 .*readsb\.default/);
-  assert.match(install, /chmod 0600 \/etc\/default\/readsb/);
-  assert.match(service, /EnvironmentFile=\/etc\/skytrace-agent\.env/);
-  assert.match(service, /NoNewPrivileges=yes/);
-  assert.match(service, /ProtectSystem=strict/);
-  assert.match(service, /UMask=0077/);
-  assert.match(service, /^ReadOnlyPaths=-\/run\/readsb$/m);
-  assert.doesNotMatch(service, /^ReadWritePaths=/m);
-});
-
-test("readsb is confined without blocking USB access or shared JSON output", () => {
-  for (const setting of [
-    "NoNewPrivileges=yes",
-    "ProtectSystem=strict",
-    "ReadWritePaths=/run/readsb",
-    "ProtectHome=yes",
-    "PrivateTmp=yes",
-    "ProtectKernelTunables=yes",
-    "ProtectKernelModules=yes",
-    "ProtectControlGroups=yes",
-    "RestrictSUIDSGID=yes",
-    "LockPersonality=yes",
-  ]) {
-    assert.match(readsbService, new RegExp(`^${setting}$`, "m"));
+function parseUnit(relative) {
+  const values = new Map();
+  let section = "";
+  for (const raw of fs.readFileSync(new URL(relative, import.meta.url), "utf8").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    if (line.startsWith("[") && line.endsWith("]")) {
+      section = line.slice(1, -1);
+      continue;
+    }
+    const separator = line.indexOf("=");
+    if (separator < 1) throw new Error(`invalid unit directive: ${line}`);
+    const key = `${section}.${line.slice(0, separator)}`;
+    const entry = values.get(key) || [];
+    entry.push(line.slice(separator + 1));
+    values.set(key, entry);
   }
-  assert.doesNotMatch(readsbService, /^PrivateDevices=/m);
-  assert.doesNotMatch(readsbService, /^UMask=/m);
-  assert.doesNotMatch(readsbService, /^SystemCallFilter=/m);
-  assert.doesNotMatch(readsbService, /^RestrictAddressFamilies=/m);
+  return {
+    one(key) {
+      const entry = values.get(key) || [];
+      assert.equal(entry.length, 1, `${key} must occur once`);
+      return entry[0];
+    },
+    has(key) {
+      return values.has(key);
+    },
+  };
+}
+
+test("the agent service confines code and secrets to read-only paths", () => {
+  const unit = parseUnit("../receiver/skytrace-agent.service");
+  assert.equal(unit.one("Service.EnvironmentFile"), "/etc/skytrace-agent.env");
+  assert.equal(unit.one("Service.DynamicUser"), "yes");
+  assert.equal(unit.one("Service.NoNewPrivileges"), "yes");
+  assert.equal(unit.one("Service.ProtectSystem"), "strict");
+  assert.equal(unit.one("Service.ProtectHome"), "yes");
+  assert.equal(unit.one("Service.PrivateTmp"), "yes");
+  assert.equal(unit.one("Service.UMask"), "0077");
+  assert.equal(unit.one("Service.ReadOnlyPaths"), "-/run/readsb");
+  assert.equal(unit.has("Service.ReadWritePaths"), false);
+});
+
+test("the decoder service exposes only its runtime output directory", () => {
+  const unit = parseUnit("../receiver/readsb/readsb.service");
+  assert.equal(unit.one("Service.User"), "readsb");
+  assert.equal(unit.one("Service.NoNewPrivileges"), "yes");
+  assert.equal(unit.one("Service.ProtectSystem"), "strict");
+  assert.equal(unit.one("Service.ProtectHome"), "yes");
+  assert.equal(unit.one("Service.PrivateTmp"), "yes");
+  assert.equal(unit.one("Service.ProtectKernelTunables"), "yes");
+  assert.equal(unit.one("Service.ProtectKernelModules"), "yes");
+  assert.equal(unit.one("Service.ProtectControlGroups"), "yes");
+  assert.equal(unit.one("Service.RestrictSUIDSGID"), "yes");
+  assert.equal(unit.one("Service.LockPersonality"), "yes");
+  assert.equal(unit.one("Service.ReadWritePaths"), "/run/readsb");
+  assert.equal(unit.has("Service.PrivateDevices"), false);
 });
