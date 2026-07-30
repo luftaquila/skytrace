@@ -11,6 +11,8 @@ function fakeWebGl2() {
   const attributeLocations = new WeakMap();
   const drawEvents = [];
   const blendEvents = [];
+  const bufferUploads = [];
+  const uniform1fEvents = [];
   const recordDraw = (kind) => {
     drawEvents.push({
       kind,
@@ -65,7 +67,11 @@ function fakeWebGl2() {
     getParameter(name) { return name === this.MAX_VERTEX_ATTRIBS ? 16 : 0; },
     createBuffer: () => ({ id: ++objectId }),
     bindBuffer() {},
-    bufferData() {},
+    bufferData(target, data) {
+      if (ArrayBuffer.isView(data)) {
+        bufferUploads.push({ target, data: new data.constructor(data) });
+      }
+    },
     bufferSubData() {},
     deleteBuffer() {},
     createVertexArray: () => ({ id: ++objectId }),
@@ -77,12 +83,16 @@ function fakeWebGl2() {
     useProgram() {},
     uniformMatrix4fv() {},
     uniform2f() {},
-    uniform1f() {},
+    uniform1f(location, value) {
+      uniform1fEvents.push({ name: location?.name, value });
+    },
     uniform3f() {},
     uniform3fv() {},
     uniform4fv() {},
     drawEvents,
     blendEvents,
+    bufferUploads,
+    uniform1fEvents,
     drawElements() { recordDraw("coverage-elements"); },
     drawArrays() { recordDraw("coverage-arrays"); },
     drawElementsInstanced() { recordDraw("aircraft"); },
@@ -103,6 +113,72 @@ function fakeWebGl2() {
   };
   return gl;
 }
+
+test("ground contacts and aircraft carry the GPU surface-bias parameters", () => {
+  const map = {
+    getCanvas: () => ({ width: 600, height: 400, clientWidth: 600, clientHeight: 400 }),
+    getContainer: () => ({ clientWidth: 600, clientHeight: 400 }),
+    getCenter: () => ({ lng: 127, lat: 36 }),
+    getZoom: () => 10,
+  };
+  const gl = fakeWebGl2();
+  const aircraftLayer = createAircraftLayer({
+    getData: () => [{
+      lon: 127,
+      lat: 36,
+      z: 725.75,
+      r: 255,
+      g: 255,
+      b: 255,
+      a: 255,
+      yaw: 0,
+      pitch: 0,
+      roll: 0,
+      cls: "medium",
+      clsMul: 1.2,
+      grounded: true,
+    }],
+    getSegments: () => [[{
+      a: [127, 36, 1000],
+      b: [127, 36, 725.75],
+      color: [255, 255, 255, 255],
+      widthPx: 2,
+      groundContact: true,
+    }]],
+    getDots: () => [{
+      p: [127, 36, 725.75],
+      color: [255, 255, 255, 255],
+      sizePx: 3,
+      groundContact: true,
+    }],
+    getCoverage: () => null,
+  });
+  const projection = {
+    defaultProjectionData: {
+      mainMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
+      projectionTransition: 0,
+    },
+  };
+
+  aircraftLayer.onAdd(map, gl);
+  aircraftLayer.render(gl, projection);
+
+  assert.ok(gl.bufferUploads.some(({ data }) => (
+    data instanceof Float32Array && data.length === 30 && Math.abs(data[29] + 1.2) < 1e-6
+  )));
+  assert.ok(gl.bufferUploads.some(({ data }) => (
+    data instanceof Float32Array && data.length === 18 && data[17] === 2
+  )));
+  assert.ok(gl.bufferUploads.some(({ data }) => (
+    data instanceof Float32Array && data.length === 18 && data[17] === 3
+  )));
+  const meshBottoms = gl.uniform1fEvents
+    .filter(({ name }) => name === "u_mesh_bottom")
+    .map(({ value }) => value);
+  assert.ok(meshBottoms.length > 0);
+  assert.ok(meshBottoms.every((value) => Number.isFinite(value) && value < 0));
+  aircraftLayer.onRemove();
+});
 
 test("terrain depth occludes aircraft and sticks before the translucent coverage pass", () => {
   const map = {

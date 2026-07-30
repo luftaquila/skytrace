@@ -89,6 +89,7 @@ precision highp float;
 uniform mat4 u_main;
 uniform vec2 u_viewport;
 uniform float u_icon_floor;
+uniform float u_mesh_bottom;
 uniform vec3 u_reference_high;
 uniform vec3 u_reference_low;
 uniform vec4 u_reference_clip;
@@ -131,7 +132,8 @@ void main() {
   ppm = max(ppm, 0.000001);
 
   float span = a_params.x;
-  float classMultiplier = a_params.y;
+  bool grounded = a_params.y < 0.0;
+  float classMultiplier = abs(a_params.y);
   float worldPixels = span * 130.0 * ppm;
   float pixels = clamp(
     worldPixels,
@@ -139,8 +141,16 @@ void main() {
     120.0 * classMultiplier
   );
   float modelScale = pixels / max(span * ppm, 0.000001);
-  vec3 delta = frame * (attitude * a_pos * modelScale);
+  vec3 modelPosition = a_pos;
+  if (grounded) modelPosition.z -= u_mesh_bottom;
+  vec3 localDelta = attitude * modelPosition * modelScale;
+  // One screen pixel of lift keeps the level model wholly above its DEM contact regardless of the
+  // icon's zoom-dependent world scale. A tiny clip-depth bias prevents residual coplanar flicker
+  // without defeating terrain/globe occlusion for geometry genuinely behind the surface.
+  if (grounded) localDelta.y += 1.0 / ppm;
+  vec3 delta = frame * localDelta;
   gl_Position = origin + u_main * vec4(delta, 0.0);
+  if (grounded) gl_Position.z -= 0.00001 * gl_Position.w;
   v_normal = normalize(attitude * a_normal);
   v_color = a_color;
 }`;
@@ -196,7 +206,8 @@ void main() {
 
   int vertex = gl_VertexID % 6;
   float size = a_params.x;
-  bool dot = a_params.y > 0.5;
+  bool dot = mod(a_params.y, 2.0) > 0.5;
+  bool groundContact = a_params.y > 1.5;
   if (dot) {
     vec2 corner;
     if (vertex == 0 || vertex == 3) corner = vec2(-1.0, -1.0);
@@ -205,6 +216,7 @@ void main() {
     else corner = vec2(-1.0, 1.0);
     vec2 offsetNdc = vec2(corner.x, -corner.y) * size / u_viewport;
     gl_Position = startClip + vec4(offsetNdc * startClip.w, 0.0, 0.0);
+    if (groundContact) gl_Position.z -= 0.00001 * gl_Position.w;
     return;
   }
 
@@ -224,6 +236,7 @@ void main() {
   float side = vertex == 0 || vertex == 2 || vertex == 5 ? 1.0 : -1.0;
   vec4 base = atEnd ? endClip : startClip;
   gl_Position = base + vec4(normalNdc * side * base.w, 0.0, 0.0);
+  if (groundContact && atEnd) gl_Position.z -= 0.00001 * gl_Position.w;
 }`;
 
 const LINE_FRAG = `#version 300 es
@@ -327,10 +340,10 @@ function configureInstanceAttribute(gl, location, size, stride, offset) {
   gl.vertexAttribDivisor(location, 1);
 }
 
-// getData() → [{lon,lat,z,r,g,b,a,yaw,pitch,roll,cls,clsMul,dynamic}]
+// getData() → [{lon,lat,z,r,g,b,a,yaw,pitch,roll,cls,clsMul,grounded?,dynamic}]
 // getSegments() → ordered arrays of
-//   [{a:[lon,lat,alt],b:[lon,lat,alt],color:[r,g,b,a],widthPx,dynamic?,mutable?}]
-// getDots() → [{p:[lon,lat,alt],color:[r,g,b,a],sizePx,dynamic?,mutable?}]
+//   [{a:[lon,lat,alt],b:[lon,lat,alt],color:[r,g,b,a],widthPx,groundContact?,dynamic?,mutable?}]
+// getDots() → [{p:[lon,lat,alt],color:[r,g,b,a],sizePx,groundContact?,dynamic?,mutable?}]
 // getCoverage() → {positions,normals,indices?,anchor,altExagg,alpha} | null
 export function createAircraftLayer({
   id = "aircraft3d",
@@ -478,7 +491,8 @@ export function createAircraftLayer({
     target[offset + 26] = item.b / 255;
     target[offset + 27] = (item.a ?? 255) / 255;
     target[offset + 28] = mesh.span;
-    target[offset + 29] = Number.isFinite(item.clsMul) && item.clsMul > 0 ? item.clsMul : 1;
+    const classMultiplier = Number.isFinite(item.clsMul) && item.clsMul > 0 ? item.clsMul : 1;
+    target[offset + 29] = item.grounded ? -classMultiplier : classMultiplier;
   }
 
   function createAircraftBatch(mesh, usage) {
@@ -519,8 +533,10 @@ export function createAircraftLayer({
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(geometry.indices), gl.STATIC_DRAW);
     let maxExtent = 0;
+    let bottom = Infinity;
     for (let i = 0; i < geometry.positions.length; i += 1) {
       maxExtent = Math.max(maxExtent, Math.abs(geometry.positions[i]));
+      if (i % 3 === 2) bottom = Math.min(bottom, geometry.positions[i]);
     }
     const mesh = {
       positionBuffer,
@@ -528,6 +544,7 @@ export function createAircraftLayer({
       indexBuffer,
       count: geometry.indices.length,
       span: maxExtent * 2,
+      bottom,
     };
     mesh.staticBatch = createAircraftBatch(mesh, gl.STATIC_DRAW);
     mesh.dynamicBatch = createAircraftBatch(mesh, gl.DYNAMIC_DRAW);
@@ -577,6 +594,7 @@ export function createAircraftLayer({
 
   function drawAircraftBatch(mesh, batch) {
     if (!batch.count) return;
+    gl.uniform1f(aircraftLoc.meshBottom, mesh.bottom);
     gl.bindVertexArray(batch.vao);
     gl.drawElementsInstanced(
       gl.TRIANGLES,
@@ -626,7 +644,7 @@ export function createAircraftLayer({
     target[offset + 14] = color[2] / 255;
     target[offset + 15] = (color[3] ?? 255) / 255;
     target[offset + 16] = dot ? (item.sizePx || 3) : (item.widthPx || 1.5);
-    target[offset + 17] = dot ? 1 : 0;
+    target[offset + 17] = (dot ? 1 : 0) + (item.groundContact ? 2 : 0);
   }
 
   function createLineResource(source, dot) {
@@ -787,6 +805,7 @@ export function createAircraftLayer({
       aircraftLoc.main = uniform(gl, aircraftProgram, "u_main");
       aircraftLoc.viewport = uniform(gl, aircraftProgram, "u_viewport");
       aircraftLoc.iconFloor = uniform(gl, aircraftProgram, "u_icon_floor");
+      aircraftLoc.meshBottom = uniform(gl, aircraftProgram, "u_mesh_bottom");
       aircraftLoc.referenceHigh = uniform(gl, aircraftProgram, "u_reference_high");
       aircraftLoc.referenceLow = uniform(gl, aircraftProgram, "u_reference_low");
       aircraftLoc.referenceClip = uniform(gl, aircraftProgram, "u_reference_clip");

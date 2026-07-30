@@ -44,6 +44,10 @@ import {
   createEsriTileProtocol,
   createMapterhornTileProtocol,
 } from "./tile-protocols.js";
+import {
+  queryTerrainContactElevation,
+  resolveAircraftTerrainState,
+} from "./terrain-grounding.js";
 import { currentTrackRun } from "./track-runs.js";
 
 const FT_TO_M = 0.3048;
@@ -152,6 +156,14 @@ export function createTactical3d({ container, deps }) {
   const trailGeometryCache = new WeakMap();
   let disposed = false;
   let ready = false;
+  let terrainGroundRefreshRaf = 0;
+  function scheduleTerrainGroundRefresh() {
+    if (disposed || !ready || terrainGroundRefreshRaf) return;
+    terrainGroundRefreshRaf = requestAnimationFrame(() => {
+      terrainGroundRefreshRaf = 0;
+      buildLayers();
+    });
+  }
   // The live site reference (mean reception centroid). Rings, the coverage tangent plane and the
   // opening view all follow it, so a deployment with its own receivers is centred on its own sky.
   function site() {
@@ -326,6 +338,13 @@ export function createTactical3d({ container, deps }) {
   map.on("sourcedata", (event) => {
     if (event?.sourceId === MAP_REFERENCE_SOURCE_ID && event.isSourceLoaded) {
       resetReferenceSourceRetry();
+    }
+    // queryTerrainElevation() returns a temporary sea-level fallback until the applicable DEM tile
+    // arrives. Rebuild once per display frame as terrain content streams in so ground aircraft,
+    // stick feet, and dots move onto the exact rendered surface without waiting for new ADS-B data.
+    if (event?.sourceId === "dem"
+      && (event.sourceDataType === "content" || event.sourceDataType === "idle")) {
+      scheduleTerrainGroundRefresh();
     }
   });
   // MapLibre deliberately constructs Map with a temporary MercatorTransform and replaces it with a
@@ -1336,6 +1355,7 @@ export function createTactical3d({ container, deps }) {
   let aircraftStickByHex = new Map();
   let motionStickByHex = new Map();
   let motionTrailByHex = new Map();
+  let motionGroundRefreshAt = 0;
   const aircraftLayer = createAircraftLayer({
     getData: () => aircraftRenderList,
     // Keep the usually huge trail array separate and identity-stable while live aircraft/sticks
@@ -1594,9 +1614,9 @@ export function createTactical3d({ container, deps }) {
       if (item.lat == null || item.lon == null) continue;
       if (!deps.passesFilters(item)) continue;
       if (deps.isDropped(item)) continue;
-      const altFt = item.altBaro ?? item.altGeom;
-      const airborne = !item.onGround && altFt != null;
-      const altM = airborne ? altFt * FT_TO_M : 0;
+      const groundZ = queryTerrainContactElevation(map, item.lon, item.lat);
+      const terrainState = resolveAircraftTerrainState(item, groundZ, altitudeExagg);
+      const { airborne, grounded, z } = terrainState;
       const rgb = parseRgb(deps.altitudeColor(item));
       let phi = 0;
       if (airborne) {
@@ -1617,7 +1637,6 @@ export function createTactical3d({ container, deps }) {
       // The model is right-handed: +X nose, +Y left wing, +Z up. Positive Rx raises the left wing
       // and lowers the physical right wing (-Y), matching positive ADS-B bank. Pitch still needs
       // negation because positive Ry sends the nose towards -Z.
-      const z = altM * altitudeExagg;
       const motion = {
         lon: item.lon,
         lat: item.lat,
@@ -1628,7 +1647,7 @@ export function createTactical3d({ container, deps }) {
         roll: bank,
         pitch: phi,
         verticalSpeed: airborne ? (item.baroRate ?? item.geomRate ?? 0) * 0.00508 * altitudeExagg : 0,
-        onGround: !airborne,
+        onGround: grounded,
         // The clock-driven dataPass runs every second. Only a genuinely new receiver sample may
         // reset the extrapolation clock or start a correction toward a new observed position.
         key: [item.positionAt, item.observedAt, item.lon, item.lat, z, item.gs, item.track, item.trackRate, bank, item.baroRate, item.geomRate].join("|"),
@@ -1639,7 +1658,9 @@ export function createTactical3d({ container, deps }) {
         lon: item.lon,
         lat: item.lat,
         z,
+        groundZ,
         airborne,
+        grounded,
         rgb,
         cls,
         meshKind,
@@ -1696,7 +1717,7 @@ export function createTactical3d({ container, deps }) {
     const sticks = list.filter((d) => d.airborne).map((d) => ({
       hex: d.hex,
       source: [d.lon, d.lat, d.z],
-      target: [d.lon, d.lat, 0],
+      target: [d.lon, d.lat, d.groundZ],
       color: [d.rgb.r, d.rgb.g, d.rgb.b, Math.round(200 * d.coastOpacity)],
       mutable: d.coasting,
     }));
@@ -1787,7 +1808,19 @@ export function createTactical3d({ container, deps }) {
     const trailAnchors = aircraftTrailAnchors;
 
     const ghost = deps.getPlaybackGhost();
-    const ghostData = ghost && ghost.lat != null ? [{ lon: ghost.lon, lat: ghost.lat, z: ((ghost.altBaro ?? ghost.altGeom) || 0) * FT_TO_M * altitudeExagg, rgb: parseRgb(deps.altitudeColor(ghost)), orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0] }] : [];
+    const ghostData = [];
+    if (ghost && ghost.lat != null && ghost.lon != null) {
+      const groundZ = queryTerrainContactElevation(map, ghost.lon, ghost.lat);
+      const terrainState = resolveAircraftTerrainState(ghost, groundZ, altitudeExagg);
+      ghostData.push({
+        lon: ghost.lon,
+        lat: ghost.lat,
+        z: terrainState.z,
+        grounded: terrainState.grounded,
+        rgb: parseRgb(deps.altitudeColor(ghost)),
+        orientation: [0, 90 - (Number.isFinite(ghost.track) ? ghost.track : 0), 0],
+      });
+    }
 
     const covMesh = coverageMesh();
     // Aircraft grouped by size class so per-category size differences survive the pixel clamp
@@ -1822,6 +1855,7 @@ export function createTactical3d({ container, deps }) {
         roll: d.orientation[2],
         cls,
         clsMul: d.cls * iconScale,
+        grounded: d.grounded,
         dynamic: motionHexes.has(d.hex) || d.coasting,
       };
     });
@@ -1838,6 +1872,7 @@ export function createTactical3d({ container, deps }) {
         b: s.target,
         color: s.color,
         widthPx: 1.6,
+        groundContact: true,
         dynamic,
         mutable: s.mutable,
       };
@@ -1878,6 +1913,7 @@ export function createTactical3d({ container, deps }) {
       p: s.target,
       color: s.color,
       sizePx: 3,
+      groundContact: true,
       dynamic: motionHexes.has(s.hex),
       mutable: s.mutable,
     }));
@@ -1905,6 +1941,7 @@ export function createTactical3d({ container, deps }) {
       roll: g.orientation[2],
       cls: "medium",
       clsMul: iconScale,
+      grounded: g.grounded,
       dynamic: true,
     });
     if (ready) requestTacticalRepaint();
@@ -1931,11 +1968,17 @@ export function createTactical3d({ container, deps }) {
 
   function applyMotionFrame(now) {
     let animateAgain = false;
+    const refreshGround = now >= motionGroundRefreshAt;
+    if (refreshGround) motionGroundRefreshAt = now + 250;
     for (const d of lastList) {
       if (!motionHexes.has(d.hex)) continue;
       const state = motionTracker.sample(d.hex, now);
       if (!state) continue;
       applyMotionState(d, state);
+      if (refreshGround) {
+        d.groundZ = queryTerrainContactElevation(map, d.lon, d.lat);
+        if (d.grounded) d.z = d.groundZ;
+      }
       const rendered = aircraftRenderByHex.get(d.hex);
       if (rendered) {
         rendered.lon = d.lon;
@@ -1948,7 +1991,7 @@ export function createTactical3d({ container, deps }) {
       const stick = motionStickByHex.get(d.hex);
       if (stick) {
         stick.a[0] = d.lon; stick.a[1] = d.lat; stick.a[2] = d.z;
-        stick.b[0] = d.lon; stick.b[1] = d.lat;
+        stick.b[0] = d.lon; stick.b[1] = d.lat; stick.b[2] = d.groundZ;
       }
       const trail = motionTrailByHex.get(d.hex);
       if (trail) { trail.b[0] = d.lon; trail.b[1] = d.lat; trail.b[2] = d.z; }
@@ -2875,7 +2918,13 @@ export function createTactical3d({ container, deps }) {
       clearOrbit();
       return false;
     }
-    const z = (altFt ?? 0) * FT_TO_M * altitudeExagg;
+    const current = lastList.find((item) => item.hex === selectedHex);
+    const z = current?.z
+      ?? resolveAircraftTerrainState(
+        { altBaro: altFt, altGeom: null, onGround: altFt == null || altFt === 0 },
+        queryTerrainContactElevation(map, lon, lat),
+        altitudeExagg,
+      ).z;
     return transitionTrackedSelection({ hex: selectedHex, lon, lat, z }, "track-start");
   }
   function toggleAirfieldTracking(field) {
@@ -2896,6 +2945,8 @@ export function createTactical3d({ container, deps }) {
     suspendCanvasHover();
     airfieldSourceTimer = 0;
     cancelTacticalRepaint();
+    if (terrainGroundRefreshRaf) cancelAnimationFrame(terrainGroundRefreshRaf);
+    terrainGroundRefreshRaf = 0;
     cancelCameraInput();
     cancelCameraSourceUpdate();
     retainedSymbolPlacement.destroy();
