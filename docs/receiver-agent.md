@@ -24,11 +24,7 @@ Choose the release archive matching `uname -m`:
 | `riscv64` | `linux-riscv64` |
 
 A 64-bit-capable Raspberry Pi running a 32-bit operating system reports `armv7l` and must use the
-`linux-armv7` archive. Download `SHA256SUMS` from the same GitHub Release and verify the archive:
-
-```sh
-sha256sum -c --ignore-missing SHA256SUMS
-```
+`linux-armv7` archive.
 
 ## Install
 

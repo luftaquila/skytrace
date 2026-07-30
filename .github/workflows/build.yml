@@ -177,7 +177,7 @@ jobs:
           pattern: receiver-agent-*
           path: ${{ runner.temp }}/agents
           merge-multiple: true
-      - name: Verify and checksum receiver release assets
+      - name: Verify receiver release assets
         shell: bash
         run: |
           set -euo pipefail
@@ -192,14 +192,10 @@ jobs:
             test -f "skytrace-agent-$IMAGE_TAG-$target.tar.gz"
           done
           test "$(find . -maxdepth 1 -name 'skytrace-agent-*.tar.gz' | wc -l)" -eq 5
-          sha256sum skytrace-agent-"$IMAGE_TAG"-linux-*.tar.gz > SHA256SUMS
-          sha256sum -c SHA256SUMS
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: receiver-agents
-          path: |
-            ${{ runner.temp }}/agents/skytrace-agent-*.tar.gz
-            ${{ runner.temp }}/agents/SHA256SUMS
+          path: ${{ runner.temp }}/agents/skytrace-agent-*.tar.gz
           if-no-files-found: error
           retention-days: 1
 
@@ -323,7 +319,6 @@ jobs:
             test -f "skytrace-agent-$IMAGE_TAG-$target.tar.gz"
           done
           test "$(find . -maxdepth 1 -name 'skytrace-agent-*.tar.gz' | wc -l)" -eq 5
-          sha256sum -c SHA256SUMS
       - name: Publish the release
         shell: bash
         env:
@@ -338,7 +333,7 @@ jobs:
             '' \
             '## Receiver agent' \
             '' \
-            "Download the linux archive matching the receiver CPU architecture and verify it with \`SHA256SUMS\`."
+            'Download the Linux archive matching the receiver CPU architecture.'
           if release_is_draft=$(gh release view "$IMAGE_TAG" \
             --json isDraft --jq .isDraft 2>/dev/null); then
             if [[ "$release_is_draft" != "true" ]]; then
@@ -359,6 +354,5 @@ jobs:
             "$RUNNER_TEMP/agents/skytrace-agent-${IMAGE_TAG}-linux-arm64.tar.gz" \
             "$RUNNER_TEMP/agents/skytrace-agent-${IMAGE_TAG}-linux-amd64.tar.gz" \
             "$RUNNER_TEMP/agents/skytrace-agent-${IMAGE_TAG}-linux-riscv64.tar.gz" \
-            "$RUNNER_TEMP/agents/SHA256SUMS" \
             --clobber
           gh release edit "$IMAGE_TAG" --draft=false
