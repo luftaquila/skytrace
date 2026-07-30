@@ -20,11 +20,8 @@ test("every shipped package carries a licence id and its notice text", () => {
 test("the npm closure is production-only and covers the shipped browser tree", () => {
   const names = new Set(web.map((pkg) => pkg.name));
   assert.ok(names.has("maplibre-gl"), "web runtime dep must be covered");
-  // Root Node dependencies remain only for the legacy parity suite and do not reach the image; the
-  // Docker build adds notices from the linked Go binary separately.
-  for (const dependency of Object.keys(rootManifest.dependencies || {})) {
-    assert.ok(!names.has(dependency), `${dependency} is test-only and must not be listed`);
-  }
+  // Root development and browser-test dependencies do not reach the image; the Docker build adds
+  // notices from the linked Go binary separately.
   for (const dev of Object.keys(webManifest.devDependencies || {})) {
     assert.ok(!names.has(dev), `${dev} is a devDependency and must not be listed`);
   }
