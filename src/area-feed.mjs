@@ -101,13 +101,17 @@ export function createAreaFeed({
   ttlMs = 5000,
   minUpstreamGapMs = 1100,
   fetchImpl = fetch,
+  nowImpl = Date.now,
 } = {}) {
   const validated = validateTemplate(url);
   const enabled = validated != null;
   // The upstream is whatever the operator pointed us at, so the browser cannot know who to credit
   // unless we tell it. Only the host goes out: the path and query can carry a feed UUID.
   const host = validated?.host || null;
-  const cache = new Map(); // key -> { at, data, promise }
+  // fetchedAt owns freshness; lastUsedAt owns eviction order. Combining the two turns the TTL
+  // into sliding expiration, so frequent viewers can otherwise keep one area's aircraft frozen
+  // forever until moving the camera changes the cache key.
+  const cache = new Map(); // key -> { fetchedAt, lastUsedAt, data, promise }
   let nextUpstreamSlot = 0;
   let upstreamCalls = 0;
   let cachedBytes = 0;
@@ -122,7 +126,7 @@ export function createAreaFeed({
   function oldestCompleted() {
     return [...cache.entries()]
       .filter(([, entry]) => !entry.promise)
-      .sort((a, b) => a[1].at - b[1].at)[0];
+      .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt)[0];
   }
 
   function makeInsertionRoom() {
@@ -150,9 +154,9 @@ export function createAreaFeed({
 
   async function fetchUpstream(gridLat, gridLon, bucket) {
     // Reserve an upstream slot synchronously, so concurrent areas space themselves out.
-    const wait = Math.max(0, nextUpstreamSlot - Date.now());
+    const wait = Math.max(0, nextUpstreamSlot - nowImpl());
     if (wait > MAX_UPSTREAM_WAIT_MS) throw typedError(503, "area feed busy", 3);
-    nextUpstreamSlot = Date.now() + wait + minUpstreamGapMs;
+    nextUpstreamSlot = nowImpl() + wait + minUpstreamGapMs;
     if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
     const target = new URL(replaceSlots(validated.template, [
       gridLat.toFixed(3),
@@ -172,7 +176,7 @@ export function createAreaFeed({
         abort: () => controller.abort(),
       });
       upstreamCalls += 1;
-      const nowMs = Date.now();
+      const nowMs = nowImpl();
       // The v2 clones answer {ac: [...]}; adsb.fi answers {aircraft: [...]} like raw readsb.
       const list = Array.isArray(body.ac) ? body.ac : Array.isArray(body.aircraft) ? body.aircraft : [];
       const bounded = list.slice(0, MAX_AREA_AIRCRAFT);
@@ -187,7 +191,7 @@ export function createAreaFeed({
           receivers: [],
         }));
       return {
-        now: new Date().toISOString(),
+        now: new Date(nowMs).toISOString(),
         centre: { lat: gridLat, lon: gridLon },
         radiusNm: bucket,
         count: aircraft.length,
@@ -202,10 +206,10 @@ export function createAreaFeed({
   async function query(lat, lon, radiusNm) {
     if (!enabled) return null;
     const { key, gridLat, gridLon, bucket } = areaKey(lat, lon, Math.min(250, radiusNm));
-    const now = Date.now();
+    const now = nowImpl();
     const entry = cache.get(key);
-    if (entry?.data && now - entry.at < ttlMs) {
-      entry.at = now;
+    if (entry?.data && now - entry.fetchedAt < ttlMs) {
+      entry.lastUsedAt = now;
       return entry.data;
     }
     if (entry?.promise) return entry.promise;
@@ -218,7 +222,13 @@ export function createAreaFeed({
           throw typedError(502, "upstream response too large");
         }
         removeEntry(key);
-        cache.set(key, { at: Date.now(), data, bytes });
+        const completedAt = nowImpl();
+        cache.set(key, {
+          fetchedAt: completedAt,
+          lastUsedAt: completedAt,
+          data,
+          bytes,
+        });
         cachedBytes += bytes;
         enforceCacheBounds();
         return data;
@@ -226,14 +236,19 @@ export function createAreaFeed({
       .catch((error) => {
         // A failed refresh serves the recently stale answer rather than blanking the area.
         removeEntry(key);
-        if (entry?.data && now - entry.at < STALE_GRACE_MS) {
-          cache.set(key, entry);
+        if (entry?.data && now - entry.fetchedAt < STALE_GRACE_MS) {
+          cache.set(key, { ...entry, lastUsedAt: now });
           cachedBytes += entry.bytes || 0;
           return entry.data;
         }
         throw error;
       });
-    cache.set(key, { ...entry, at: now, promise, bytes: entry?.bytes || 0 });
+    cache.set(key, {
+      ...entry,
+      lastUsedAt: now,
+      promise,
+      bytes: entry?.bytes || 0,
+    });
     return promise;
   }
 

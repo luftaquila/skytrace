@@ -102,6 +102,32 @@ test("nearby pans share one cached area and the TTL bounds upstream calls", asyn
   }
 });
 
+test("cache hits do not extend an area's upstream freshness forever", async () => {
+  const upstream = fixtureUpstream();
+  const url = await upstream.listen();
+  let now = 10000;
+  try {
+    const feed = createAreaFeed({
+      url,
+      ttlMs: 5000,
+      minUpstreamGapMs: 0,
+      nowImpl: () => now,
+    });
+    await feed.query(50.0, 8.5, 80);
+    now += 4000;
+    await feed.query(50.0, 8.5, 80);
+    assert.equal(upstream.requests.length, 1, "a hit inside the fixed TTL should use the cache");
+
+    // This is six seconds after the upstream fetch but only two seconds after the cache hit.
+    // Updating the freshness timestamp on that hit used to keep a stationary viewport stale.
+    now += 2000;
+    await feed.query(50.0, 8.5, 80);
+    assert.equal(upstream.requests.length, 2, "the fixed TTL must expire from the upstream fetch");
+  } finally {
+    await upstream.close();
+  }
+});
+
 test("an unset template disables the feed and the route answers 404", async () => {
   assert.equal(createAreaFeed({ log: () => {} }).enabled, false);
 
