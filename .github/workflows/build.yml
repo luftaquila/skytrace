@@ -49,6 +49,10 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.mod
       - run: npm ci
       - run: npm --prefix web ci
       - run: npx playwright install --with-deps chromium
@@ -69,6 +73,10 @@ jobs:
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: 24
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.mod
       - run: scripts/smoke-compose.sh docker
 
   podman-compose-test:
@@ -79,6 +87,10 @@ jobs:
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: 24
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.mod
       - name: Install the native Podman Compose provider
         run: |
           python3 -m venv "$RUNNER_TEMP/podman-compose"
@@ -90,6 +102,100 @@ jobs:
         run: |
           test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
           scripts/smoke-compose.sh podman
+
+  agent-build:
+    needs: release-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-24.04
+            execute: true
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            execute: true
+          - target: linux-armv6
+            runner: ubuntu-24.04
+            execute: false
+          - target: linux-armv7
+            runner: ubuntu-24.04
+            execute: false
+          - target: linux-riscv64
+            runner: ubuntu-24.04
+            execute: false
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.mod
+      - name: Build and inspect the receiver target
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/agents"
+          extract="$RUNNER_TEMP/extracted"
+          mkdir -p "$output" "$extract"
+          target="${{ matrix.target }}"
+          scripts/package-agent.sh "$IMAGE_TAG" "$target" "$output"
+          archive="$output/skytrace-agent-$IMAGE_TAG-$target.tar.gz"
+          tar -C "$extract" -xzf "$archive"
+          binary="$extract/skytrace-agent-$IMAGE_TAG-$target/bin/skytrace-agent"
+          go version -m "$binary"
+      - name: Execute the native receiver target
+        if: matrix.execute
+        shell: bash
+        run: |
+          binary="$RUNNER_TEMP/extracted/skytrace-agent-$IMAGE_TAG-${{ matrix.target }}/bin/skytrace-agent"
+          "$binary" --version | grep -Fx "skytrace-agent $IMAGE_TAG"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: receiver-agent-${{ matrix.target }}
+          path: ${{ runner.temp }}/agents/skytrace-agent-*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  agent-assets:
+    needs: agent-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: receiver-agent-*
+          path: ${{ runner.temp }}/agents
+          merge-multiple: true
+      - name: Verify and checksum receiver release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/agents"
+          for target in \
+            linux-armv6 \
+            linux-armv7 \
+            linux-arm64 \
+            linux-amd64 \
+            linux-riscv64
+          do
+            test -f "skytrace-agent-$IMAGE_TAG-$target.tar.gz"
+          done
+          test "$(find . -maxdepth 1 -name 'skytrace-agent-*.tar.gz' | wc -l)" -eq 5
+          sha256sum skytrace-agent-"$IMAGE_TAG"-linux-*.tar.gz > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: receiver-agents
+          path: |
+            ${{ runner.temp }}/agents/skytrace-agent-*.tar.gz
+            ${{ runner.temp }}/agents/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
 
   build:
     needs: [release-test, docker-compose-test, podman-compose-test]
@@ -185,16 +291,33 @@ jobs:
           docker buildx imagetools inspect "${REGISTRY_IMAGE}@${digest}"
 
   release:
-    needs: manifest
+    needs: [manifest, agent-assets]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Build the agent archive
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: receiver-agents
+          path: ${{ runner.temp }}/agents
+      - name: Verify receiver release assets
         shell: bash
-        run: scripts/package-agent.sh "$IMAGE_TAG" "$RUNNER_TEMP"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/agents"
+          for target in \
+            linux-armv6 \
+            linux-armv7 \
+            linux-arm64 \
+            linux-amd64 \
+            linux-riscv64
+          do
+            test -f "skytrace-agent-$IMAGE_TAG-$target.tar.gz"
+          done
+          test "$(find . -maxdepth 1 -name 'skytrace-agent-*.tar.gz' | wc -l)" -eq 5
+          sha256sum -c SHA256SUMS
       - name: Publish the release
         shell: bash
         env:
@@ -205,7 +328,11 @@ jobs:
             '' \
             '```env' \
             "SKYTRACE_IMAGE=${REGISTRY_IMAGE}:${IMAGE_TAG}" \
-            '```'
+            '```' \
+            '' \
+            '## Receiver agent' \
+            '' \
+            "Download the linux archive matching the receiver CPU architecture and verify it with \`SHA256SUMS\`."
           if release_is_draft=$(gh release view "$IMAGE_TAG" \
             --json isDraft --jq .isDraft 2>/dev/null); then
             if [[ "$release_is_draft" != "true" ]]; then
@@ -221,6 +348,11 @@ jobs:
               --notes "$release_notes"
           fi
           gh release upload "$IMAGE_TAG" \
-            "$RUNNER_TEMP/skytrace-agent-${IMAGE_TAG}.tar.gz" \
+            "$RUNNER_TEMP/agents/skytrace-agent-${IMAGE_TAG}-linux-armv6.tar.gz" \
+            "$RUNNER_TEMP/agents/skytrace-agent-${IMAGE_TAG}-linux-armv7.tar.gz" \
+            "$RUNNER_TEMP/agents/skytrace-agent-${IMAGE_TAG}-linux-arm64.tar.gz" \
+            "$RUNNER_TEMP/agents/skytrace-agent-${IMAGE_TAG}-linux-amd64.tar.gz" \
+            "$RUNNER_TEMP/agents/skytrace-agent-${IMAGE_TAG}-linux-riscv64.tar.gz" \
+            "$RUNNER_TEMP/agents/SHA256SUMS" \
             --clobber
           gh release edit "$IMAGE_TAG" --draft=false

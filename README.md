@@ -56,7 +56,7 @@ dump1090 data.
 ## Receiver agent
 
 - Reads one local readsb or dump1090 `aircraft.json` source and uploads bounded batches to Skytrace.
-- Requires Node.js 24 and the agent archive from the same release as the server.
+- Ships as a self-contained Go binary for Linux ARMv6, ARMv7, ARM64, AMD64 and RISC-V 64.
 - Configure the server URL, receiver ID, matching token and one JSON source.
 - Installation and systemd setup: [receiver agent guide](docs/receiver-agent.md).
 
@@ -70,7 +70,7 @@ dump1090 data.
 
 ## Development
 
-- Requires Node.js 24.
+- Requires Node.js 24 and Go 1.26.
 - Install dependencies: `npm ci && npm --prefix web ci`.
 - Install browser tests: `npx playwright install chromium`; on Linux, use
   `npx playwright install --with-deps chromium`.

@@ -34,6 +34,7 @@ function parseUnit(relative) {
 test("the agent service confines code and secrets to read-only paths", () => {
   const unit = parseUnit("../receiver/skytrace-agent.service");
   assert.equal(unit.one("Service.EnvironmentFile"), "/etc/skytrace-agent.env");
+  assert.equal(unit.one("Service.ExecStart"), "/opt/skytrace/bin/skytrace-agent");
   assert.equal(unit.one("Service.DynamicUser"), "yes");
   assert.equal(unit.one("Service.NoNewPrivileges"), "yes");
   assert.equal(unit.one("Service.ProtectSystem"), "strict");

@@ -18,6 +18,10 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.mod
       - run: npm ci
       - run: npm --prefix web ci
       - run: npx playwright install --with-deps chromium
@@ -29,3 +33,56 @@ jobs:
           SKYTRACE_IMAGE: ghcr.io/example/skytrace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           SKYTRACE_ENV_FILE: /dev/null
       - run: npm run check
+
+  agent-architectures:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-24.04
+            execute: true
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            execute: true
+          - target: linux-armv6
+            runner: ubuntu-24.04
+            execute: false
+          - target: linux-armv7
+            runner: ubuntu-24.04
+            execute: false
+          - target: linux-riscv64
+            runner: ubuntu-24.04
+            execute: false
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.mod
+      - name: Build and inspect the receiver target
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="v$(node -p 'require("./package.json").version')"
+          output="$RUNNER_TEMP/agents"
+          extract="$RUNNER_TEMP/extracted"
+          mkdir -p "$output" "$extract"
+          target="${{ matrix.target }}"
+          scripts/package-agent.sh "$version" "$target" "$output"
+          archive="$output/skytrace-agent-$version-$target.tar.gz"
+          tar -C "$extract" -xzf "$archive"
+          binary="$extract/skytrace-agent-$version-$target/bin/skytrace-agent"
+          go version -m "$binary"
+      - name: Execute the native receiver target
+        if: matrix.execute
+        shell: bash
+        run: |
+          version="v$(node -p 'require("./package.json").version')"
+          binary="$RUNNER_TEMP/extracted/skytrace-agent-$version-${{ matrix.target }}/bin/skytrace-agent"
+          "$binary" --version | grep -Fx "skytrace-agent $version"

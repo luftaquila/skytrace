@@ -147,9 +147,22 @@ fi
 compose_cmd up -d
 wait_health || die "Skytrace did not become healthy"
 
-"$repository_root/scripts/package-agent.sh" "$version" "$work_directory"
-tar -C "$work_directory" -xzf "$work_directory/skytrace-agent-$version.tar.gz"
-agent_directory="$work_directory/skytrace-agent-$version"
+image_architecture=$("$engine" image inspect "$good_ref" --format '{{.Architecture}}')
+case "$image_architecture" in
+  amd64|x86_64)
+    agent_target=linux-amd64
+    ;;
+  arm64|aarch64)
+    agent_target=linux-arm64
+    ;;
+  *)
+    die "unsupported smoke image architecture: $image_architecture"
+    ;;
+esac
+"$repository_root/scripts/package-agent.sh" "$version" "$agent_target" "$work_directory"
+tar -C "$work_directory" \
+  -xzf "$work_directory/skytrace-agent-$version-$agent_target.tar.gz"
+agent_directory="$work_directory/skytrace-agent-$version-$agent_target"
 aircraft_file="$work_directory/aircraft.json"
 node -e '
   process.stdout.write(JSON.stringify({
@@ -169,12 +182,18 @@ node -e '
 ' > "$aircraft_file"
 
 echo "uploading through the extracted receiver agent"
-env \
-  SKYTRACE_SERVER_URL="http://127.0.0.1:$app_port" \
-  SKYTRACE_RECEIVER_ID=smoke-rx \
-  SKYTRACE_TOKEN="$token" \
-  SKYTRACE_AIRCRAFT_FILE="$aircraft_file" \
-  node "$agent_directory/bin/skytrace-agent.mjs" --once
+skytrace_container=$(compose_cmd ps -q skytrace)
+[[ -n "$skytrace_container" ]] || die "could not resolve the Skytrace container"
+"$engine" cp "$agent_directory/bin/skytrace-agent" \
+  "$skytrace_container:/tmp/skytrace-agent-smoke"
+"$engine" cp "$aircraft_file" "$skytrace_container:/tmp/aircraft-smoke.json"
+"$engine" exec \
+  -e SKYTRACE_SERVER_URL=http://127.0.0.1:3000 \
+  -e SKYTRACE_RECEIVER_ID=smoke-rx \
+  -e SKYTRACE_TOKEN="$token" \
+  -e SKYTRACE_AIRCRAFT_FILE=/tmp/aircraft-smoke.json \
+  "$skytrace_container" \
+  /tmp/skytrace-agent-smoke --once
 curl -fsS "http://127.0.0.1:$app_port/api/live" | grep -q 'abc123'
 
 backup_file="skytrace-data-$suffix.tar.gz"
