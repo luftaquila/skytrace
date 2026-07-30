@@ -58,7 +58,7 @@ jobs:
       - run: docker compose config --quiet
         env:
           SKYTRACE_IMAGE: ghcr.io/example/skytrace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-          SKYTRACE_ENV_FILE: .env.example
+          SKYTRACE_ENV_FILE: /dev/null
       - run: npm run check
 
   docker-compose-test:
@@ -103,7 +103,7 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
             artifact: arm64
-    # Build each architecture natively; the manifest job publishes one multi-platform release tag.
+    # Build each architecture natively; the manifest job publishes versioned and latest indexes.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
@@ -173,6 +173,7 @@ jobs:
           fi
           docker buildx imagetools create \
             --tag "${REGISTRY_IMAGE}:${IMAGE_TAG}" \
+            --tag "${REGISTRY_IMAGE}:latest" \
             --metadata-file "$RUNNER_TEMP/manifest-metadata.json" \
             "${refs[@]}"
           digest=$(jq -r '."containerimage.descriptor".digest // empty' \
@@ -182,13 +183,6 @@ jobs:
             exit 1
           fi
           docker buildx imagetools inspect "${REGISTRY_IMAGE}@${digest}"
-          printf '%s\n' "$digest" > "$RUNNER_TEMP/image-digest.txt"
-      - uses: actions/upload-artifact@v7.0.1
-        with:
-          name: release-image-digest
-          path: ${{ runner.temp }}/image-digest.txt
-          if-no-files-found: error
-          retention-days: 1
 
   release:
     needs: manifest
@@ -198,45 +192,20 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: release-image-digest
-          path: ${{ runner.temp }}/image
-      - name: Build direct server assets and the agent archive
+      - name: Build the agent archive
         shell: bash
-        run: |
-          image_digest=$(tr -d '\r\n' < "$RUNNER_TEMP/image/image-digest.txt")
-          if [[ ! "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Invalid multi-platform manifest digest: $image_digest" >&2
-            exit 1
-          fi
-          image_ref="${REGISTRY_IMAGE}@${image_digest}"
-          install -m 0644 compose.yml "$RUNNER_TEMP/compose.yml"
-          sed "s|^SKYTRACE_IMAGE=.*|SKYTRACE_IMAGE=${image_ref}|" \
-            .env.example > "$RUNNER_TEMP/skytrace.env.example"
-          install -m 0644 docs/self-hosting.md "$RUNNER_TEMP/self-hosting.md"
-          scripts/package-agent.sh "$IMAGE_TAG" "$RUNNER_TEMP"
-          cd "$RUNNER_TEMP"
-          for asset in compose.yml skytrace.env.example self-hosting.md; do
-            sha256sum "$asset" | cut -d ' ' -f 1 > "$asset.sha256"
-          done
-          printf '%s\n' "$image_digest" > "skytrace-${IMAGE_TAG}.image-digest"
-      - name: Publish release files
+        run: scripts/package-agent.sh "$IMAGE_TAG" "$RUNNER_TEMP"
+      - name: Publish the release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          assets=(
-            "$RUNNER_TEMP/compose.yml"
-            "$RUNNER_TEMP/compose.yml.sha256"
-            "$RUNNER_TEMP/skytrace.env.example"
-            "$RUNNER_TEMP/skytrace.env.example.sha256"
-            "$RUNNER_TEMP/self-hosting.md"
-            "$RUNNER_TEMP/self-hosting.md.sha256"
-            "$RUNNER_TEMP/skytrace-agent-${IMAGE_TAG}.tar.gz"
-            "$RUNNER_TEMP/skytrace-agent-${IMAGE_TAG}.tar.gz.sha256"
-            "$RUNNER_TEMP/skytrace-${IMAGE_TAG}.image-digest"
-          )
+          printf -v release_notes '%s\n' \
+            '## Server image' \
+            '' \
+            '```env' \
+            "SKYTRACE_IMAGE=${REGISTRY_IMAGE}:${IMAGE_TAG}" \
+            '```'
           if release_is_draft=$(gh release view "$IMAGE_TAG" \
             --json isDraft --jq .isDraft 2>/dev/null); then
             if [[ "$release_is_draft" != "true" ]]; then
@@ -248,7 +217,10 @@ jobs:
               --draft \
               --verify-tag \
               --title "$IMAGE_TAG" \
-              --generate-notes
+              --generate-notes \
+              --notes "$release_notes"
           fi
-          gh release upload "$IMAGE_TAG" "${assets[@]}" --clobber
+          gh release upload "$IMAGE_TAG" \
+            "$RUNNER_TEMP/skytrace-agent-${IMAGE_TAG}.tar.gz" \
+            --clobber
           gh release edit "$IMAGE_TAG" --draft=false

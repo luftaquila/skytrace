@@ -8,7 +8,7 @@ controls the internal container port, database path and static-asset path; do no
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SKYTRACE_IMAGE` | release value | exact OCI manifest digest supplied by the release |
+| `SKYTRACE_IMAGE` | `ghcr.io/luftaquila/skytrace:latest` | OCI image; use a release body's version tag to pin it |
 | `SKYTRACE_BIND` | `127.0.0.1` | IPv4 or IPv6 host bind address |
 | `SKYTRACE_PORT` | `3000` | host port; use `1024` through `65535` for the shared rootless/rootful contract |
 | `SKYTRACE_VOLUME` | `skytrace-data` | persistent named volume |

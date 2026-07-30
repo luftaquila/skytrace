@@ -128,7 +128,7 @@ good_digest=$(manifest_digest smoke)
 good_ref="$registry_ref@$good_digest"
 
 install -m 0644 "$repository_root/compose.yml" "$compose_file"
-install -m 0600 "$repository_root/.env.example" "$env_file"
+install -m 0600 /dev/null "$env_file"
 token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 set_env "$env_file" SKYTRACE_IMAGE "$good_ref"
 set_env "$env_file" SKYTRACE_BIND 127.0.0.1

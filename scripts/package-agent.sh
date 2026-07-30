@@ -31,9 +31,7 @@ mkdir -p -- "$output_directory"
 output_directory=$(cd -- "$output_directory" && pwd)
 agent="skytrace-agent-$version"
 archive="$output_directory/$agent.tar.gz"
-checksum="$archive.sha256"
 [[ ! -e "$archive" ]] || die "output already exists: $archive"
-[[ ! -e "$checksum" ]] || die "output already exists: $checksum"
 
 stage_root=$(mktemp -d "${TMPDIR:-/tmp}/skytrace-agent-package.XXXXXX")
 cleanup() {
@@ -53,11 +51,5 @@ install -m 0644 "$repository_root/docs/receiver-agent.md" "$stage_root/$agent/RE
 install -m 0644 "$repository_root/LICENSE" "$stage_root/$agent/LICENSE"
 
 tar -C "$stage_root" -czf "$stage_root/$agent.tar.gz" "$agent"
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum "$stage_root/$agent.tar.gz" | awk '{print $1}' > "$stage_root/$agent.tar.gz.sha256"
-else
-  shasum -a 256 "$stage_root/$agent.tar.gz" | awk '{print $1}' > "$stage_root/$agent.tar.gz.sha256"
-fi
-
-mv -- "$stage_root/$agent.tar.gz" "$stage_root/$agent.tar.gz.sha256" "$output_directory/"
+mv -- "$stage_root/$agent.tar.gz" "$output_directory/"
 echo "packaged $agent in $output_directory"

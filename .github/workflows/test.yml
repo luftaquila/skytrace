@@ -27,5 +27,5 @@ jobs:
       - run: docker compose config --quiet
         env:
           SKYTRACE_IMAGE: ghcr.io/example/skytrace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-          SKYTRACE_ENV_FILE: .env.example
+          SKYTRACE_ENV_FILE: /dev/null
       - run: npm run check

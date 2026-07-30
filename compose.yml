@@ -1,6 +1,6 @@
 services:
   skytrace:
-    image: ${SKYTRACE_IMAGE:?set exact SKYTRACE_IMAGE in .env}
+    image: ${SKYTRACE_IMAGE:-ghcr.io/luftaquila/skytrace:latest}
     restart: unless-stopped
     env_file: ${SKYTRACE_ENV_FILE:-.env}
     ports:
@@ -23,7 +23,7 @@ services:
 
   backup:
     profiles: [ops]
-    image: ${SKYTRACE_IMAGE:?set exact SKYTRACE_IMAGE in .env}
+    image: ${SKYTRACE_IMAGE:-ghcr.io/luftaquila/skytrace:latest}
     user: "0:0"
     restart: "no"
     environment:
@@ -79,7 +79,7 @@ services:
 
   restore:
     profiles: [ops]
-    image: ${SKYTRACE_IMAGE:?set exact SKYTRACE_IMAGE in .env}
+    image: ${SKYTRACE_IMAGE:-ghcr.io/luftaquila/skytrace:latest}
     user: "0:0"
     restart: "no"
     entrypoint: ["/bin/sh", "-eu", "-c"]

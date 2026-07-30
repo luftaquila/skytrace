@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,7 +10,7 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const packageAgent = path.join(root, "scripts/package-agent.sh");
 const version = `v${JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version}`;
 
-test("the agent packager emits a verified self-contained archive", () => {
+test("the agent packager emits one self-contained archive", () => {
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "skytrace-agent-release-"));
   try {
     const result = spawnSync(packageAgent, [version, output], { encoding: "utf8" });
@@ -19,11 +18,7 @@ test("the agent packager emits a verified self-contained archive", () => {
 
     const name = `skytrace-agent-${version}`;
     const archive = path.join(output, `${name}.tar.gz`);
-    const checksum = fs.readFileSync(`${archive}.sha256`, "utf8").trim();
-    assert.equal(
-      checksum,
-      crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex"),
-    );
+    assert.deepEqual(fs.readdirSync(output), [`${name}.tar.gz`]);
 
     const listing = spawnSync("tar", ["-tzf", archive], { encoding: "utf8" });
     assert.equal(listing.status, 0, listing.stderr);

@@ -12,29 +12,25 @@ dump1090 data.
 
 ## Quick start
 
-- Requirements: Docker Engine with Docker Compose v2, `curl`, OpenSSL and a current WebGL 2
-  browser.
-- Choose a [GitHub Release](https://github.com/luftaquila/skytrace/releases) containing
-  `compose.yml`, `skytrace.env.example`, `self-hosting.md` and their checksums. No source checkout
-  is required.
-- Download and verify the release files:
+- Requirements: either Docker Engine with Docker Compose v2 or Podman with a Compose provider that
+  supports profiles, plus `curl`, OpenSSL and a current WebGL 2 browser.
+- Download the Compose file and create the local environment:
 
   ```sh
-  VERSION=vX.Y.Z
-  BASE="https://github.com/luftaquila/skytrace/releases/download/${VERSION}"
-  for ASSET in compose.yml skytrace.env.example self-hosting.md; do
-    curl -fLo "$ASSET" "$BASE/$ASSET"
-    curl -fLo "$ASSET.sha256" "$BASE/$ASSET.sha256"
-    test "$(openssl dgst -sha256 "$ASSET" | awk '{print $NF}')" = \
-      "$(cat "$ASSET.sha256")"
-  done
-  install -m 0600 skytrace.env.example .env
-  openssl rand -hex 32
+  curl -fLo compose.yml \
+    https://raw.githubusercontent.com/luftaquila/skytrace/main/compose.yml
+  umask 077
+  TOKEN=$(openssl rand -hex 32)
+  printf '%s\n' \
+    'SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:latest' \
+    "SKYTRACE_RECEIVER_TOKENS={\"roof-01\":\"$TOKEN\"}" > .env
   ```
 
-- Replace the token placeholder in `SKYTRACE_RECEIVER_TOKENS` with the generated token. Keep the
-  release-provided `SKYTRACE_IMAGE` digest unchanged.
-- Start Skytrace:
+- `latest` selects the newest release. To pin one version, copy its `SKYTRACE_IMAGE` line from the
+  [GitHub Release](https://github.com/luftaquila/skytrace/releases) body.
+- Start Skytrace with Docker or Podman.
+
+  Docker:
 
   ```sh
   docker compose --env-file .env config
@@ -42,11 +38,20 @@ dump1090 data.
   docker compose --env-file .env up -d
   ```
 
+  Podman:
+
+  ```sh
+  podman compose --env-file .env config
+  podman compose --env-file .env pull
+  podman compose --env-file .env up -d
+  ```
+
+  Run rootless engines as shown. For rootful operation, use `sudo` consistently when required;
+  rootful and rootless engines have separate image and volume stores.
 - Open <http://127.0.0.1:3000>. Check service health at
   <http://127.0.0.1:3000/healthz>.
-- Podman uses the same files and arguments with `podman compose`. See the
-  [self-hosting guide](docs/self-hosting.md) for rootless operation, public access, backup, restore
-  and upgrades.
+- See the [self-hosting guide](docs/self-hosting.md) for Podman reboot persistence, public access,
+  backup, restore and upgrades.
 
 ## Receiver agent
 

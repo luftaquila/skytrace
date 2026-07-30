@@ -11,7 +11,7 @@ to a Skytrace server. The release archive has no npm installation step.
 
 ## Install
 
-Extract the verified matching release into `/opt/skytrace`:
+Extract the matching release archive into `/opt/skytrace`:
 
 ```sh
 sudo install -d /opt/skytrace

@@ -1,46 +1,36 @@
 # Skytrace self-hosting
 
-Skytrace uses one deployment contract for Docker and Podman: `compose.yml`, `.env` and the
-digest-pinned OCI image named by that environment file. There is no server launcher or server
-archive.
+Skytrace uses one deployment contract for Docker and Podman: `compose.yml`, `.env` and the OCI
+image named by that environment file. The default image tag is `latest`; each GitHub Release body
+provides its versioned image setting. There is no server launcher or server archive.
 
 ## Requirements
 
 - Docker Engine with Docker Compose v2, or Podman with a Compose provider that supports profiles
-- `curl`, OpenSSL and `tar`
+- `curl` and OpenSSL
 - A current browser with WebGL 2
 - Host port `1024` through `65535`; the release default is `3000`
 - A domain-root URL such as `https://sky.example.com/`; reverse-proxy subpaths such as
   `/skytrace/` are not supported
 
-Use rootless Docker or Podman without `sudo`. Use a rootful engine consistently with `sudo`.
-Rootful and rootless engines have separate image and volume stores, but use the same Compose and
-environment files.
+Run rootless engines without `sudo`. For rootful operation, use `sudo` consistently when required.
+The two modes have separate image and volume stores, but use the same Compose and environment files.
 
 ## Install
 
-Download the direct release assets. They are not wrapped in a server tar:
+Download the current Compose file and create `.env`:
 
 ```sh
-VERSION=vX.Y.Z
-BASE="https://github.com/luftaquila/skytrace/releases/download/${VERSION}"
-curl -fLo compose.yml "$BASE/compose.yml"
-curl -fLo skytrace.env.example "$BASE/skytrace.env.example"
-curl -fLo self-hosting.md "$BASE/self-hosting.md"
-curl -fLo compose.yml.sha256 "$BASE/compose.yml.sha256"
-curl -fLo skytrace.env.example.sha256 "$BASE/skytrace.env.example.sha256"
-curl -fLo self-hosting.md.sha256 "$BASE/self-hosting.md.sha256"
-test "$(openssl dgst -sha256 compose.yml | awk '{print $NF}')" = "$(cat compose.yml.sha256)"
-test "$(openssl dgst -sha256 skytrace.env.example | awk '{print $NF}')" = \
-  "$(cat skytrace.env.example.sha256)"
-test "$(openssl dgst -sha256 self-hosting.md | awk '{print $NF}')" = \
-  "$(cat self-hosting.md.sha256)"
-install -m 0600 skytrace.env.example .env
-openssl rand -hex 32
+curl -fLo compose.yml \
+  https://raw.githubusercontent.com/luftaquila/skytrace/main/compose.yml
+umask 077
+TOKEN=$(openssl rand -hex 32)
+printf '%s\n' \
+  'SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:latest' \
+  "SKYTRACE_RECEIVER_TOKENS={\"roof-01\":\"$TOKEN\"}" > .env
 ```
 
-Replace the receiver-token placeholder in `.env`. Keep the release-provided `SKYTRACE_IMAGE`
-digest unchanged.
+To pin one version, replace the `SKYTRACE_IMAGE` line with the value in that GitHub Release body.
 
 Docker:
 
@@ -149,30 +139,28 @@ old data, restore `.env.before-restore` and run `compose up -d` again.
 
 ## Upgrade and rollback
 
-Back up first, save the old deployment files and download the new release assets into a separate
-staging directory. After verifying their checksums, install the new Compose file and create the new
-`.env` from that release's environment example. Copy local settings such as receiver tokens from
-the previous `.env`, but do not copy its old `SKYTRACE_IMAGE`:
+Back up first, save the deployment files, download the current Compose file and pull `latest`.
+Keep the receiver tokens and other local settings in `.env`:
 
 ```sh
 cp -p .env .env.before-upgrade
 cp -p compose.yml compose.yml.before-upgrade
-# Replace these paths with the verified files in the new release staging directory.
-install -m 0644 /path/to/new/compose.yml compose.yml
-install -m 0600 /path/to/new/skytrace.env.example .env.next
-# Edit .env.next: copy local settings from .env.before-upgrade, retaining its new SKYTRACE_IMAGE.
-mv .env.next .env
+curl -fLo compose.yml \
+  https://raw.githubusercontent.com/luftaquila/skytrace/main/compose.yml
+# Keep SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:latest in .env.
 docker compose --env-file .env config
 docker compose --env-file .env pull
 docker compose --env-file .env up -d
 ```
 
-Compose does not provide automatic rollback. If startup fails, restore both files from the
-previous release and run the same command:
+Compose does not provide automatic rollback. If startup fails, select the previous GitHub Release,
+download its Compose file, and set `.env` to the version shown in that release body:
 
 ```sh
-cp -p .env.before-upgrade .env
-cp -p compose.yml.before-upgrade compose.yml
+VERSION=vX.Y.Z
+curl -fLo compose.yml \
+  "https://raw.githubusercontent.com/luftaquila/skytrace/${VERSION}/compose.yml"
+# Set SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:${VERSION} in .env.
 docker compose --env-file .env pull
 docker compose --env-file .env up -d
 ```
@@ -182,5 +170,5 @@ an old image may not understand a schema already changed by a newer image.
 
 ## Configuration
 
-See `docs/configuration.md` in the tagged source and the release asset `self-hosting.md`. Coverage
-resolution and retention settings can materially change CPU, memory and disk use.
+See `docs/configuration.md`. Coverage resolution and retention settings can materially change CPU,
+memory and disk use.
