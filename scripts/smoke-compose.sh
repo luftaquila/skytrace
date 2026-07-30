@@ -114,7 +114,7 @@ echo "starting the local $engine registry"
 "$engine" run -d \
   --name "$registry_container" \
   --publish "127.0.0.1:$registry_port:5000" \
-  registry:2 >/dev/null
+  docker.io/library/registry:3 >/dev/null
 wait_registry || die "local registry did not become ready"
 
 echo "building and publishing the smoke image"
