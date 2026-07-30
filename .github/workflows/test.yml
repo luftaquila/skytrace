@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.0.0
@@ -32,6 +32,20 @@ jobs:
         env:
           SKYTRACE_IMAGE: ghcr.io/example/skytrace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           SKYTRACE_ENV_FILE: /dev/null
+      - name: Install the native Podman Compose provider
+        run: |
+          python3 -m venv "$RUNNER_TEMP/podman-compose"
+          "$RUNNER_TEMP/podman-compose/bin/pip" install podman-compose==1.6.0
+          "$RUNNER_TEMP/podman-compose/bin/podman-compose" version
+      - name: Exercise the Compose contract on rootless Podman
+        env:
+          CONTAINERS_CONF: ${{ runner.temp }}/podman-containers.conf
+          PODMAN_COMPOSE_PROVIDER: ${{ runner.temp }}/podman-compose/bin/podman-compose
+        run: |
+          printf '[engine]\nruntime = "runc"\n' > "$CONTAINERS_CONF"
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+          test "$(podman info --format '{{.Host.OCIRuntime.Name}}')" = runc
+          scripts/smoke-compose.sh podman
       - run: go test -race ./...
       - run: go vet ./...
       - run: npm run test:coverage

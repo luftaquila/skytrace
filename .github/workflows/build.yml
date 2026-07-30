@@ -101,9 +101,12 @@ jobs:
           "$RUNNER_TEMP/podman-compose/bin/podman-compose" version
       - name: Exercise the Compose contract on rootless Podman
         env:
+          CONTAINERS_CONF: ${{ runner.temp }}/podman-containers.conf
           PODMAN_COMPOSE_PROVIDER: ${{ runner.temp }}/podman-compose/bin/podman-compose
         run: |
+          printf '[engine]\nruntime = "runc"\n' > "$CONTAINERS_CONF"
           test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+          test "$(podman info --format '{{.Host.OCIRuntime.Name}}')" = runc
           scripts/smoke-compose.sh podman
 
   agent-build:
