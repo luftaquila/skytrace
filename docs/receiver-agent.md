@@ -8,7 +8,7 @@ does not need Node.js, npm or a container runtime.
 
 - Linux on one of the released CPU architectures
 - systemd when using the supplied service unit
-- One local JSON file or loopback HTTP JSON URL
+- One readable local JSON file or credential-free loopback HTTP JSON URL
 - HTTPS access to the Skytrace server, except for explicitly allowed LAN HTTP
 
 ## Select an archive
@@ -43,8 +43,16 @@ sudo install -o root -g root -m 0600 \
 sudoedit /etc/skytrace-agent.env
 ```
 
-Set `SKYTRACE_SERVER_URL`, a receiver ID and the matching token from the server's
-`SKYTRACE_RECEIVER_TOKENS`. Select exactly one source.
+Set the required identity and destination:
+
+- `SKYTRACE_SERVER_URL`: absolute HTTP or HTTPS base URL without credentials; the agent appends
+  `/api/ingest/readsb`
+- `SKYTRACE_RECEIVER_ID`: ID matching `[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}`
+- `SKYTRACE_TOKEN`: matching token of at least 32 characters from the server's
+  `SKYTRACE_RECEIVER_TOKENS`
+
+Select exactly one source. `SKYTRACE_AIRCRAFT_URL`, when used, must be credential-free loopback
+HTTP.
 
 Local file:
 
@@ -63,14 +71,14 @@ SKYTRACE_AIRCRAFT_URL=http://127.0.0.1/tar1090/data/aircraft.json
 The server URL must use HTTPS unless it is loopback. For an intentional non-loopback LAN HTTP
 server, set `SKYTRACE_ALLOW_INSECURE_SERVER=1`; the agent logs a warning. For a private certificate
 authority, set `SKYTRACE_CA_FILE=/absolute/path/to/ca.pem` instead of disabling TLS validation.
-The former `NODE_EXTRA_CA_CERTS` name remains a compatibility alias; if both names are set, they
-must have the same value.
+The certificate file and its parent directories must be readable by the service's dynamic user.
 
 Optional metadata:
 
 - `SKYTRACE_RECEIVER_NAME`: operator-facing receiver name
 - `SKYTRACE_RECEIVER_PUBLIC_NAME`: name shown to viewers
-- `SKYTRACE_RECEIVER_LAT` and `SKYTRACE_RECEIVER_LON`: receiver coordinates
+- `SKYTRACE_RECEIVER_LAT`: receiver latitude from `-90` through `90`
+- `SKYTRACE_RECEIVER_LON`: receiver longitude from `-180` through `180`
 - `SKYTRACE_INTERVAL_MS`: upload interval from `1000` to `60000`, default `3000`
 
 Test one upload before installing the service:
@@ -92,10 +100,14 @@ sudo systemctl enable --now skytrace-agent
 sudo systemctl status skytrace-agent
 ```
 
-The supplied service uses a dynamic user, a read-only system, a private temporary directory and
-read-only access to `/run/readsb`. Ensure the selected JSON file and parent directories are readable
-by the dynamic service user. If the source lives elsewhere, add the narrow corresponding
-`ReadOnlyPaths` entry in a systemd override.
+The supplied service uses a dynamic user, a read-only system, a private temporary directory,
+`ProtectHome=yes` and read-only access to `/run/readsb`. The default source and every parent
+directory must be readable by an unprivileged dynamic user.
+
+Keep alternate file sources in a dedicated world-readable directory under `/run`, then add that
+exact directory to `ReadOnlyPaths` in a systemd override. Host files under `/tmp` are hidden by
+`PrivateTmp`, and paths under `/home`, `/root` or `/run/user` are hidden by `ProtectHome`; use a
+dedicated `/run` directory instead of weakening those protections.
 
 Inspect failures with:
 
@@ -105,8 +117,6 @@ sudo journalctl -u skytrace-agent -n 100 --no-pager
 
 Startup errors identify invalid settings. Request failures report a bounded class such as timeout,
 HTTP status or body-too-large without logging the token.
-
-The removed legacy setting `SKYTRACE_RECEIVER_PUBLIC_POSITION` fails startup when it is still set.
 
 ## Upgrade or roll back
 

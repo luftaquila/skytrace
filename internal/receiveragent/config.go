@@ -59,10 +59,6 @@ func Environment() map[string]string {
 }
 
 func LoadConfig(env map[string]string) (Config, error) {
-	if env["SKYTRACE_RECEIVER_PUBLIC_POSITION"] != "" {
-		return Config{}, errors.New("SKYTRACE_RECEIVER_PUBLIC_POSITION was removed")
-	}
-
 	receiverID, err := required(env, "SKYTRACE_RECEIVER_ID")
 	if err != nil {
 		return Config{}, err
@@ -85,6 +81,12 @@ func LoadConfig(env map[string]string) (Config, error) {
 	if (aircraftURL == "") == (aircraftFile == "") {
 		return Config{}, errors.New("set exactly one of SKYTRACE_AIRCRAFT_URL or SKYTRACE_AIRCRAFT_FILE")
 	}
+	if aircraftURL != "" {
+		aircraftURL, err = parseAircraftURL(aircraftURL)
+		if err != nil {
+			return Config{}, err
+		}
+	}
 
 	ingestURL, err := parseServerURL(env)
 	if err != nil {
@@ -99,10 +101,6 @@ func LoadConfig(env map[string]string) (Config, error) {
 		return Config{}, err
 	}
 	lon, err := optionalCoordinate(env["SKYTRACE_RECEIVER_LON"], -180, 180, "SKYTRACE_RECEIVER_LON")
-	if err != nil {
-		return Config{}, err
-	}
-	caFile, err := parseCAFile(env)
 	if err != nil {
 		return Config{}, err
 	}
@@ -122,7 +120,7 @@ func LoadConfig(env map[string]string) (Config, error) {
 		Interval:        interval,
 		AircraftURL:     aircraftURL,
 		AircraftFile:    aircraftFile,
-		CAFile:          caFile,
+		CAFile:          env["SKYTRACE_CA_FILE"],
 		InsecureServer:  strings.HasPrefix(ingestURL, "http://") && !loopbackURL(ingestURL),
 		Receiver:        Receiver{ID: receiverID, Name: name, PublicName: publicName, Lat: lat, Lon: lon},
 		AircraftTimeout: AircraftTimeout,
@@ -197,6 +195,20 @@ func optionalCoordinate(value string, min, max float64, key string) (*float64, e
 	return &number, nil
 }
 
+func parseAircraftURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "", errors.New("SKYTRACE_AIRCRAFT_URL is invalid")
+	}
+	if parsed.User != nil {
+		return "", errors.New("SKYTRACE_AIRCRAFT_URL must not contain credentials")
+	}
+	if parsed.Scheme != "http" || !loopback(parsed.Hostname()) {
+		return "", errors.New("SKYTRACE_AIRCRAFT_URL must use loopback HTTP")
+	}
+	return parsed.String(), nil
+}
+
 func parseServerURL(env map[string]string) (string, error) {
 	raw, err := required(env, "SKYTRACE_SERVER_URL")
 	if err != nil {
@@ -228,7 +240,7 @@ func parseServerURL(env map[string]string) (string, error) {
 }
 
 func loopback(hostname string) bool {
-	if strings.EqualFold(hostname, "localhost") {
+	if strings.EqualFold(strings.TrimSuffix(hostname, "."), "localhost") {
 		return true
 	}
 	ip := net.ParseIP(hostname)
@@ -238,16 +250,4 @@ func loopback(hostname string) bool {
 func loopbackURL(raw string) bool {
 	parsed, err := url.Parse(raw)
 	return err == nil && loopback(parsed.Hostname())
-}
-
-func parseCAFile(env map[string]string) (string, error) {
-	caFile := env["SKYTRACE_CA_FILE"]
-	legacy := env["NODE_EXTRA_CA_CERTS"]
-	if caFile != "" && legacy != "" && caFile != legacy {
-		return "", errors.New("SKYTRACE_CA_FILE and NODE_EXTRA_CA_CERTS must match when both are set")
-	}
-	if caFile != "" {
-		return caFile, nil
-	}
-	return legacy, nil
 }

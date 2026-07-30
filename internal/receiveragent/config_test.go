@@ -67,7 +67,6 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 		{"credentials", "SKYTRACE_SERVER_URL", "https://user:pass@example.test", "credentials"},
 		{"invalid scheme", "SKYTRACE_SERVER_URL", "file:///tmp/server", "invalid"},
 		{"bad insecure flag", "SKYTRACE_ALLOW_INSECURE_SERVER", "true", "must be 1"},
-		{"removed flag", "SKYTRACE_RECEIVER_PUBLIC_POSITION", "1", "was removed"},
 		{"short token", "SKYTRACE_TOKEN", "short", "at least 32"},
 		{"bad receiver", "SKYTRACE_RECEIVER_ID", "../bad", "invalid"},
 		{"bad latitude", "SKYTRACE_RECEIVER_LAT", "91", "invalid"},
@@ -100,9 +99,41 @@ func TestLoadConfigRequiresExactlyOneSource(t *testing.T) {
 	}
 }
 
+func TestAircraftURLRequiresLoopbackHTTP(t *testing.T) {
+	for _, aircraftURL := range []string{
+		"http://localhost:8080/data/aircraft.json",
+		"http://localhost.:8080/data/aircraft.json",
+		"http://127.0.0.2:8080/data/aircraft.json",
+		"http://[::1]:8080/data/aircraft.json",
+	} {
+		env := cloneEnvironment(baseEnvironment())
+		env["SKYTRACE_AIRCRAFT_URL"] = aircraftURL
+		if _, err := LoadConfig(env); err != nil {
+			t.Errorf("%s: %v", aircraftURL, err)
+		}
+	}
+	for _, test := range []struct {
+		url   string
+		match string
+	}{
+		{"http://192.0.2.1/data/aircraft.json", "loopback HTTP"},
+		{"https://127.0.0.1/data/aircraft.json", "loopback HTTP"},
+		{"http://user:pass@127.0.0.1/data/aircraft.json", "credentials"},
+		{"not a URL", "invalid"},
+	} {
+		env := cloneEnvironment(baseEnvironment())
+		env["SKYTRACE_AIRCRAFT_URL"] = test.url
+		_, err := LoadConfig(env)
+		if err == nil || !strings.Contains(err.Error(), test.match) {
+			t.Errorf("%s: error = %v, want containing %q", test.url, err, test.match)
+		}
+	}
+}
+
 func TestLoadConfigSupportsLoopbackAndExplicitLANHTTP(t *testing.T) {
 	for _, serverURL := range []string{
 		"http://localhost:3000",
+		"http://localhost.:3000",
 		"http://127.0.0.2:3000",
 		"http://[::1]:3000",
 	} {
@@ -124,21 +155,12 @@ func TestLoadConfigSupportsLoopbackAndExplicitLANHTTP(t *testing.T) {
 	}
 }
 
-func TestCAFileCompatibility(t *testing.T) {
+func TestCAFileConfiguration(t *testing.T) {
 	env := cloneEnvironment(baseEnvironment())
-	env["NODE_EXTRA_CA_CERTS"] = "/legacy/ca.pem"
+	env["SKYTRACE_CA_FILE"] = "/private/ca.pem"
 	config, err := LoadConfig(env)
-	if err != nil || config.CAFile != "/legacy/ca.pem" {
-		t.Fatalf("legacy CA: config=%#v err=%v", config, err)
-	}
-	env["SKYTRACE_CA_FILE"] = "/new/ca.pem"
-	if _, err := LoadConfig(env); err == nil || !strings.Contains(err.Error(), "must match") {
-		t.Fatalf("conflicting CA error = %v", err)
-	}
-	env["NODE_EXTRA_CA_CERTS"] = "/new/ca.pem"
-	config, err = LoadConfig(env)
-	if err != nil || config.CAFile != "/new/ca.pem" {
-		t.Fatalf("matching CA: config=%#v err=%v", config, err)
+	if err != nil || config.CAFile != "/private/ca.pem" {
+		t.Fatalf("CA config=%#v err=%v", config, err)
 	}
 }
 

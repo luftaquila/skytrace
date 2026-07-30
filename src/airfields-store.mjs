@@ -17,6 +17,7 @@
 // a per-request deflate.
 
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 import { readResponseBytes } from "./stream-limit.mjs";
@@ -179,10 +180,19 @@ export function createAirfieldsStore({
   log = (...args) => console.log("[airfields]", ...args),
 } = {}) {
   if (!dir) throw new Error("airfields store needs a data directory");
+  function isLoopback(hostname) {
+    const normalized = hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+    if (normalized === "localhost") return true;
+    const family = net.isIP(normalized);
+    return (family === 4 && normalized.startsWith("127.")) || (family === 6 && normalized === "::1");
+  }
   function validatedSourceUrl(value) {
     const parsed = new URL(value);
-    const loopback = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
-    if (parsed.username || parsed.password || (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback))) {
+    if (
+      parsed.username
+      || parsed.password
+      || (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopback(parsed.hostname)))
+    ) {
       throw new Error("airfield sources must use credential-free HTTPS (HTTP is loopback-only)");
     }
     return parsed.href;

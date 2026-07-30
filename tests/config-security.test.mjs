@@ -21,6 +21,13 @@ test("security and retention settings use strict first-release defaults", () => 
   assert.equal(config.coverageRefreshSeconds, 180);
   assert.equal(config.coverageWindowHours, 24 * 30);
 
+  const derivedCells = loadConfig({
+    SKYTRACE_COVERAGE_HORIZONTAL_STEP_NM: "10",
+    SKYTRACE_COVERAGE_VERTICAL_STEP_FT: "1000",
+  });
+  assert.equal(derivedCells.coverageCellHorizontalStepNm, 5);
+  assert.equal(derivedCells.coverageCellVerticalStepFt, 500);
+
   assert.throws(
     () => loadConfig({ SKYTRACE_TRACK_RETENTION_DAYS: "30" }),
     /must be at least 31/,

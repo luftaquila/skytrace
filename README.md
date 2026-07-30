@@ -14,20 +14,21 @@ dump1090 data.
 
 - Requirements: either Docker Engine with Docker Compose v2 or Podman with a Compose provider that
   supports profiles, plus `curl`, OpenSSL and a current WebGL 2 browser.
-- Download the Compose file and create the local environment:
+- Choose a stable GitHub Release, then use its tag for both the Compose file and image:
 
   ```sh
+  VERSION=vX.Y.Z
   curl -fLo compose.yml \
-    https://raw.githubusercontent.com/luftaquila/skytrace/main/compose.yml
+    "https://raw.githubusercontent.com/luftaquila/skytrace/${VERSION}/compose.yml"
   umask 077
   TOKEN=$(openssl rand -hex 32)
   printf '%s\n' \
-    'SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:latest' \
+    "SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:${VERSION}" \
     "SKYTRACE_RECEIVER_TOKENS={\"roof-01\":\"$TOKEN\"}" > .env
   ```
 
-- `latest` selects the newest release. To pin one version, copy its `SKYTRACE_IMAGE` line from the
-  [GitHub Release](https://github.com/luftaquila/skytrace/releases) body.
+- Replace `vX.Y.Z` with the selected [GitHub Release](https://github.com/luftaquila/skytrace/releases)
+  tag. Do not mix a Compose file and image from different revisions.
 - Start Skytrace with Docker or Podman.
 
   Docker:

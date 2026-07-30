@@ -76,6 +76,30 @@ async function withStore(fn, { payloads = fixtureCsvs() } = {}) {
   }
 }
 
+test("airfield source URLs allow credential-free HTTPS and loopback HTTP only", () => {
+  const make = (base) => createAirfieldsStore({
+    dir: path.join(os.tmpdir(), "unused-skytrace-airfields-test"),
+    airportsUrl: `${base}/airports.csv`,
+    runwaysUrl: `${base}/runways.csv`,
+  });
+  for (const base of [
+    "https://airfields.example.test",
+    "http://localhost",
+    "http://localhost.",
+    "http://127.0.0.2",
+    "http://[::1]",
+  ]) {
+    assert.doesNotThrow(() => make(base), base);
+  }
+  for (const base of [
+    "http://192.0.2.1",
+    "ftp://airfields.example.test",
+    "https://user:pass@airfields.example.test",
+  ]) {
+    assert.throws(() => make(base), /credential-free HTTPS/, base);
+  }
+});
+
 test("csv parsing honours quoted fields", () => {
   const rows = parseCsv('a,b\n"x, ""y""",2\r\n3,4\n');
   assert.deepEqual(rows, [["a", "b"], ['x, "y"', "2"], ["3", "4"]]);

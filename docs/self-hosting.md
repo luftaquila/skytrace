@@ -1,8 +1,8 @@
 # Skytrace self-hosting
 
-Skytrace uses one deployment contract for Docker and Podman: `compose.yml`, `.env` and the OCI
-image named by that environment file. The default image tag is `latest`; each GitHub Release body
-provides its versioned image setting. There is no server launcher or server archive.
+Skytrace uses one deployment contract for Docker and Podman: a release-tagged `compose.yml`, `.env`
+and the OCI image from the same release. Each GitHub Release body provides the versioned image
+setting. There is no server launcher or server archive.
 
 ## Requirements
 
@@ -18,19 +18,21 @@ The two modes have separate image and volume stores, but use the same Compose an
 
 ## Install
 
-Download the current Compose file and create `.env`:
+Choose a GitHub Release, use its tag for both the Compose file and image, and create `.env`:
 
 ```sh
+VERSION=vX.Y.Z
 curl -fLo compose.yml \
-  https://raw.githubusercontent.com/luftaquila/skytrace/main/compose.yml
+  "https://raw.githubusercontent.com/luftaquila/skytrace/${VERSION}/compose.yml"
 umask 077
 TOKEN=$(openssl rand -hex 32)
 printf '%s\n' \
-  'SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:latest' \
+  "SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:${VERSION}" \
   "SKYTRACE_RECEIVER_TOKENS={\"roof-01\":\"$TOKEN\"}" > .env
 ```
 
-To pin one version, replace the `SKYTRACE_IMAGE` line with the value in that GitHub Release body.
+Replace `vX.Y.Z` with the selected stable release tag. Do not combine a Compose file from `main` or
+another tag with a versioned image.
 
 Docker:
 
@@ -53,7 +55,7 @@ SQLite schema is readable.
 
 The default bind is loopback. Set `SKYTRACE_BIND=0.0.0.0`, `::` or a specific interface address
 only for an intentional LAN listener protected by a firewall. Each additional installation needs
-a unique Compose project name, port and `SKYTRACE_VOLUME`.
+a unique Compose project name, port, `SKYTRACE_VOLUME` and `SKYTRACE_BACKUP_DIR`.
 
 ## Public and private access
 
@@ -64,16 +66,14 @@ when the deployment must be private.
 Terminate TLS and set HSTS in the external reverse proxy or tunnel. Skytrace itself stays on plain
 HTTP behind that boundary and does not trust forwarding headers by default.
 
-Set `SKYTRACE_TRUST_PROXY` only to the proxy addresses that may supply forwarding headers. For a
-host proxy connecting over loopback:
+Set `SKYTRACE_TRUST_PROXY` only to the exact proxy address or narrow proxy-network CIDR observed by
+the Skytrace process. The destination may be a loopback-published port while the container still
+sees a Docker or Podman bridge address as its socket peer, so do not assume `127.0.0.1` merely
+because the proxy connects to `http://127.0.0.1:3000`.
 
-```text
-SKYTRACE_TRUST_PROXY=127.0.0.1/32,::1/128
-```
-
-For a containerized proxy, use its exact address or narrow network CIDR. Do not use a boolean or a
-hop count. A wrong value makes all proxied viewers share the proxy address and can exhaust per-IP
-request and event-stream limits.
+The trusted proxy must overwrite client-supplied `X-Forwarded-*` headers. Do not use a boolean or a
+hop count. A wrong value either ignores the real client address or trusts spoofed forwarding data,
+which can defeat per-IP request and event-stream limits.
 
 ## Status and logs
 
@@ -130,39 +130,41 @@ cp -p .env .env.before-restore
 # Edit SKYTRACE_VOLUME in .env, for example: skytrace-data-restored-20260729
 docker compose --env-file .env --profile ops run --rm \
   -e SKYTRACE_RESTORE_FILE=skytrace-data-20260729T000000Z.tar.gz restore
-docker compose --env-file .env up -d
+docker compose --env-file .env up -d --force-recreate
 ```
 
 The restore service requires an empty target volume, rejects unsafe archive paths and removes
 partially extracted files when it fails. It never removes the previous volume. To return to the
-old data, restore `.env.before-restore` and run `compose up -d` again.
+old data, run `cp -p .env.before-restore .env`, then run the matching Docker or Podman
+`compose up -d --force-recreate` command.
 
 ## Upgrade and rollback
 
-Back up first, save the deployment files, download the current Compose file and pull `latest`.
-Keep the receiver tokens and other local settings in `.env`:
+Back up first, select the new release, save the deployment files, and use the same new tag for the
+Compose file and image. Keep the receiver tokens and other local settings in `.env`:
 
 ```sh
+NEW_VERSION=vX.Y.Z
 cp -p .env .env.before-upgrade
 cp -p compose.yml compose.yml.before-upgrade
 curl -fLo compose.yml \
-  https://raw.githubusercontent.com/luftaquila/skytrace/main/compose.yml
-# Keep SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:latest in .env.
+  "https://raw.githubusercontent.com/luftaquila/skytrace/${NEW_VERSION}/compose.yml"
+# Set SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:${NEW_VERSION} in .env.
 docker compose --env-file .env config
 docker compose --env-file .env pull
-docker compose --env-file .env up -d
+docker compose --env-file .env up -d --force-recreate
 ```
 
 Compose does not provide automatic rollback. If startup fails, select the previous GitHub Release,
 download its Compose file, and set `.env` to the version shown in that release body:
 
 ```sh
-VERSION=vX.Y.Z
+PREVIOUS_VERSION=vX.Y.Z
 curl -fLo compose.yml \
-  "https://raw.githubusercontent.com/luftaquila/skytrace/${VERSION}/compose.yml"
-# Set SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:${VERSION} in .env.
+  "https://raw.githubusercontent.com/luftaquila/skytrace/${PREVIOUS_VERSION}/compose.yml"
+# Set SKYTRACE_IMAGE=ghcr.io/luftaquila/skytrace:${PREVIOUS_VERSION} in .env.
 docker compose --env-file .env pull
-docker compose --env-file .env up -d
+docker compose --env-file .env up -d --force-recreate
 ```
 
 Both versions use the selected named volume. Read release notes before any schema-changing upgrade;
