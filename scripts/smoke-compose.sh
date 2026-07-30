@@ -182,7 +182,7 @@ node -e '
 ' > "$aircraft_file"
 
 echo "uploading through the extracted receiver agent"
-skytrace_container=$(compose_cmd ps -q skytrace)
+skytrace_container=$(compose_cmd ps -q)
 [[ -n "$skytrace_container" ]] || die "could not resolve the Skytrace container"
 "$engine" cp "$agent_directory/bin/skytrace-agent" \
   "$skytrace_container:/tmp/skytrace-agent-smoke"
