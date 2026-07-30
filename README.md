@@ -2,15 +2,15 @@
 
 Self-hosted 3D flight tracking for your ADS-B receiver.
 
-Live demo: [sky.luftaquila.io](https://sky.luftaquila.io)
+Live demo with my personal receivers and the ADSB.lol network feed: [https://sky.luftaquila.io](https://sky.luftaquila.io)
 
 Inspired by [tar1090](https://github.com/wiedehopf/tar1090) and [ADS-B 3D](https://github.com/hook-365/adsb-3d).
 
 ## Features
 
 - Live traffic, terrain and receiver coverage domes in 3D
-- Aircraft details, charts and flight playback
-- Worldwide airfields and runway details
+  - The aircraft even roll and pitch based on ADS-B data!
+- Aircraft details, charts, flight playback, worldwide airfields and runway information
 
 <table>
   <tr>
@@ -67,17 +67,17 @@ npm --prefix web ci
 npm run dev
 ```
 
-In another terminal:
+Start the web app in another terminal:
 
 ```sh
-npm --prefix web run dev # Start the web app
+npm --prefix web run dev
 ```
 
 Tests:
 
 ```sh
-npx playwright install --with-deps chromium # Install Chromium and system dependencies
-npm run check # Run the full test suite
+npx playwright install --with-deps chromium
+npm run check
 ```
 
 ## Data sources
