@@ -1,4 +1,4 @@
-// Third-party licence notices for the shipped artifact.
+// Third-party licence notices for the browser artifact.
 //
 // MIT, BSD and ISC all make retaining the copyright notice a CONDITION of redistribution, and Vite's
 // minifier strips every legal comment out of the bundle (`/*! */` count in dist: zero). So the notice
@@ -7,15 +7,12 @@
 // Nothing here lands in git: the output goes into web/dist, which is gitignored. The distributed
 // artifact carries the notice; the source repo does not need a copy.
 //
-// Two package trees have to be covered and they never coexist in one Docker stage — the web bundle's
-// deps live only in the `web` stage, the server's only in the final image. So this runs once per
-// stage and MERGES into whatever output is already there.
+// Browser npm dependencies are collected while building web/dist. Linked Go module notices are
+// generated separately by cmd/notices and merged during the Docker build.
 //
-//   node scripts/notices.mjs --packages web --out web/dist/third-party-notices.json
-//   node scripts/notices.mjs --packages .   --out web/dist/third-party-notices.json
+//   node scripts/notices.mjs --packages web --scope web --out web/dist/third-party-notices.json
 //
-// `npm ls` is deliberately not used: spawning npm inside the runtime image is fragile (it reports
-// missing dev deps as errors once they are pruned), so the prod closure is walked directly.
+// `npm ls` is deliberately not used; the production closure is walked directly.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -26,9 +23,8 @@ const LICENSE_FILE = /^(?:licen[cs]e|copying|notice)(?:[-._].*)?$/i;
 // A licence text far larger than any real one means we picked up a bundled corpus, not a licence.
 const MAX_TEXT_BYTES = 64 * 1024;
 
-// `--scope` attaches to the `--packages` before it. It is passed rather than inferred because the
-// only thing available to infer from is the cwd, and the two build stages run from different ones —
-// which silently labelled the web packages "server" and vice versa.
+// `--scope` attaches to the preceding `--packages` root instead of inferring artifact identity
+// from the current working directory.
 function parseArgs(argv) {
   const roots = [];
   let out = null;

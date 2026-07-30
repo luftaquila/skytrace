@@ -11,11 +11,7 @@ services:
     volumes:
       - skytrace-data:/data
     healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - fetch('http://127.0.0.1:3000/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      test: [CMD, /app/skytrace, healthcheck]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -127,7 +123,7 @@ services:
           echo "restored database is invalid" >&2
           exit 1
         }
-        chown -R node:node /data
+        chown -R 1000:1000 /data
         chmod -R go-rwx /data
         trap - EXIT HUP INT TERM
         echo "restore completed in $$SKYTRACE_VOLUME_LABEL"
