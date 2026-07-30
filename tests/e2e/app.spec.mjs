@@ -178,6 +178,37 @@ test("map attribution opens shipped provider and package licence data", async ({
   expect(pageErrors).toEqual([]);
 });
 
+test("phone licence list uses one scroller and reaches the final package", async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const pageErrors = await openApp(page, request);
+  await page.getByRole("button", { name: "Map data and licences" }).click();
+  const dialog = page.getByRole("dialog", { name: "Map data and licences" });
+  await dialog.getByRole("button", { name: /Open source licenses/ }).click();
+
+  const packages = dialog.locator(".credits-pkg");
+  await expect(packages.first()).toBeVisible();
+  const geometry = await dialog.evaluate((popover) => {
+    const list = popover.querySelector(".credits-licenses");
+    const lastPackage = list?.lastElementChild;
+    popover.scrollTop = popover.scrollHeight;
+    const popoverRect = popover.getBoundingClientRect();
+    const lastRect = lastPackage?.getBoundingClientRect();
+    return {
+      listHasNestedScroll: list.scrollHeight > list.clientHeight,
+      popoverAtEnd: popover.scrollTop + popover.clientHeight >= popover.scrollHeight - 1,
+      lastPackageVisible: lastRect.bottom <= popoverRect.bottom + 1
+        && lastRect.bottom > popoverRect.top,
+    };
+  });
+
+  expect(geometry).toEqual({
+    listHasNestedScroll: false,
+    popoverAtEnd: true,
+    lastPackageVisible: true,
+  });
+  expect(pageErrors).toEqual([]);
+});
+
 test("configuration import rejects noise, applies valid settings, and exports a file", async ({ page, request }) => {
   const pageErrors = await openApp(page, request);
   await page.locator(".cbar-stations").getByRole("button", { name: "Settings" }).click();

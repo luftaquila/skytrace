@@ -2262,6 +2262,15 @@ input[type="number"] {
     height: 44px;
   }
 
+  /* A touch gesture cannot reliably hand off between nested scroll containers, especially while
+     both contain overscroll. Let the popover be the phone's single scroller so its final package
+     and any expanded licence text can always reach the visible bottom edge. */
+  .credits-licenses {
+    max-height: none;
+    overflow-y: visible;
+    overscroll-behavior: auto;
+  }
+
   .map-legend {
     padding: 7px 9px;
   }
