@@ -15,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/airfields"
-	"github.com/luftaquila/skytrace/internal/config"
-	"github.com/luftaquila/skytrace/internal/coverage"
-	"github.com/luftaquila/skytrace/internal/database"
-	"github.com/luftaquila/skytrace/internal/httpapi"
-	"github.com/luftaquila/skytrace/internal/retention"
-	"github.com/luftaquila/skytrace/internal/sse"
+	"github.com/luftaquila/skytrace/server/airfields"
+	"github.com/luftaquila/skytrace/server/config"
+	"github.com/luftaquila/skytrace/server/coverage"
+	"github.com/luftaquila/skytrace/server/database"
+	"github.com/luftaquila/skytrace/server/httpapi"
+	"github.com/luftaquila/skytrace/server/retention"
+	"github.com/luftaquila/skytrace/server/sse"
 )
 
 func main() {

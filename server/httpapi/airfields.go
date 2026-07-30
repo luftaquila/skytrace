@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/luftaquila/skytrace/internal/representation"
+	"github.com/luftaquila/skytrace/server/representation"
 )
 
 func (app *App) airfieldManifest(response http.ResponseWriter, _ *http.Request) {

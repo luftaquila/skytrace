@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/database"
-	"github.com/luftaquila/skytrace/internal/representation"
+	"github.com/luftaquila/skytrace/server/database"
+	"github.com/luftaquila/skytrace/server/representation"
 )
 
 type CacheState struct {

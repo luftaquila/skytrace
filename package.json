@@ -7,8 +7,8 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "dev": "go run ./cmd/skytrace",
-    "start": "go run ./cmd/skytrace",
+    "dev": "go run ./server",
+    "start": "go run ./server",
     "agent": "go run ./receiver/agent",
     "build": "npm --prefix web run build",
     "test:go": "go test ./... && go vet ./...",

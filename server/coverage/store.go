@@ -11,8 +11,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/config"
-	"github.com/luftaquila/skytrace/internal/database"
+	"github.com/luftaquila/skytrace/server/config"
+	"github.com/luftaquila/skytrace/server/database"
 )
 
 const maxSegmentSteps = 24

@@ -16,15 +16,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/airfields"
-	"github.com/luftaquila/skytrace/internal/areafeed"
-	"github.com/luftaquila/skytrace/internal/config"
-	"github.com/luftaquila/skytrace/internal/coverage"
-	"github.com/luftaquila/skytrace/internal/ingest"
-	"github.com/luftaquila/skytrace/internal/limits"
-	"github.com/luftaquila/skytrace/internal/representation"
-	"github.com/luftaquila/skytrace/internal/sse"
-	"github.com/luftaquila/skytrace/internal/tracks"
+	"github.com/luftaquila/skytrace/server/airfields"
+	"github.com/luftaquila/skytrace/server/areafeed"
+	"github.com/luftaquila/skytrace/server/config"
+	"github.com/luftaquila/skytrace/server/coverage"
+	"github.com/luftaquila/skytrace/server/ingest"
+	"github.com/luftaquila/skytrace/server/limits"
+	"github.com/luftaquila/skytrace/server/representation"
+	"github.com/luftaquila/skytrace/server/sse"
+	"github.com/luftaquila/skytrace/server/tracks"
 )
 
 var bearerPattern = regexp.MustCompile(`(?i)^Bearer\s+(.+)$`)

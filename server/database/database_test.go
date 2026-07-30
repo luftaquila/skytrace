@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/config"
+	"github.com/luftaquila/skytrace/server/config"
 )
 
 func TestOpenCreatesCanonicalPrivateDatabase(t *testing.T) {

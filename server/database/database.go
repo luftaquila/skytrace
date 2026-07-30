@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/config"
+	"github.com/luftaquila/skytrace/server/config"
 	_ "modernc.org/sqlite"
 )
 

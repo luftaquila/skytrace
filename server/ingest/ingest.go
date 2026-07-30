@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/database"
+	"github.com/luftaquila/skytrace/server/database"
 )
 
 const (

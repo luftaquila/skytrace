@@ -13,13 +13,13 @@ FROM ${GO_IMAGE} AS server
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
-COPY cmd/ cmd/
-COPY internal/ internal/
+COPY server/ server/
+COPY scripts/go-notices/ scripts/go-notices/
 COPY --from=web /build/web/dist web/dist/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/skytrace ./cmd/skytrace
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/skytrace ./server
 # Merge notices for the modules that are actually linked into the static server binary.
 RUN go list -m -json all \
-      | go run ./cmd/notices \
+      | go run ./scripts/go-notices \
           --binary /out/skytrace \
           --scope server \
           --out web/dist/third-party-notices.json

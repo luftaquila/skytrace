@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luftaquila/skytrace/internal/ingest"
+	"github.com/luftaquila/skytrace/server/ingest"
 )
 
 const (
