@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"net"
 	"net/http"
@@ -28,6 +29,10 @@ import (
 )
 
 var bearerPattern = regexp.MustCompile(`(?i)^Bearer\s+(.+)$`)
+
+// Well under the receiver's 15s upload deadline, so a stall is logged while the
+// receiver is still waiting rather than only after it has already given up.
+const slowIngestThreshold = 2 * time.Second
 
 type App struct {
 	db        *sql.DB
@@ -166,12 +171,14 @@ func (app *App) ingest(response http.ResponseWriter, request *http.Request) {
 	if headerPresent && len(headerRaw) != 0 {
 		headerReceiverID, _ = ingest.SanitizeReceiverID(headerRaw[0])
 	}
+	authStarted := time.Now()
 	auth, err := ingest.Authenticate(
 		request.Context(),
 		app.db,
 		bearerToken(request.Header.Get("Authorization")),
 		headerReceiverID,
 	)
+	authElapsed := time.Since(authStarted)
 	if err != nil {
 		internalError(response)
 		return
@@ -227,6 +234,7 @@ func (app *App) ingest(response http.ResponseWriter, request *http.Request) {
 		rejectLimited(response, http.StatusTooManyRequests, observationLimit.RetryAfter)
 		return
 	}
+	storeStarted := time.Now()
 	result, err := ingest.Store(request.Context(), app.db, payload, ingest.Options{
 		ReceiverID:               auth.ReceiverID,
 		TokenHash:                auth.TokenHash,
@@ -240,6 +248,18 @@ func (app *App) ingest(response http.ResponseWriter, request *http.Request) {
 			return app.track.Consume(receiverID, 1).OK
 		},
 	})
+	// Receivers give up on an upload after 15s and only report "timeout", which says
+	// nothing about which phase stalled. Naming the phase here is what tells a stall
+	// on the shared connection apart from one waiting on the write lock.
+	if storeElapsed := time.Since(storeStarted); storeElapsed > slowIngestThreshold {
+		log.Printf(
+			"slow ingest: receiver=%s auth=%s store=%s aircraft=%d",
+			auth.ReceiverID,
+			authElapsed.Truncate(time.Millisecond),
+			storeElapsed.Truncate(time.Millisecond),
+			rawCount,
+		)
+	}
 	if err != nil {
 		internalError(response)
 		return

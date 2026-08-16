@@ -233,7 +233,7 @@ func SyncCells(ctx context.Context, db *sql.DB, raw Options, now time.Time) (Agg
 	if err := rows.Close(); err != nil {
 		return Aggregation{}, err
 	}
-	transaction, err := db.BeginTx(ctx, nil)
+	transaction, release, err := database.WriteTx(ctx, db)
 	if err != nil {
 		return Aggregation{}, err
 	}
@@ -242,10 +242,15 @@ func SyncCells(ctx context.Context, db *sql.DB, raw Options, now time.Time) (Agg
 	}
 	if err != nil {
 		transaction.Rollback()
+		release()
 		return Aggregation{}, err
 	}
-	if err := transaction.Commit(); err != nil {
-		return Aggregation{}, err
+	// Released as soon as the transaction ends: the receiver sync below is the long
+	// part of a refresh and must not hold the write lock while it runs.
+	commitErr := transaction.Commit()
+	release()
+	if commitErr != nil {
+		return Aggregation{}, commitErr
 	}
 
 	receiverRows, err := db.QueryContext(ctx, `
@@ -371,10 +376,11 @@ func ensureReceiverState(
 	if firstActive.Valid && firstActive.Int64 > 0 {
 		lastTrack = firstActive.Int64 - 1
 	}
-	transaction, err := db.BeginTx(ctx, nil)
+	transaction, release, err := database.WriteTx(ctx, db)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	for _, statement := range []string{
 		"DELETE FROM coverage_cells WHERE receiver_id = ?",
 		"DELETE FROM coverage_track_state WHERE receiver_id = ?",
@@ -649,10 +655,11 @@ func persistChunk(
 	options Options,
 	nowISO string,
 ) error {
-	transaction, err := db.BeginTx(ctx, nil)
+	transaction, release, err := database.WriteTx(ctx, db)
 	if err != nil {
 		return err
 	}
+	defer release()
 	for _, cell := range cells {
 		if _, err := transaction.ExecContext(ctx, `
 			INSERT INTO coverage_cells (

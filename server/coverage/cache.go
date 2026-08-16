@@ -140,6 +140,11 @@ func (cache *Cache) build(receiverCache ReceiverCache, targetGeneration uint64) 
 	started := time.Now()
 	snapshot, _, err := Refresh(context.Background(), cache.db.SQL, cache.options, started, receiverCache)
 	completed := time.Now()
+	// A refresh that outruns its own interval is a rebuild walking the whole
+	// retention window; that is the shape of an incident, so say so in the log.
+	if elapsed := completed.Sub(started); elapsed > cache.interval {
+		log.Printf("coverage refresh took %s (interval %s)", elapsed.Truncate(time.Millisecond), cache.interval)
+	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	defer func() {

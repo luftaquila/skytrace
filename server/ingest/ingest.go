@@ -155,10 +155,11 @@ func Store(ctx context.Context, db *sql.DB, payload map[string]any, options Opti
 		}
 	}
 
-	transaction, err := db.BeginTx(ctx, nil)
+	transaction, release, err := database.WriteTx(ctx, db)
 	if err != nil {
 		return Result{}, err
 	}
+	defer release()
 	defer transaction.Rollback()
 
 	if _, err := transaction.ExecContext(ctx, `

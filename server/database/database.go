@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/luftaquila/skytrace/server/config"
@@ -27,6 +28,51 @@ var canonicalSchema = mustSchema()
 type DB struct {
 	SQL  *sql.DB
 	Path string
+}
+
+// The server opens several pools against one database file (the HTTP app, the
+// coverage cache, the retention runner), so three independent writers contend for
+// SQLite's single write lock and only its busy handler arbitrates. Production logs
+// that as "coverage refresh failed: database is locked (SQLITE_BUSY)" whenever a
+// refresh loses the race for longer than busy_timeout — four times on 2026-08-16.
+//
+// Taking a mutex keyed by the database file makes the handoff explicit and FIFO, so
+// contention between our own components becomes a bounded wait instead of a failed
+// statement. Readers keep their own connections and stay unaffected.
+var (
+	writePaths sync.Map // *sql.DB -> resolved path
+	writeLocks sync.Map // resolved path (or *sql.DB) -> *sync.Mutex
+)
+
+func lockWrites(db *sql.DB) func() {
+	var identity any = db
+	if path, ok := writePaths.Load(db); ok {
+		identity = path
+	}
+	value, _ := writeLocks.LoadOrStore(identity, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
+
+// WriteTx begins a write transaction serialized against every other writer on the
+// same database file. Defer the returned release before deferring the rollback, so
+// the lock is only dropped once the transaction has finished.
+func WriteTx(ctx context.Context, db *sql.DB) (*sql.Tx, func(), error) {
+	release := lockWrites(db)
+	transaction, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return transaction, release, nil
+}
+
+// WriteExec runs a single autocommit write statement under the same serialization.
+func WriteExec(ctx context.Context, db *sql.DB, query string, args ...any) (sql.Result, error) {
+	release := lockWrites(db)
+	defer release()
+	return db.ExecContext(ctx, query, args...)
 }
 
 func Open(ctx context.Context, path string) (*DB, error) {
@@ -72,6 +118,9 @@ func Open(ctx context.Context, path string) (*DB, error) {
 				return nil, err
 			}
 		}
+		// Every pool opened against this file shares one write lock. In-memory
+		// databases are private per pool, so they keep the per-pool fallback.
+		writePaths.Store(sqlDB, resolved)
 	}
 	return db, nil
 }
@@ -101,6 +150,7 @@ func (db *DB) initialize(ctx context.Context, memory bool) error {
 }
 
 func (db *DB) Close() error {
+	writePaths.Delete(db.SQL)
 	return db.SQL.Close()
 }
 
@@ -131,10 +181,11 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 }
 
 func SyncReceiverTokens(ctx context.Context, db *sql.DB, entries []config.ReceiverToken, now time.Time) error {
-	transaction, err := db.BeginTx(ctx, nil)
+	transaction, release, err := WriteTx(ctx, db)
 	if err != nil {
 		return err
 	}
+	defer release()
 	defer transaction.Rollback()
 
 	upsertReceiver, err := transaction.PrepareContext(ctx, `

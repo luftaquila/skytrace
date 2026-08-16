@@ -309,7 +309,9 @@ func deleteChunks(
 	first := true
 	for first || time.Now().Before(deadline) {
 		first = false
-		result, err := db.ExecContext(ctx, query, cutoff, chunkSize)
+		// Locked per chunk, not around the loop, so ingest gets the write lock
+		// between chunks instead of waiting out the whole sweep.
+		result, err := database.WriteExec(ctx, db, query, cutoff, chunkSize)
 		if err != nil {
 			return deleted, false, err
 		}
