@@ -11,7 +11,10 @@ permissions:
 
 env:
   REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
-  IMAGE_TAG: ${{ github.ref_name }}
+  # A release tag publishes under its own name. A branch dispatch is a deploy build
+  # rather than a release: branch names may contain characters an OCI tag rejects, so
+  # it publishes under its commit and never claims :latest.
+  IMAGE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('branch-{0}', github.sha) }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -28,8 +31,11 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ github.ref_type }}" != "tag" ]]; then
-            echo "Run this workflow from a release tag, not a branch" >&2
-            exit 1
+            # A branch dispatch builds a deployable image without cutting a release,
+            # so the version rules below — which only govern release tags — do not
+            # apply. Everything after this job still runs the full test suite.
+            echo "Branch build $IMAGE_TAG; skipping release version validation"
+            exit 0
           fi
           if [[ ! "$IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "IMAGE_TAG must be a stable vMAJOR.MINOR.PATCH version tag" >&2
@@ -110,6 +116,9 @@ jobs:
           scripts/smoke-compose.sh podman
 
   agent-build:
+    # Receiver assets exist to be attached to a release, so a branch deploy build
+    # skips them (and, through `needs`, agent-assets and release with them).
+    if: github.ref_type == 'tag'
     needs: release-test
     strategy:
       fail-fast: false
@@ -267,7 +276,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v4
-      - name: Publish multi-platform release tag
+      - name: Publish the multi-platform manifest
         shell: bash
         working-directory: ${{ runner.temp }}/digests
         run: |
@@ -279,9 +288,14 @@ jobs:
             echo "Expected two platform image digests, found ${#refs[@]}" >&2
             exit 1
           fi
+          tags=(--tag "${REGISTRY_IMAGE}:${IMAGE_TAG}")
+          # Only a release owns :latest. A branch build must never move it, or an
+          # unreleased commit would be what anything tracking :latest pulls next.
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            tags+=(--tag "${REGISTRY_IMAGE}:latest")
+          fi
           docker buildx imagetools create \
-            --tag "${REGISTRY_IMAGE}:${IMAGE_TAG}" \
-            --tag "${REGISTRY_IMAGE}:latest" \
+            "${tags[@]}" \
             --metadata-file "$RUNNER_TEMP/manifest-metadata.json" \
             "${refs[@]}"
           digest=$(jq -r '."containerimage.descriptor".digest // empty' \
@@ -291,8 +305,17 @@ jobs:
             exit 1
           fi
           docker buildx imagetools inspect "${REGISTRY_IMAGE}@${digest}"
+          # The deployment manifest pins a digest, so print the exact line to copy.
+          {
+            echo "### Image published"
+            echo
+            echo '```'
+            echo "${REGISTRY_IMAGE}@${digest}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   release:
+    if: github.ref_type == 'tag'
     needs: [manifest, agent-assets]
     runs-on: ubuntu-latest
     timeout-minutes: 10
