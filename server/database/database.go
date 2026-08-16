@@ -98,14 +98,30 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	dsn := ":memory:"
 	if !memory {
 		location := url.URL{Scheme: "file", Path: resolved}
+		// Carried in the DSN so every connection in the pool gets them. Setting the
+		// pragmas with a plain Exec would only reach whichever connection served it,
+		// which is why the pool could not be widened before.
+		query := location.Query()
+		query.Add("_pragma", "busy_timeout(5000)")
+		query.Add("_pragma", "foreign_keys(1)")
+		location.RawQuery = query.Encode()
 		dsn = location.String()
 	}
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
+	// Writers are serialized by WriteTx, so extra connections only ever add
+	// concurrent readers, which WAL supports. Keeping this at 1 meant /healthz
+	// queued behind whatever write held the single connection: a slow ingest
+	// failed the 2s liveness probe, and the SIGTERM that followed could not drain
+	// the in-flight request inside the shutdown deadline, so the process exited 1.
+	poolSize := 1
+	if !memory {
+		poolSize = 4
+	}
+	sqlDB.SetMaxOpenConns(poolSize)
+	sqlDB.SetMaxIdleConns(poolSize)
 	db := &DB{SQL: sqlDB, Path: resolved}
 	if err := db.initialize(ctx, memory); err != nil {
 		sqlDB.Close()
