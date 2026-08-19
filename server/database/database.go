@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -44,22 +45,38 @@ var (
 	writeLocks sync.Map // resolved path (or *sql.DB) -> *sync.Mutex
 )
 
-func lockWrites(db *sql.DB) func() {
+// Slow enough that it is worth a log line but far below the receiver's 15s upload
+// deadline, so a stall is attributed while it is still developing.
+const writeLockLogThreshold = time.Second
+
+func lockWrites(db *sql.DB, label string) func() {
 	var identity any = db
 	if path, ok := writePaths.Load(db); ok {
 		identity = path
 	}
 	value, _ := writeLocks.LoadOrStore(identity, &sync.Mutex{})
 	mutex := value.(*sync.Mutex)
+	requested := time.Now()
 	mutex.Lock()
-	return mutex.Unlock
+	acquired := time.Now()
+	if waited := acquired.Sub(requested); waited > writeLockLogThreshold {
+		log.Printf("write lock: %s waited %s", label, waited.Truncate(time.Millisecond))
+	}
+	return func() {
+		mutex.Unlock()
+		// Logged by holder, so a stalled writer and whoever stalled it both name
+		// themselves and the pair can be read straight off the log.
+		if held := time.Since(acquired); held > writeLockLogThreshold {
+			log.Printf("write lock: %s held %s", label, held.Truncate(time.Millisecond))
+		}
+	}
 }
 
 // WriteTx begins a write transaction serialized against every other writer on the
 // same database file. Defer the returned release before deferring the rollback, so
 // the lock is only dropped once the transaction has finished.
-func WriteTx(ctx context.Context, db *sql.DB) (*sql.Tx, func(), error) {
-	release := lockWrites(db)
+func WriteTx(ctx context.Context, db *sql.DB, label string) (*sql.Tx, func(), error) {
+	release := lockWrites(db, label)
 	transaction, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		release()
@@ -69,8 +86,8 @@ func WriteTx(ctx context.Context, db *sql.DB) (*sql.Tx, func(), error) {
 }
 
 // WriteExec runs a single autocommit write statement under the same serialization.
-func WriteExec(ctx context.Context, db *sql.DB, query string, args ...any) (sql.Result, error) {
-	release := lockWrites(db)
+func WriteExec(ctx context.Context, db *sql.DB, label, query string, args ...any) (sql.Result, error) {
+	release := lockWrites(db, label)
 	defer release()
 	return db.ExecContext(ctx, query, args...)
 }
@@ -197,7 +214,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 }
 
 func SyncReceiverTokens(ctx context.Context, db *sql.DB, entries []config.ReceiverToken, now time.Time) error {
-	transaction, release, err := WriteTx(ctx, db)
+	transaction, release, err := WriteTx(ctx, db, "tokens")
 	if err != nil {
 		return err
 	}

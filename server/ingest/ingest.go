@@ -155,7 +155,7 @@ func Store(ctx context.Context, db *sql.DB, payload map[string]any, options Opti
 		}
 	}
 
-	transaction, release, err := database.WriteTx(ctx, db)
+	transaction, release, err := database.WriteTx(ctx, db, "ingest")
 	if err != nil {
 		return Result{}, err
 	}

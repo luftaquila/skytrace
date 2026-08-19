@@ -27,7 +27,7 @@ func TestWriteTxExcludesOtherPoolsOnTheSameFile(t *testing.T) {
 	defer second.Close()
 
 	var held atomic.Bool
-	holding, release, err := WriteTx(ctx, first.SQL)
+	holding, release, err := WriteTx(ctx, first.SQL, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestWriteTxExcludesOtherPoolsOnTheSameFile(t *testing.T) {
 
 	entered := make(chan bool, 1)
 	go func() {
-		transaction, otherRelease, err := WriteTx(ctx, second.SQL)
+		transaction, otherRelease, err := WriteTx(ctx, second.SQL, "test")
 		if err != nil {
 			entered <- true
 			return
@@ -76,7 +76,7 @@ func TestWriteTxKeepsMemoryDatabasesIndependent(t *testing.T) {
 	}
 	defer second.Close()
 
-	held, release, err := WriteTx(ctx, first.SQL)
+	held, release, err := WriteTx(ctx, first.SQL, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestWriteTxKeepsMemoryDatabasesIndependent(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		transaction, otherRelease, err := WriteTx(ctx, second.SQL)
+		transaction, otherRelease, err := WriteTx(ctx, second.SQL, "test")
 		if err != nil {
 			done <- err
 			return

@@ -233,7 +233,7 @@ func SyncCells(ctx context.Context, db *sql.DB, raw Options, now time.Time) (Agg
 	if err := rows.Close(); err != nil {
 		return Aggregation{}, err
 	}
-	transaction, release, err := database.WriteTx(ctx, db)
+	transaction, release, err := database.WriteTx(ctx, db, "coverage.expire")
 	if err != nil {
 		return Aggregation{}, err
 	}
@@ -376,7 +376,7 @@ func ensureReceiverState(
 	if firstActive.Valid && firstActive.Int64 > 0 {
 		lastTrack = firstActive.Int64 - 1
 	}
-	transaction, release, err := database.WriteTx(ctx, db)
+	transaction, release, err := database.WriteTx(ctx, db, "coverage.rebuild")
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +655,7 @@ func persistChunk(
 	options Options,
 	nowISO string,
 ) error {
-	transaction, release, err := database.WriteTx(ctx, db)
+	transaction, release, err := database.WriteTx(ctx, db, "coverage.chunk")
 	if err != nil {
 		return err
 	}
