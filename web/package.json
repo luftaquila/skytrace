@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@lucide/vue": "^1.27.0",
+    "@lucide/vue": "^1.31.0",
     "maplibre-gl": "6.0.0",
     "uplot": "^1.6.32",
     "vue": "^3.5.40"
