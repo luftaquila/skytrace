@@ -57,6 +57,7 @@ var expectedIndexes = map[string]struct{}{
 	"idx_track_hex_id":              {},
 	"idx_track_time":                {},
 	"idx_track_receiver_id":         {},
+	"idx_track_receiver_hex_id":     {},
 	"idx_track_receiver_time":       {},
 	"idx_batches_received":          {},
 	"idx_batches_receiver_time":     {},
