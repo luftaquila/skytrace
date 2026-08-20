@@ -26,6 +26,21 @@ type AuthResult struct {
 	TokenHash  string
 }
 
+// An MLAT result is keyed by the 24-bit address alone, and several aircraft around
+// the world can share one address (military and misconfigured transponders often
+// broadcast 000000/000001), so aggregator feedback can deliver positions of aircraft
+// this receiver never heard. A solution the receiver contributed to lies within its
+// radio horizon (~250 NM at cruise altitude); the gate allows well past twice that
+// because the reference is a reception centroid rather than the antenna site.
+const DefaultMlatMaxRangeNM = 325
+
+// MlatReference anchors the MLAT range gate: the receiver's own recent ADS-B
+// reception centre, derived from data rather than operator configuration.
+type MlatReference struct {
+	Lat float64
+	Lon float64
+}
+
 type Options struct {
 	ReceiverID               string
 	TokenHash                string
@@ -36,6 +51,8 @@ type Options struct {
 	TrackMinIntervalSeconds  float64
 	PositionFilterMaxMach    float64
 	ConsumeTrackBudget       func(string) bool
+	MlatReference            *MlatReference
+	MlatMaxRangeNM           float64
 }
 
 type Result struct {
@@ -50,6 +67,7 @@ type Result struct {
 	InvalidFieldCount           int      `json:"invalidFieldCount"`
 	TruncatedFieldCount         int      `json:"truncatedFieldCount"`
 	FilteredPositionCount       int      `json:"filteredPositionCount"`
+	MlatRangeDroppedCount       int      `json:"mlatRangeDroppedCount"`
 	CurrentCapacityDroppedCount int      `json:"currentCapacityDroppedCount"`
 	TrackBudgetDroppedCount     int      `json:"trackBudgetDroppedCount"`
 	TrackPoints                 int      `json:"trackPoints"`
@@ -233,6 +251,24 @@ func Store(ctx context.Context, db *sql.DB, payload map[string]any, options Opti
 		if !present && currentCount >= maxReceiverCurrentAircraft {
 			result.CurrentCapacityDroppedCount++
 			continue
+		}
+
+		if observation.SourceKind == "mlat" && observation.Lat != nil && observation.Lon != nil &&
+			options.MlatReference != nil {
+			limit := options.MlatMaxRangeNM
+			if limit <= 0 {
+				limit = DefaultMlatMaxRangeNM
+			}
+			distance := distanceNauticalMiles(
+				options.MlatReference.Lat, options.MlatReference.Lon,
+				*observation.Lat, *observation.Lon,
+			)
+			if distance > limit {
+				observation.PositionAt = nil
+				observation.Lat = nil
+				observation.Lon = nil
+				result.MlatRangeDroppedCount++
+			}
 		}
 
 		var latest *trackPosition

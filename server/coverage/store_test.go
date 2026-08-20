@@ -55,9 +55,9 @@ func addTrackPoints(t *testing.T, db *database.DB, points []trackPoint) {
 	for _, point := range points {
 		_, err := transaction.Exec(`
 			INSERT INTO track_points (
-				hex, receiver_id, observed_at, position_at, lat, lon, alt_baro
+				hex, receiver_id, observed_at, position_at, lat, lon, alt_baro, source_type
 			)
-			VALUES (?, 'rx-1', ?, ?, ?, ?, ?)
+			VALUES (?, 'rx-1', ?, ?, ?, ?, ?, 'adsb_icao')
 		`, defaultString(point.hex, "abc123"), point.positionAt, point.positionAt,
 			point.lat, point.lon, point.altitude)
 		if err != nil {
@@ -77,9 +77,13 @@ func defaultString(value, fallback string) string {
 	return value
 }
 
-func TestCoverageConfigKeyMatchesNodeContract(t *testing.T) {
+func TestCoverageConfigKeyIsPinned(t *testing.T) {
 	options := NormalizeOptions(testCoverageOptions())
-	const expected = "08ea7be3fdb4a7a61fc71f132fb54f2640976f05ff7265bdedf300fb7e2ad572"
+	// Pinned so aggregation-semantics changes are deliberate: a new key forces a full
+	// coverage rebuild on deployed databases. Diverged from the Node-era contract
+	// (08ea7be3...) when the source whitelist and the far-point coherence rule were
+	// added to the identity.
+	const expected = "d566df7a318685e827a1eb080714974b1511c11de9d14584f67fa74caa11b8c9"
 	if options.ConfigKey != expected {
 		t.Fatalf("config key = %s, want %s", options.ConfigKey, expected)
 	}
@@ -235,5 +239,89 @@ func TestCacheReusesCanonicalRepresentation(t *testing.T) {
 	if !ok || string(second.Identity) != string(first.Identity) ||
 		second.IdentityETag != first.IdentityETag || second.GzipETag != first.GzipETag {
 		t.Fatal("unchanged coverage did not reuse canonical bytes and validators")
+	}
+}
+
+func TestCoverageIgnoresNetworkComputedPositions(t *testing.T) {
+	db := testCoverageDB(t)
+	// A coherent MLAT pair near the datum: locally plausible, but not RF-decoded by
+	// this receiver, so it must produce no coverage at all.
+	for index, position := range []string{"2026-07-22T23:59:00.000Z", "2026-07-22T23:59:03.000Z"} {
+		_, err := db.SQL.Exec(`
+			INSERT INTO track_points (
+				hex, receiver_id, observed_at, position_at, lat, lon, alt_baro, source_type
+			)
+			VALUES ('bbb001', 'rx-1', ?, ?, ?, 127.0, 8000, 'mlat')
+		`, position, position, 37.5+float64(index)*0.01)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
+	aggregation, err := SyncCells(context.Background(), db.SQL, testCoverageOptions(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregation.RawPoints != 0 || aggregation.CellWrites != 0 {
+		t.Fatalf("mlat rows reached coverage: %#v", aggregation)
+	}
+	var cells int
+	if err := db.SQL.QueryRow("SELECT COUNT(*) FROM coverage_cells").Scan(&cells); err != nil {
+		t.Fatal(err)
+	}
+	if cells != 0 {
+		t.Fatalf("cells = %d, want 0", cells)
+	}
+}
+
+func TestFarPositionsNeedACoherentSegment(t *testing.T) {
+	db := testCoverageDB(t)
+	// ~450 NM south of the 37.5/127.0 datum: past farPointNM, so an isolated point
+	// must earn nothing.
+	addTrackPoints(t, db, []trackPoint{
+		{hex: "ccc001", positionAt: "2026-07-22T23:58:00.000Z", lat: 30.0, lon: 127.0, altitude: 30000},
+	})
+	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
+	options := testCoverageOptions()
+	first, err := SyncCells(context.Background(), db.SQL, options, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var farCells int
+	countFar := func() {
+		t.Helper()
+		if err := db.SQL.QueryRow("SELECT COUNT(*) FROM coverage_cells WHERE lat < 31").Scan(&farCells); err != nil {
+			t.Fatal(err)
+		}
+	}
+	countFar()
+	if first.RawPoints != 1 || farCells != 0 {
+		t.Fatalf("isolated far point produced cells: %#v, farCells=%d", first, farCells)
+	}
+	// A second point seconds later within segment bounds corroborates the track, so
+	// the far reception now counts — tropospheric ducting stays observable.
+	addTrackPoints(t, db, []trackPoint{
+		{hex: "ccc001", positionAt: "2026-07-22T23:58:03.000Z", lat: 30.02, lon: 127.02, altitude: 30200},
+	})
+	if _, err := SyncCells(context.Background(), db.SQL, options, now); err != nil {
+		t.Fatal(err)
+	}
+	countFar()
+	if farCells == 0 {
+		t.Fatal("coherent far pair produced no cells")
+	}
+	// Near the datum an isolated point still counts on its own.
+	addTrackPoints(t, db, []trackPoint{
+		{hex: "ddd001", positionAt: "2026-07-22T23:58:00.000Z", lat: 37.6, lon: 127.1, altitude: 12000},
+	})
+	if _, err := SyncCells(context.Background(), db.SQL, options, now); err != nil {
+		t.Fatal(err)
+	}
+	var nearCells int
+	if err := db.SQL.QueryRow("SELECT COUNT(*) FROM coverage_cells WHERE lat > 37.55").Scan(&nearCells); err != nil {
+		t.Fatal(err)
+	}
+	if nearCells == 0 {
+		t.Fatal("isolated near point produced no cells")
 	}
 }

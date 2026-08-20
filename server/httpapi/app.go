@@ -53,6 +53,8 @@ type App struct {
 	liveMu    sync.Mutex
 	liveAt    time.Time
 	liveCache representation.Encoded
+
+	mlatRefs mlatReferenceCache
 }
 
 type routeLimit struct {
@@ -244,6 +246,7 @@ func (app *App) ingest(response http.ResponseWriter, request *http.Request) {
 		MaxObservationAgeSeconds: float64(app.config.MaxObservationAgeSeconds),
 		TrackMinIntervalSeconds:  float64(app.config.TrackMinIntervalSeconds),
 		PositionFilterMaxMach:    app.config.PositionFilterMaxMach,
+		MlatReference:            app.mlatReference(request.Context(), auth.ReceiverID),
 		ConsumeTrackBudget: func(receiverID string) bool {
 			return app.track.Consume(receiverID, 1).OK
 		},
