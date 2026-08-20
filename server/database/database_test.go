@@ -41,9 +41,12 @@ func TestOpenCreatesCanonicalPrivateDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const nodeCanonicalFingerprint = "4d8d6007f5e0b9f3bad477a11630ff307ac92142ac72ce1b8bcfb9c0f34ad92e"
-	if fingerprint != nodeCanonicalFingerprint {
-		t.Fatalf("canonical fingerprint = %s, want Node fingerprint %s", fingerprint, nodeCanonicalFingerprint)
+	// Pinned so schema changes are deliberate: the value only moves together with
+	// schema.sql and an offline migration for existing databases. Diverged from the
+	// legacy Node fingerprint (4d8d6007...) when idx_track_receiver_hex_id was added.
+	const canonicalFingerprint = "a44d3a0dedcc1c0c0e7b1a8dd8a317d88a80e2d1389d6ddf1fa8d0e6fc788581"
+	if fingerprint != canonicalFingerprint {
+		t.Fatalf("canonical fingerprint = %s, want %s", fingerprint, canonicalFingerprint)
 	}
 }
 

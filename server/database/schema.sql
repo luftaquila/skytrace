@@ -160,6 +160,7 @@ CREATE INDEX idx_track_hex_time ON track_points(hex, position_at, id);
 CREATE INDEX idx_track_hex_id ON track_points(hex, id);
 CREATE INDEX idx_track_time ON track_points(position_at);
 CREATE INDEX idx_track_receiver_id ON track_points(receiver_id, id);
+CREATE INDEX idx_track_receiver_hex_id ON track_points(receiver_id, hex, id);
 CREATE INDEX idx_track_receiver_time ON track_points(receiver_id, position_at, id);
 CREATE INDEX idx_batches_received ON ingest_batches(received_at, id);
 CREATE INDEX idx_batches_receiver_time ON ingest_batches(receiver_id, received_at);
