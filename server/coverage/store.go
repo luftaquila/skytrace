@@ -17,6 +17,18 @@ import (
 
 const maxSegmentSteps = 24
 
+// Coverage is evidence of local RF reception, so only positions this receiver decoded
+// off the air itself qualify: adsb_icao, adsb_icao_nt, adsb_other. MLAT positions are
+// computed by an aggregator network (and collide across aircraft sharing one address),
+// and TIS-B/ADS-R are rebroadcasts — neither proves this antenna heard the aircraft.
+const coverageSourcePattern = "adsb%"
+
+// Beyond typical line-of-sight (~250 NM from the datum) a position only earns cells as
+// part of a coherent segment pair: genuine extreme-range receptions (tropospheric
+// ducting) arrive as multi-point tracks, while a CPR mis-decode is an isolated
+// teleport. The first point of a far track is sacrificed to buy that distinction.
+const farPointNM = 270
+
 type Options struct {
 	WindowHours                  int
 	HorizontalStepNM             float64
@@ -175,6 +187,8 @@ func NormalizeOptions(raw Options) Options {
 		MaxSegmentAltitude float64 `json:"maxSegmentAltitudeFt"`
 		MaxSegmentSteps    int     `json:"maxSegmentSteps"`
 		DatumDegrees       float64 `json:"datumDegrees"`
+		SourcePattern      string  `json:"sourcePattern"`
+		FarPointNM         float64 `json:"farPointNm"`
 	}
 	identity, _ := json.Marshal(configIdentity{
 		WindowHours:        raw.WindowHours,
@@ -185,6 +199,8 @@ func NormalizeOptions(raw Options) Options {
 		MaxSegmentAltitude: raw.MaxSegmentAltitudeFT,
 		MaxSegmentSteps:    maxSegmentSteps,
 		DatumDegrees:       0.5,
+		SourcePattern:      coverageSourcePattern,
+		FarPointNM:         farPointNM,
 	})
 	sum := sha256.Sum256(identity)
 	raw.ConfigKey = hex.EncodeToString(sum[:])
@@ -353,6 +369,7 @@ func ensureReceiverState(
 			FROM track_points
 			WHERE receiver_id = ? AND position_at >= ? AND position_at <= ?
 				AND lat IS NOT NULL AND lon IS NOT NULL
+				AND source_type LIKE '`+coverageSourcePattern+`'
 			ORDER BY position_at ASC, id ASC
 			LIMIT 1
 		`, receiver.id, cutoffISO, nowISO).Scan(&lat, &lon)
@@ -469,6 +486,7 @@ func syncReceiver(
 				AND position_at <= ?
 				AND lat IS NOT NULL
 				AND lon IS NOT NULL
+				AND source_type LIKE '`+coverageSourcePattern+`'
 			ORDER BY id ASC
 			LIMIT ?
 		`, receiver.id, cursor, targetTrack, cutoffISO, nowISO, options.AggregationChunkSize)
@@ -581,19 +599,25 @@ func addPointAndSegment(
 	state *receiverState,
 	options Options,
 ) {
-	addCell(cells, point, state, options)
-	if !hasPrevious {
-		return
-	}
-	dtSeconds := point.time.Sub(previous.time).Seconds()
-	if !(dtSeconds > 0 && dtSeconds <= options.MaxSegmentSeconds) {
-		return
-	}
-	previousEast, previousNorth := localCoordinates(previous, state)
 	east, north := localCoordinates(point, state)
-	horizontalNM := math.Hypot(east-previousEast, north-previousNorth)
-	altitudeDelta := math.Abs(point.altitude - previous.altitude)
-	if horizontalNM > options.MaxSegmentNM || altitudeDelta > options.MaxSegmentAltitudeFT {
+	var horizontalNM, altitudeDelta float64
+	coherent := false
+	if hasPrevious {
+		dtSeconds := point.time.Sub(previous.time).Seconds()
+		if dtSeconds > 0 && dtSeconds <= options.MaxSegmentSeconds {
+			previousEast, previousNorth := localCoordinates(previous, state)
+			horizontalNM = math.Hypot(east-previousEast, north-previousNorth)
+			altitudeDelta = math.Abs(point.altitude - previous.altitude)
+			coherent = horizontalNM <= options.MaxSegmentNM && altitudeDelta <= options.MaxSegmentAltitudeFT
+		}
+	}
+	if !coherent && math.Hypot(east, north) > farPointNM {
+		// The caller still records the point in track state, so a genuine far track
+		// earns cells from its second point on.
+		return
+	}
+	addCell(cells, point, state, options)
+	if !coherent {
 		return
 	}
 	steps := minInt(maxSegmentSteps, int(math.Ceil(maxFloat(

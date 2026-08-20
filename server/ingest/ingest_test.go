@@ -135,3 +135,78 @@ func TestAuthenticate(t *testing.T) {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
+
+func TestMlatRangeGateStripsForeignPositions(t *testing.T) {
+	db, err := database.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	options := testOptions()
+	options.MlatReference = &MlatReference{Lat: 36.37, Lon: 127.33}
+	payload := map[string]any{"aircraft": []any{
+		// An MLAT solution near Dubai under a shared address: another aircraft
+		// entirely, far past anything this antenna could have contributed to.
+		map[string]any{
+			"hex": "aaa001", "seen": json.Number("0"), "seen_pos": json.Number("0"),
+			"lat": json.Number("24.8"), "lon": json.Number("55.3"), "type": "mlat",
+		},
+		// A local MLAT solution stays intact.
+		map[string]any{
+			"hex": "aaa002", "seen": json.Number("0"), "seen_pos": json.Number("0"),
+			"lat": json.Number("36.5"), "lon": json.Number("127.5"), "type": "mlat",
+		},
+		// The gate is about MLAT identity, not range in general: a far position the
+		// receiver decoded off the air itself (ducting) is untouched.
+		map[string]any{
+			"hex": "aaa003", "seen": json.Number("0"), "seen_pos": json.Number("0"),
+			"lat": json.Number("30.1"), "lon": json.Number("128.9"), "type": "adsb_icao",
+		},
+	}}
+	result, err := Store(context.Background(), db.SQL, payload, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AcceptedCount != 3 || result.MlatRangeDroppedCount != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	positions := map[string]bool{}
+	rows, err := db.SQL.Query("SELECT hex, lat IS NOT NULL FROM receiver_aircraft_current")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var hex string
+		var hasPosition bool
+		if err := rows.Scan(&hex, &hasPosition); err != nil {
+			t.Fatal(err)
+		}
+		positions[hex] = hasPosition
+	}
+	want := map[string]bool{"aaa001": false, "aaa002": true, "aaa003": true}
+	for hex, expected := range want {
+		if positions[hex] != expected {
+			t.Fatalf("positions = %#v, want %#v", positions, want)
+		}
+	}
+}
+
+func TestMlatGateIsInertWithoutAReference(t *testing.T) {
+	db, err := database.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	payload := map[string]any{"aircraft": []any{map[string]any{
+		"hex": "aaa001", "seen": json.Number("0"), "seen_pos": json.Number("0"),
+		"lat": json.Number("24.8"), "lon": json.Number("55.3"), "type": "mlat",
+	}}}
+	result, err := Store(context.Background(), db.SQL, payload, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MlatRangeDroppedCount != 0 || result.TrackPoints != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+}
