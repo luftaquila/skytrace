@@ -120,6 +120,7 @@ func New(db *sql.DB, cfg config.Config, hub *sse.Hub, airfieldStore *airfields.S
 	mux.Handle("POST /api/aircraft/tracks", app.withRouteLimit("bulk", http.HandlerFunc(app.bulkTracks)))
 	mux.Handle("GET /api/live", app.withRouteLimit("live", http.HandlerFunc(app.live)))
 	mux.Handle("GET /api/coverage", app.withRouteLimit("coverage", http.HandlerFunc(app.coverageResponse)))
+	mux.Handle("GET /api/aircraft/search", app.withRouteLimit("history", http.HandlerFunc(app.aircraftSearch)))
 	mux.Handle("GET /api/aircraft/{hex}/history", app.withRouteLimit("history", http.HandlerFunc(app.history)))
 	mux.Handle("GET /api/aircraft/{hex}/history.kml", app.withRouteLimit("history", http.HandlerFunc(app.historyKML)))
 	mux.Handle("GET /api/area-traffic", app.withRouteLimit("area", http.HandlerFunc(app.areaTraffic)))
@@ -379,6 +380,27 @@ func (app *App) liveRepresentation(ctx context.Context, now time.Time) (represen
 		}
 		aircraft = aircraft[:len(aircraft)/2]
 	}
+}
+
+// aircraftSearch finds archived aircraft by callsign or hex prefix, so the operator
+// can pull up flights that have already left the live picture. Shares the history
+// route limit: both are operator-paced archive reads.
+func (app *App) aircraftSearch(response http.ResponseWriter, request *http.Request) {
+	results, err := tracks.SearchAircraft(request.Context(), app.db, request.URL.Query().Get("q"))
+	if err != nil {
+		writeQueryError(response, err)
+		return
+	}
+	response.Header().Set("Cache-Control", "no-store")
+	encoded, err := representation.EncodeJSON(map[string]any{
+		"ok":      true,
+		"results": results,
+	}, 1024, 0)
+	if err != nil {
+		internalError(response)
+		return
+	}
+	representation.Send(response, request, encoded, "")
 }
 
 func (app *App) history(response http.ResponseWriter, request *http.Request) {

@@ -689,6 +689,16 @@ select {
   letter-spacing: 0.04em;
 }
 
+/* Archive search: the explicit past-flight lookup living under the live traffic rows. */
+.archive-block {
+  border-top: 1px solid rgb(72 224 209 / 0.14);
+}
+
+.archive-bar {
+  background: #38bdf8;
+  opacity: 0.55;
+}
+
 .row-trend {
   margin-right: 3px;
   font-style: normal;

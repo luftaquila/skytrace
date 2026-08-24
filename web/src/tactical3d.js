@@ -1347,6 +1347,8 @@ export function createTactical3d({ container, deps }) {
   let aircraftDots = [];     // stick ground feet, as {p,color,sizePx}
   let aircraftCoverage = null; // coverage dome mesh: {positions, anchor, altExagg}
   let trailRenderState = { inputs: [], altitudeExagg: null, trailWidthPx: null };
+  // The operator's own geolocation fix ({lon, lat, altitudeM|null}); null until Locate finds one.
+  let observerState = null;
   let aircraftTrailAnchors = new Map();
   const motionTracker = createAircraftMotionTracker();
   let motionHexes = new Set();
@@ -1917,6 +1919,37 @@ export function createTactical3d({ container, deps }) {
       dynamic: motionHexes.has(s.hex),
       mutable: s.mutable,
     }));
+    // Observer marker: the operator's own geolocation fix as a station mast — a ground
+    // dot, a vertical mast, and a beacon dot at the reported GNSS height, in a sky-blue
+    // no altitude band uses. The Geolocation altitude is ellipsoidal (WGS84), which reads
+    // ~20–30 m above local MSL terrain; against a phone fix's own ±10–30 m vertical error
+    // that bias is display noise, so the mast is simply clamped to the terrain contact.
+    if (observerState) {
+      const beacon = [56, 189, 248];
+      const groundZ = queryTerrainContactElevation(map, observerState.lon, observerState.lat);
+      const altM = Number.isFinite(observerState.altitudeM) ? observerState.altitudeM : null;
+      const z = altM === null ? groundZ : Math.max(groundZ, altM * altitudeExagg);
+      aircraftDots.push({
+        p: [observerState.lon, observerState.lat, groundZ],
+        color: [...beacon, 235],
+        sizePx: 4.5,
+        groundContact: true,
+      });
+      if (z - groundZ > 2) {
+        aircraftStickSegments.push({
+          a: [observerState.lon, observerState.lat, z],
+          b: [observerState.lon, observerState.lat, groundZ],
+          color: [...beacon, 210],
+          widthPx: 2.2,
+          groundContact: true,
+        });
+        aircraftDots.push({
+          p: [observerState.lon, observerState.lat, z],
+          color: [...beacon, 255],
+          sizePx: 7,
+        });
+      }
+    }
     aircraftCoverage = covMesh ? {
       positions: covMesh.attributes.positions.value,
       normals: covMesh.attributes.normals.value,
@@ -2908,6 +2941,14 @@ export function createTactical3d({ container, deps }) {
       { duration: 900, easing: EASE_IN_OUT, kind: "locate-browser" },
     );
   }
+  // Pin (or clear, with null) the operator's own position marker. Rendered by buildLayers as a
+  // ground dot plus, when the fix carries an altitude, a mast and beacon dot at that height.
+  function setObserver(observer) {
+    observerState = observer && Number.isFinite(observer.lon) && Number.isFinite(observer.lat)
+      ? { lon: observer.lon, lat: observer.lat, altitudeM: observer.altitudeM ?? null }
+      : null;
+    buildLayers();
+  }
   // Locate is a tracking toggle for a selected aircraft. Starting preserves the current bearing
   // and pitch, changing only centre/zoom/elevated pivot; stopping preserves the camera exactly.
   function toggleTracking(lon, lat, altFt) {
@@ -3014,5 +3055,5 @@ export function createTactical3d({ container, deps }) {
       setViewPadding(parked);
     }
   });
-  return { resize, dataPass, clockPass, drawCoverage, applySettings, setHoverClass, locateBrowser, focusReceiver, toggleTracking, toggleAirfieldTracking, clearAirfieldSelection, setViewPadding, resetNorth, destroy };
+  return { resize, dataPass, clockPass, drawCoverage, applySettings, setHoverClass, locateBrowser, setObserver, focusReceiver, toggleTracking, toggleAirfieldTracking, clearAirfieldSelection, setViewPadding, resetNorth, destroy };
 }

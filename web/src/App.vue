@@ -79,6 +79,10 @@ const aircraft = computed(() => {
 const receivers = ref([]);
 const coverage = shallowRef({ areas: [], points: [] });
 const selectedHex = ref(null);
+// The archive-search result behind the current selection ({hex, flight, lastSeenAt, ...}), or
+// null when the selection is a live target. Keeps a past flight selectable: without it the
+// selectedAircraft watcher would clear any hex missing from the live picture.
+const archiveSelection = ref(null);
 const selectedAirfield = ref(null);
 const trackingActive = ref(false);
 // Live camera attitude, fed from the render loop: the compass rose points true north and its
@@ -566,7 +570,20 @@ const selectedAircraft = computed(() => {
   // display-dropped target as absent here too, so the aircraft model, tracking orbit, Target
   // console and selected trail all end on the same transition instead of leaving a dead panel and
   // an orphaned trail until the server eventually removes the row.
-  return item && !isDropped(item) ? item : null;
+  if (item && !isDropped(item)) return item;
+  // An archive selection has no live row by definition. Synthesize the identity card so the
+  // TARGET console — and with it the history chart, scrubber and KML export — serves a past
+  // flight; every live-only metric renders as its normal "-" placeholder.
+  const archived = archiveSelection.value;
+  if (archived && archived.hex === selectedHex.value) {
+    return {
+      hex: archived.hex,
+      flight: archived.flight || null,
+      observedAt: archived.lastSeenAt,
+      archived: true,
+    };
+  }
+  return null;
 });
 watch(selectedAircraft, (item) => {
   // Selection, camera tracking and the selected trail are one lifecycle. This fires both at the
@@ -1745,7 +1762,7 @@ async function togglePin(hex) {
   }
 }
 
-function beginAircraftSelection(hex) {
+function beginAircraftSelection(hex, archived = null) {
   if (!hex || selectedHex.value === hex) return;
   if (selectedAirfield.value) {
     selectedAirfield.value = null;
@@ -1762,6 +1779,9 @@ function beginAircraftSelection(hex) {
   selectedHistoric.value = false;
   playbackIndex.value = 0;
   const hadSelection = Boolean(selectedHex.value);
+  // Set before the hex so selectedAircraft never observes an archive hex without its card,
+  // which would read as a vanished live target and self-clear the selection.
+  archiveSelection.value = archived;
   selectedHex.value = hex;
   // A FIRST selection is an explicit request to read the target, so a dismissed TARGET console
   // comes back. But switching targets while the console was deliberately hidden respects that
@@ -1780,6 +1800,61 @@ watch(selectedHex, (hex) => {
   if (!hex && mobileStation.value === "target") mobileStation.value = null;
 });
 
+// --- Archive search: flights the live picture no longer shows ----------------------------
+// One search box, both pictures: the same text that filters the live rows as-you-type also
+// queries the archive, debounced so the API sees settled queries instead of keystrokes.
+// Archive rows render below the live rows, minus any aircraft the live list already shows.
+const archiveResults = ref([]);
+const archiveSearching = ref(false);
+const archiveSearched = ref(false);
+const archiveQuery = computed(() => {
+  const query = search.value.trim();
+  return query.length >= 2 && query.length <= 16 ? query : "";
+});
+let archiveSearchTimer = null;
+let archiveRequestVersion = 0;
+watch(archiveQuery, (query) => {
+  clearTimeout(archiveSearchTimer);
+  archiveRequestVersion += 1; // in-flight results for the old query are stale
+  archiveResults.value = [];
+  archiveSearched.value = false;
+  archiveSearching.value = false;
+  if (!query) return;
+  archiveSearchTimer = setTimeout(() => { void runArchiveSearch(); }, 450);
+});
+
+async function runArchiveSearch() {
+  const query = archiveQuery.value;
+  if (!query) return;
+  const version = ++archiveRequestVersion;
+  archiveSearching.value = true;
+  try {
+    const result = await fetchJson(`/api/aircraft/search?q=${encodeURIComponent(query)}`, { cache: "no-store" });
+    if (version !== archiveRequestVersion) return;
+    // A row without track points has nothing to draw, and a hex the live list already
+    // shows would be a duplicate line for the same aircraft.
+    const liveHexes = new Set(aircraft.value.map((item) => item.hex));
+    archiveResults.value = (result.results || []).filter((row) => row.hasTrack && !liveHexes.has(row.hex));
+    archiveSearched.value = true;
+  } catch {
+    if (version === archiveRequestVersion) archiveSearched.value = true;
+  } finally {
+    if (version === archiveRequestVersion) archiveSearching.value = false;
+  }
+}
+
+async function selectArchivedAircraft(row) {
+  if (!beginAircraftSelection(row.hex, row)) return;
+  tac3d?.dataPass();
+  // A past flight has no current run; open straight onto the full archived track with the
+  // scrubber parked on its final point.
+  if (await refreshTrack(false)) {
+    selectedHistoric.value = true;
+    playbackIndex.value = Math.max(0, selectedTrack.value.length - 1);
+    renderTrackView();
+  }
+}
+
 async function selectAircraft(hex) {
   if (!beginAircraftSelection(hex)) return;
   // Selection alone keeps the camera untouched. If Track is already active, dataPass transfers
@@ -1797,6 +1872,7 @@ function clearSelection() {
   selectedTrackRaw.value = [];
   archivePages.value = new Map();
   selectedHistoric.value = false;
+  archiveSelection.value = null;
   if (selectedHex.value && !pinned.value.has(selectedHex.value)) trackCursors.delete(selectedHex.value);
   selectedHex.value = null;
   playbackIndex.value = 0;
@@ -1872,7 +1948,17 @@ function browserLocation() {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) { reject(new Error("Browser geolocation is unavailable")); return; }
     navigator.geolocation.getCurrentPosition(
-      ({ coords }) => resolve({ lat: coords.latitude, lon: coords.longitude }),
+      ({ coords }) => resolve({
+        lat: coords.latitude,
+        lon: coords.longitude,
+        // GNSS height when the device provides one (phones with a fix; null on WiFi/IP
+        // location). A fix whose own vertical accuracy is worse than 100 m says nothing
+        // useful about height, so it degrades to a ground-level fix.
+        altitudeM: Number.isFinite(coords.altitude)
+          && (coords.altitudeAccuracy == null || coords.altitudeAccuracy <= 100)
+          ? coords.altitude
+          : null,
+      }),
       reject,
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 },
     );
@@ -1896,6 +1982,7 @@ async function recenterView() {
   trackingActive.value = false;
   try {
     const here = await browserLocation();
+    tac3d?.setObserver(here); // pin the own-position marker even if a selection grabbed focus
     if (selectedHex.value) return; // selection changed while waiting for the permission/location fix
     tac3d?.locateBrowser(here.lon, here.lat);
   } catch (error) {
@@ -2390,6 +2477,29 @@ onUnmounted(() => {
               </span>
             </button>
             <div v-if="!filteredAircraft.length" class="block-empty">No targets match the active filters</div>
+
+            <!-- Archive: the same query, answered from flights that already left the live
+                 picture — one search, both pictures. Auto-run (debounced), no extra control. -->
+            <div v-if="archiveQuery" class="archive-block">
+              <button
+                v-for="row in archiveResults"
+                :key="`arch-${row.hex}`"
+                :class="['target-row', 'archive-row', { active: selectedHex === row.hex }]"
+                @click="selectArchivedAircraft(row)"
+              >
+                <span class="row-bar archive-bar"></span>
+                <span class="row-id">
+                  <strong>{{ row.flight || row.hex.toUpperCase() }}</strong>
+                  <small>{{ row.hex.toUpperCase() }} · ARCHIVE</small>
+                </span>
+                <span class="row-num">
+                  <strong>T-<span v-age="row.lastSeenAt"></span></strong>
+                  <small v-if="row.firstSeenAt">since {{ formatStamp(row.firstSeenAt) }}</small>
+                </span>
+              </button>
+              <div v-if="archiveSearching && !archiveResults.length" class="block-empty">Searching the archive…</div>
+              <div v-else-if="archiveSearched && !archiveResults.length" class="block-empty">No archived flights match</div>
+            </div>
         </div>
       </aside>
 
