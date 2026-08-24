@@ -1980,10 +1980,12 @@ export function createTactical3d({ container, deps }) {
         });
       }
       // Course-made-good leader while moving: one minute of travel along the reported
-      // heading, so the line's length itself reads as speed.
+      // heading, so the line's length itself reads as speed — uncapped, because an
+      // observer in a car or an aircraft genuinely covers that ground. Only a floor,
+      // so a walking pace still draws a visible direction tick.
       if (Number.isFinite(observerState.headingDeg) && Number.isFinite(observerState.speedMS)
         && observerState.speedMS > 0.5) {
-        const distanceM = Math.min(2000, Math.max(40, observerState.speedMS * 60));
+        const distanceM = Math.max(40, observerState.speedMS * 60);
         const bearing = (observerState.headingDeg * Math.PI) / 180;
         const dLat = (distanceM * Math.cos(bearing)) / M_PER_DEG_LAT;
         const dLon = (distanceM * Math.sin(bearing))
