@@ -1347,8 +1347,10 @@ export function createTactical3d({ container, deps }) {
   let aircraftDots = [];     // stick ground feet, as {p,color,sizePx}
   let aircraftCoverage = null; // coverage dome mesh: {positions, anchor, altExagg}
   let trailRenderState = { inputs: [], altitudeExagg: null, trailWidthPx: null };
-  // The operator's own geolocation fix ({lon, lat, altitudeM|null}); null until Locate finds one.
+  // The operator's own geolocation fix ({lon, lat, altitudeM, speedMS, headingDeg,
+  // accuracyM, at, track: [{lon, lat, altitudeM}]}); null until a fix arrives.
   let observerState = null;
+  let obsPinned = false;
   let aircraftTrailAnchors = new Map();
   const motionTracker = createAircraftMotionTracker();
   let motionHexes = new Set();
@@ -1404,6 +1406,11 @@ export function createTactical3d({ container, deps }) {
   const afHoverEl = document.createElement("div");
   afHoverEl.className = "t3d-tt airfield-tt";
   afHoverEl.style.display = "none";
+  // The observer's own data card: same glass as an airfield popover, toggled by
+  // clicking the observer marker and pinned until clicked again.
+  const obsEl = document.createElement("div");
+  obsEl.className = "t3d-tt airfield-tt";
+  obsEl.style.display = "none";
   // Tactical target-lock reticle (HUD corner brackets) around the selected aircraft.
   const lockEl = document.createElement("div");
   lockEl.className = "t3d-lock";
@@ -1412,7 +1419,7 @@ export function createTactical3d({ container, deps }) {
   const loadingEl = document.createElement("div");
   loadingEl.className = "t3d-loading";
   loadingEl.textContent = "LOADING TERRAIN…";
-  container.append(overlayEl, afPinEl, afHoverEl, lockEl, loadingEl);
+  container.append(overlayEl, afPinEl, afHoverEl, obsEl, lockEl, loadingEl);
 
   const OVERLAY_MARGIN_PX = 6; // keep every overlay card this far inside the map viewport
   const ANCHOR_SLACK_PX = 24; // how far off-screen a target may sit and still show its label
@@ -1949,6 +1956,45 @@ export function createTactical3d({ container, deps }) {
           sizePx: 7,
         });
       }
+      // The accumulated own track as a dim trail into the live marker. Terrain contact is
+      // re-queried per pass like the aircraft do, so the trail settles once DEM tiles load.
+      let previousPoint = null;
+      for (const fix of observerState.track.slice(-300)) {
+        if (!Number.isFinite(fix.lon) || !Number.isFinite(fix.lat)) continue;
+        const fixGround = queryTerrainContactElevation(map, fix.lon, fix.lat);
+        const fixZ = Number.isFinite(fix.altitudeM)
+          ? Math.max(fixGround, fix.altitudeM * altitudeExagg)
+          : fixGround;
+        const point = [fix.lon, fix.lat, fixZ];
+        if (previousPoint) {
+          aircraftOverlaySegments.push({ a: previousPoint, b: point, color: [...beacon, 150], widthPx: 1.8 });
+        }
+        previousPoint = point;
+      }
+      if (previousPoint) {
+        aircraftOverlaySegments.push({
+          a: previousPoint,
+          b: [observerState.lon, observerState.lat, z],
+          color: [...beacon, 150],
+          widthPx: 1.8,
+        });
+      }
+      // Course-made-good leader while moving: one minute of travel along the reported
+      // heading, so the line's length itself reads as speed.
+      if (Number.isFinite(observerState.headingDeg) && Number.isFinite(observerState.speedMS)
+        && observerState.speedMS > 0.5) {
+        const distanceM = Math.min(2000, Math.max(40, observerState.speedMS * 60));
+        const bearing = (observerState.headingDeg * Math.PI) / 180;
+        const dLat = (distanceM * Math.cos(bearing)) / M_PER_DEG_LAT;
+        const dLon = (distanceM * Math.sin(bearing))
+          / (M_PER_DEG_LAT * Math.cos((observerState.lat * Math.PI) / 180) || 1);
+        aircraftOverlaySegments.push({
+          a: [observerState.lon, observerState.lat, z],
+          b: [observerState.lon + dLon, observerState.lat + dLat, z],
+          color: [...beacon, 255],
+          widthPx: 2.4,
+        });
+      }
     }
     aircraftCoverage = covMesh ? {
       positions: covMesh.attributes.positions.value,
@@ -2437,6 +2483,7 @@ export function createTactical3d({ container, deps }) {
   let lastPitchNotified = null;
   map.on("render", () => {
     if (afPinned) positionAf(afPinEl, afPinned);
+    if (obsPinned && observerState) positionAf(obsEl, observerState);
     if (hoverAf?.field && hoverAf.field !== afPinned) positionAf(afHoverEl, hoverAf.field);
     syncBlocks();
     // Custom transform writes never fire MapLibre's move events, so the compass is fed from the
@@ -2515,6 +2562,13 @@ export function createTactical3d({ container, deps }) {
       return;
     }
     trackedAircraftClick = null;
+    if (observerState) {
+      const observerPoint = map.project([observerState.lon, observerState.lat]);
+      if (Math.hypot(px - observerPoint.x, py - observerPoint.y) <= 26) {
+        toggleObserverCard(); // the operator's own marker: pin/unpin the data card
+        return;
+      }
+    }
     const field = pickAirfieldAt(px, py, { force: true });
     if (field) { showPinned(field); return; } // clicking an airfield pins its popover
     if (afPinned) clearPinned({ releaseOrbit: true }); // click elsewhere clears it
@@ -2941,13 +2995,58 @@ export function createTactical3d({ container, deps }) {
       { duration: 900, easing: EASE_IN_OUT, kind: "locate-browser" },
     );
   }
-  // Pin (or clear, with null) the operator's own position marker. Rendered by buildLayers as a
-  // ground dot plus, when the fix carries an altitude, a mast and beacon dot at that height.
+  // Update (or clear, with null) the operator's own position. Rendered by buildLayers as a
+  // ground dot plus, when the fix carries an altitude, a mast and beacon dot at that height,
+  // the accumulated track as a trail, and a one-minute heading vector while moving.
   function setObserver(observer) {
     observerState = observer && Number.isFinite(observer.lon) && Number.isFinite(observer.lat)
-      ? { lon: observer.lon, lat: observer.lat, altitudeM: observer.altitudeM ?? null }
+      ? {
+        lon: observer.lon,
+        lat: observer.lat,
+        altitudeM: observer.altitudeM ?? null,
+        speedMS: observer.speedMS ?? null,
+        headingDeg: observer.headingDeg ?? null,
+        accuracyM: observer.accuracyM ?? null,
+        at: observer.at ?? null,
+        track: observer.track || [],
+      }
       : null;
+    if (obsPinned) {
+      if (observerState) { renderObserverCard(); positionAf(obsEl, observerState); }
+      else { obsPinned = false; obsEl.style.display = "none"; }
+    }
     buildLayers();
+  }
+
+  function renderObserverCard() {
+    const fix = observerState;
+    const row = (label, value) => `<span class="af-tt-runway"><span>${label}</span><span>${value}</span></span>`;
+    const speed = Number.isFinite(fix.speedMS) ? `${(fix.speedMS * 3.6).toFixed(1)} km/h` : "-";
+    const heading = Number.isFinite(fix.headingDeg) ? `${Math.round(fix.headingDeg)}°` : "-";
+    const altitude = Number.isFinite(fix.altitudeM) ? `${Math.round(fix.altitudeM)} m GNSS` : "-";
+    const accuracy = Number.isFinite(fix.accuracyM) ? `±${Math.round(fix.accuracyM)} m` : "-";
+    const age = Number.isFinite(fix.at) ? `${Math.max(0, Math.round((Date.now() - fix.at) / 1000))} s ago` : "-";
+    obsEl.innerHTML = `<span class="af-tt-name">OBSERVER</span>`
+      + `<span class="af-tt-meta">${fix.lat.toFixed(5)}, ${fix.lon.toFixed(5)}</span>`
+      + `<span class="af-tt-runways"><span class="af-tt-runway-title">Own data</span>`
+      + row("Speed", speed)
+      + row("Heading", heading)
+      + row("GNSS Alt", altitude)
+      + row("Fix accuracy", accuracy)
+      + row("Fix age", age)
+      + `</span>`;
+  }
+
+  function toggleObserverCard() {
+    obsPinned = !obsPinned;
+    if (!obsPinned || !observerState) {
+      obsPinned = false;
+      obsEl.style.display = "none";
+      return;
+    }
+    renderObserverCard();
+    obsEl.style.display = "";
+    positionAf(obsEl, observerState);
   }
   // Locate is a tracking toggle for a selected aircraft. Starting preserves the current bearing
   // and pitch, changing only centre/zoom/elevated pivot; stopping preserves the camera exactly.
@@ -3014,7 +3113,7 @@ export function createTactical3d({ container, deps }) {
     cv.removeEventListener("wheel", onWheel);
     container.style.touchAction = "";
     map.remove();
-    for (const el of [overlayEl, afPinEl, afHoverEl, lockEl, loadingEl]) el.remove();
+    for (const el of [overlayEl, afPinEl, afHoverEl, obsEl, lockEl, loadingEl]) el.remove();
   }
 
   const hideLoading = () => { loadingEl.style.display = "none"; };

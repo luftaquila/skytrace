@@ -1955,7 +1955,29 @@ function observerFix(coords) {
       && (coords.altitudeAccuracy == null || coords.altitudeAccuracy <= 100)
       ? coords.altitude
       : null,
+    speedMS: Number.isFinite(coords.speed) && coords.speed >= 0 ? coords.speed : null,
+    headingDeg: Number.isFinite(coords.heading) ? coords.heading : null,
+    accuracyM: Number.isFinite(coords.accuracy) ? coords.accuracy : null,
   };
+}
+
+// The observer's own track, accumulated for the session. Standing still must not pile
+// a GPS-jitter fuzz-ball, so a fix only becomes a track point after real movement.
+const OBSERVER_TRACK_LIMIT = 1000;
+const observerTrack = [];
+function pushObserverFix(fix) {
+  const last = observerTrack[observerTrack.length - 1];
+  const movedM = last
+    ? Math.hypot(
+      (fix.lat - last.lat) * 111320,
+      (fix.lon - last.lon) * 111320 * Math.cos((fix.lat * Math.PI) / 180),
+    )
+    : Infinity;
+  if (movedM >= 3) {
+    observerTrack.push({ lon: fix.lon, lat: fix.lat, altitudeM: fix.altitudeM });
+    if (observerTrack.length > OBSERVER_TRACK_LIMIT) observerTrack.shift();
+  }
+  tac3d?.setObserver({ ...fix, at: Date.now(), track: observerTrack });
 }
 
 function browserLocation() {
@@ -1984,7 +2006,7 @@ function startObserverWatch() {
       const now = Date.now();
       if (now - observerUpdatedAt < OBSERVER_UPDATE_MS) return;
       observerUpdatedAt = now;
-      tac3d?.setObserver(observerFix(coords));
+      pushObserverFix(observerFix(coords));
     },
     () => {}, // a lost fix keeps the last marker; the next fix moves it again
     { enableHighAccuracy: true, maximumAge: 2000 },
@@ -2014,7 +2036,7 @@ async function recenterView() {
   trackingActive.value = false;
   try {
     const here = await browserLocation();
-    tac3d?.setObserver(here); // pin the own-position marker even if a selection grabbed focus
+    pushObserverFix(here); // place the own-position marker even if a selection grabbed focus
     startObserverWatch(); // the prompt was just answered, so the marker can stay live
     if (selectedHex.value) return; // selection changed while waiting for the permission/location fix
     tac3d?.locateBrowser(here.lon, here.lat);
