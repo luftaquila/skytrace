@@ -3,7 +3,6 @@ package tracks
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/luftaquila/skytrace/server/database"
 )
@@ -56,7 +55,7 @@ func searchTestDB(t *testing.T) *database.DB {
 
 func TestSearchAircraftByCallsign(t *testing.T) {
 	db := searchTestDB(t)
-	results, err := SearchAircraft(context.Background(), db.SQL, "kal", testSearchNow())
+	results, err := SearchAircraft(context.Background(), db.SQL, "kal")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +81,7 @@ func TestSearchAircraftByCallsign(t *testing.T) {
 
 func TestSearchAircraftByHexPrefixFindsArchiveOnlyAircraft(t *testing.T) {
 	db := searchTestDB(t)
-	results, err := SearchAircraft(context.Background(), db.SQL, "AA00", testSearchNow())
+	results, err := SearchAircraft(context.Background(), db.SQL, "AA00")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +100,7 @@ func TestSearchAircraftDeduplicatesAcrossBranches(t *testing.T) {
 	db := searchTestDB(t)
 	// "abc" is a hex prefix AND could hit callsigns; abc123 must come back once,
 	// carrying its callsign.
-	results, err := SearchAircraft(context.Background(), db.SQL, "abc1", testSearchNow())
+	results, err := SearchAircraft(context.Background(), db.SQL, "abc1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,48 +112,19 @@ func TestSearchAircraftDeduplicatesAcrossBranches(t *testing.T) {
 	}
 }
 
-func testSearchNow() time.Time {
-	return time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-}
-
-func TestSearchAircraftRejectsOverlongQueries(t *testing.T) {
+func TestSearchAircraftRejectsBadQueries(t *testing.T) {
 	db := searchTestDB(t)
-	if _, err := SearchAircraft(context.Background(), db.SQL, "12345678901234567", testSearchNow()); err == nil {
-		t.Fatal("accepted an overlong query")
+	for _, q := range []string{"", "a", "12345678901234567"} {
+		if _, err := SearchAircraft(context.Background(), db.SQL, q); err == nil {
+			t.Fatalf("accepted %q", q)
+		}
 	}
 	// LIKE metacharacters must stay literal, not widen the scan.
-	results, err := SearchAircraft(context.Background(), db.SQL, "%%", testSearchNow())
+	results, err := SearchAircraft(context.Background(), db.SQL, "%%")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 0 {
 		t.Fatalf("wildcard leaked: %#v", results)
-	}
-}
-
-func TestSearchAircraftEmptyQueryBrowsesDepartedFlights(t *testing.T) {
-	db := searchTestDB(t)
-	// One aircraft is still on the live picture and must not appear in the browse.
-	if _, err := db.SQL.Exec(`
-		INSERT INTO receiver_aircraft_current (receiver_id, hex, observed_at, flight)
-		VALUES ('rx-1', 'eee111', '2026-08-24T11:59:30.000Z', 'LIVE01')
-	`); err != nil {
-		t.Fatal(err)
-	}
-	results, err := SearchAircraft(context.Background(), db.SQL, "", testSearchNow())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 3 {
-		t.Fatalf("results = %#v", results)
-	}
-	for _, result := range results {
-		if result.Hex == "eee111" {
-			t.Fatalf("live aircraft leaked into the departed browse: %#v", results)
-		}
-	}
-	// Newest departure first.
-	if results[0].Hex != "def456" || results[0].Flight == nil || *results[0].Flight != "AAR777" {
-		t.Fatalf("first = %#v", results[0])
 	}
 }

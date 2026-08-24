@@ -1801,8 +1801,9 @@ watch(selectedHex, (hex) => {
 });
 
 // --- Archive search: flights the live picture no longer shows ----------------------------
-// The Traffic search box filters live rows as-you-type; the archive lookup behind the same
-// text stays an explicit button press, so the history API is only hit deliberately.
+// One search box, both pictures: the same text that filters the live rows as-you-type also
+// queries the archive, debounced so the API sees settled queries instead of keystrokes.
+// Archive rows render below the live rows, minus any aircraft the live list already shows.
 const archiveResults = ref([]);
 const archiveSearching = ref(false);
 const archiveSearched = ref(false);
@@ -1810,25 +1811,35 @@ const archiveQuery = computed(() => {
   const query = search.value.trim();
   return query.length >= 2 && query.length <= 16 ? query : "";
 });
-watch(search, () => {
+let archiveSearchTimer = null;
+let archiveRequestVersion = 0;
+watch(archiveQuery, (query) => {
+  clearTimeout(archiveSearchTimer);
+  archiveRequestVersion += 1; // in-flight results for the old query are stale
   archiveResults.value = [];
   archiveSearched.value = false;
+  archiveSearching.value = false;
+  if (!query) return;
+  archiveSearchTimer = setTimeout(() => { void runArchiveSearch(); }, 450);
 });
 
 async function runArchiveSearch() {
-  const query = archiveQuery.value; // empty = browse the most recently departed flights
-  if (archiveSearching.value) return;
+  const query = archiveQuery.value;
+  if (!query) return;
+  const version = ++archiveRequestVersion;
   archiveSearching.value = true;
   try {
     const result = await fetchJson(`/api/aircraft/search?q=${encodeURIComponent(query)}`, { cache: "no-store" });
-    if (archiveQuery.value !== query) return; // the operator kept typing; results are stale
-    // A row without track points has nothing to draw, so it is not offered.
-    archiveResults.value = (result.results || []).filter((row) => row.hasTrack);
+    if (version !== archiveRequestVersion) return;
+    // A row without track points has nothing to draw, and a hex the live list already
+    // shows would be a duplicate line for the same aircraft.
+    const liveHexes = new Set(aircraft.value.map((item) => item.hex));
+    archiveResults.value = (result.results || []).filter((row) => row.hasTrack && !liveHexes.has(row.hex));
     archiveSearched.value = true;
   } catch {
-    archiveSearched.value = true;
+    if (version === archiveRequestVersion) archiveSearched.value = true;
   } finally {
-    archiveSearching.value = false;
+    if (version === archiveRequestVersion) archiveSearching.value = false;
   }
 }
 
@@ -2467,16 +2478,9 @@ onUnmounted(() => {
             </button>
             <div v-if="!filteredAircraft.length" class="block-empty">No targets match the active filters</div>
 
-            <!-- Archive: flights that already left the live picture. Always answers — an
-                 empty box browses the most recently departed, a query searches. The lookup
-                 itself is an explicit press, never as-you-type. -->
-            <div class="archive-block">
-              <button type="button" class="archive-run" :disabled="archiveSearching" @click="runArchiveSearch">
-                <Search :size="13" />
-                {{ archiveSearching ? "Searching…"
-                  : archiveQuery ? `Search past flights “${archiveQuery}”`
-                  : "Recent past flights" }}
-              </button>
+            <!-- Archive: the same query, answered from flights that already left the live
+                 picture — one search, both pictures. Auto-run (debounced), no extra control. -->
+            <div v-if="archiveQuery" class="archive-block">
               <button
                 v-for="row in archiveResults"
                 :key="`arch-${row.hex}`"
@@ -2493,7 +2497,8 @@ onUnmounted(() => {
                   <small v-if="row.firstSeenAt">since {{ formatStamp(row.firstSeenAt) }}</small>
                 </span>
               </button>
-              <div v-if="archiveSearched && !archiveResults.length" class="block-empty">No archived flights match</div>
+              <div v-if="archiveSearching && !archiveResults.length" class="block-empty">Searching the archive…</div>
+              <div v-else-if="archiveSearched && !archiveResults.length" class="block-empty">No archived flights match</div>
             </div>
         </div>
       </aside>

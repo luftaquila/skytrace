@@ -694,32 +694,6 @@ select {
   border-top: 1px solid rgb(72 224 209 / 0.14);
 }
 
-.archive-run {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  width: 100%;
-  padding: 10px 12px;
-  border: 0;
-  border-bottom: 1px solid rgb(72 224 209 / 0.08);
-  background: transparent;
-  color: var(--muted);
-  font: 600 var(--fs-micro)/1.4 var(--mono);
-  letter-spacing: 0.06em;
-  text-align: center;
-  cursor: pointer;
-}
-
-.archive-run:hover:not(:disabled) {
-  color: var(--text);
-}
-
-.archive-run:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-
 .archive-bar {
   background: #38bdf8;
   opacity: 0.55;

@@ -386,7 +386,7 @@ func (app *App) liveRepresentation(ctx context.Context, now time.Time) (represen
 // can pull up flights that have already left the live picture. Shares the history
 // route limit: both are operator-paced archive reads.
 func (app *App) aircraftSearch(response http.ResponseWriter, request *http.Request) {
-	results, err := tracks.SearchAircraft(request.Context(), app.db, request.URL.Query().Get("q"), time.Now())
+	results, err := tracks.SearchAircraft(request.Context(), app.db, request.URL.Query().Get("q"))
 	if err != nil {
 		writeQueryError(response, err)
 		return
