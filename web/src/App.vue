@@ -2473,9 +2473,9 @@ onUnmounted(() => {
             <div class="archive-block">
               <button type="button" class="archive-run" :disabled="archiveSearching || !archiveQuery" @click="runArchiveSearch">
                 <Search :size="13" />
-                {{ archiveSearching ? "Searching the archive…"
-                  : archiveQuery ? `Search past flights for “${archiveQuery}”`
-                  : "Past flights: type 2+ characters to search the archive" }}
+                {{ archiveSearching ? "Searching…"
+                  : archiveQuery ? `Search past flights “${archiveQuery}”`
+                  : "Search past flights" }}
               </button>
               <button
                 v-for="row in archiveResults"
