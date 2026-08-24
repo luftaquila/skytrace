@@ -6,6 +6,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Search finds aircraft that are no longer on the live picture. Callsigns only exist
@@ -17,6 +18,9 @@ const (
 	searchBranchLimit   = 10
 	minSearchQueryRunes = 2
 	maxSearchQueryRunes = 16
+	// An empty query browses flights that have LEFT the live picture; anything seen
+	// this recently is still on it (the display drops targets after ~90 s).
+	recentBrowseExclusion = 10 * time.Minute
 )
 
 var hexQueryPattern = regexp.MustCompile(`^~?[0-9a-f]{2,7}$`)
@@ -31,11 +35,16 @@ type SearchResult struct {
 
 // SearchAircraft answers a free-text query with archived aircraft, newest first.
 // Callsign matches (current table) rank above bare hex matches (track archive).
-func SearchAircraft(ctx context.Context, db *sql.DB, rawQuery string) ([]SearchResult, error) {
+// An empty (or sub-minimum) query is a browse: the most recently departed flights,
+// so the archive button always answers instead of sitting dead until someone types.
+func SearchAircraft(ctx context.Context, db *sql.DB, rawQuery string, now time.Time) ([]SearchResult, error) {
 	query := strings.TrimSpace(rawQuery)
 	runes := len([]rune(query))
-	if runes < minSearchQueryRunes || runes > maxSearchQueryRunes {
-		return nil, &QueryError{Status: 400, Message: "query must be 2-16 characters"}
+	if runes > maxSearchQueryRunes {
+		return nil, &QueryError{Status: 400, Message: "query must be at most 16 characters"}
+	}
+	if runes < minSearchQueryRunes {
+		return recentDepartedAircraft(ctx, db, now)
 	}
 
 	results := []SearchResult{}
@@ -191,4 +200,45 @@ func attachCurrentIdentity(ctx context.Context, db *sql.DB, result *SearchResult
 		result.LastSeenAt = observedAt.String
 	}
 	return nil
+}
+
+// recentDepartedAircraft lists aircraft last seen more than recentBrowseExclusion
+// ago, newest first — the flights an operator just watched leave the picture.
+func recentDepartedAircraft(ctx context.Context, db *sql.DB, now time.Time) ([]SearchResult, error) {
+	cutoff := now.UTC().Add(-recentBrowseExclusion).Format("2006-01-02T15:04:05.000Z")
+	rows, err := db.QueryContext(ctx, `
+		SELECT hex, flight, MAX(observed_at) AS last_seen
+		FROM receiver_aircraft_current
+		GROUP BY hex
+		HAVING last_seen < ?
+		ORDER BY last_seen DESC
+		LIMIT ?
+	`, cutoff, searchResultLimit)
+	if err != nil {
+		return nil, err
+	}
+	results := []SearchResult{}
+	for rows.Next() {
+		var result SearchResult
+		var flight sql.NullString
+		if err := rows.Scan(&result.Hex, &flight, &result.LastSeenAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if flight.Valid {
+			if value := strings.TrimSpace(flight.String); value != "" {
+				result.Flight = &value
+			}
+		}
+		results = append(results, result)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range results {
+		if err := attachTrackSpan(ctx, db, &results[index]); err != nil {
+			return nil, err
+		}
+	}
+	return results, nil
 }

@@ -1816,8 +1816,8 @@ watch(search, () => {
 });
 
 async function runArchiveSearch() {
-  const query = archiveQuery.value;
-  if (!query || archiveSearching.value) return;
+  const query = archiveQuery.value; // empty = browse the most recently departed flights
+  if (archiveSearching.value) return;
   archiveSearching.value = true;
   try {
     const result = await fetchJson(`/api/aircraft/search?q=${encodeURIComponent(query)}`, { cache: "no-store" });
@@ -2467,15 +2467,15 @@ onUnmounted(() => {
             </button>
             <div v-if="!filteredAircraft.length" class="block-empty">No targets match the active filters</div>
 
-            <!-- Archive: the same query against flights that already left the live picture.
-                 The entry point stays visible with an empty box — a hidden feature is no
-                 feature — but the lookup itself is an explicit press, never as-you-type. -->
+            <!-- Archive: flights that already left the live picture. Always answers — an
+                 empty box browses the most recently departed, a query searches. The lookup
+                 itself is an explicit press, never as-you-type. -->
             <div class="archive-block">
-              <button type="button" class="archive-run" :disabled="archiveSearching || !archiveQuery" @click="runArchiveSearch">
+              <button type="button" class="archive-run" :disabled="archiveSearching" @click="runArchiveSearch">
                 <Search :size="13" />
                 {{ archiveSearching ? "Searching…"
                   : archiveQuery ? `Search past flights “${archiveQuery}”`
-                  : "Search past flights" }}
+                  : "Recent past flights" }}
               </button>
               <button
                 v-for="row in archiveResults"
