@@ -2468,11 +2468,14 @@ onUnmounted(() => {
             <div v-if="!filteredAircraft.length" class="block-empty">No targets match the active filters</div>
 
             <!-- Archive: the same query against flights that already left the live picture.
-                 An explicit press, never as-you-type — archive reads are deliberate. -->
-            <div v-if="archiveQuery" class="archive-block">
-              <button type="button" class="archive-run" :disabled="archiveSearching" @click="runArchiveSearch">
+                 The entry point stays visible with an empty box — a hidden feature is no
+                 feature — but the lookup itself is an explicit press, never as-you-type. -->
+            <div class="archive-block">
+              <button type="button" class="archive-run" :disabled="archiveSearching || !archiveQuery" @click="runArchiveSearch">
                 <Search :size="13" />
-                {{ archiveSearching ? "Searching the archive…" : `Search past flights for “${archiveQuery}”` }}
+                {{ archiveSearching ? "Searching the archive…"
+                  : archiveQuery ? `Search past flights for “${archiveQuery}”`
+                  : "Past flights: type 2+ characters to search the archive" }}
               </button>
               <button
                 v-for="row in archiveResults"
