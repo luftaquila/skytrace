@@ -1944,25 +1944,79 @@ function onGlobalKeydown(event) {
   if (selectedHex.value) clearSelection();
 }
 
+// GNSS height when the device provides one (phones with a fix; null on WiFi/IP
+// location). A fix whose own vertical accuracy is worse than 100 m says nothing
+// useful about height, so it degrades to a ground-level fix.
+function observerFix(coords) {
+  return {
+    lat: coords.latitude,
+    lon: coords.longitude,
+    altitudeM: Number.isFinite(coords.altitude)
+      && (coords.altitudeAccuracy == null || coords.altitudeAccuracy <= 100)
+      ? coords.altitude
+      : null,
+    speedMS: Number.isFinite(coords.speed) && coords.speed >= 0 ? coords.speed : null,
+    headingDeg: Number.isFinite(coords.heading) ? coords.heading : null,
+    accuracyM: Number.isFinite(coords.accuracy) ? coords.accuracy : null,
+  };
+}
+
+// The observer's own track, accumulated for the session. Standing still must not pile
+// a GPS-jitter fuzz-ball, so a fix only becomes a track point after real movement.
+const OBSERVER_TRACK_LIMIT = 1000;
+const observerTrack = [];
+function pushObserverFix(fix) {
+  const last = observerTrack[observerTrack.length - 1];
+  const movedM = last
+    ? Math.hypot(
+      (fix.lat - last.lat) * 111320,
+      (fix.lon - last.lon) * 111320 * Math.cos((fix.lat * Math.PI) / 180),
+    )
+    : Infinity;
+  if (movedM >= 3) {
+    observerTrack.push({ lon: fix.lon, lat: fix.lat, altitudeM: fix.altitudeM });
+    if (observerTrack.length > OBSERVER_TRACK_LIMIT) observerTrack.shift();
+  }
+  tac3d?.setObserver({ ...fix, at: Date.now(), track: observerTrack });
+}
+
 function browserLocation() {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) { reject(new Error("Browser geolocation is unavailable")); return; }
     navigator.geolocation.getCurrentPosition(
-      ({ coords }) => resolve({
-        lat: coords.latitude,
-        lon: coords.longitude,
-        // GNSS height when the device provides one (phones with a fix; null on WiFi/IP
-        // location). A fix whose own vertical accuracy is worse than 100 m says nothing
-        // useful about height, so it degrades to a ground-level fix.
-        altitudeM: Number.isFinite(coords.altitude)
-          && (coords.altitudeAccuracy == null || coords.altitudeAccuracy <= 100)
-          ? coords.altitude
-          : null,
-      }),
+      ({ coords }) => resolve(observerFix(coords)),
       reject,
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 },
     );
   });
+}
+
+// The observer marker stays live: the OS pushes fixes and the marker takes one at most
+// every three seconds. The watch starts silently on load when the site already holds
+// the geolocation permission, otherwise from the first Locate press (whose prompt
+// grants it); it never triggers a permission prompt by itself.
+const OBSERVER_UPDATE_MS = 3000;
+let observerWatchId = null;
+let observerUpdatedAt = 0;
+
+function startObserverWatch() {
+  if (observerWatchId != null || !navigator.geolocation) return;
+  observerWatchId = navigator.geolocation.watchPosition(
+    ({ coords }) => {
+      const now = Date.now();
+      if (now - observerUpdatedAt < OBSERVER_UPDATE_MS) return;
+      observerUpdatedAt = now;
+      pushObserverFix(observerFix(coords));
+    },
+    () => {}, // a lost fix keeps the last marker; the next fix moves it again
+    { enableHighAccuracy: true, maximumAge: 2000 },
+  );
+}
+
+function stopObserverWatch() {
+  if (observerWatchId == null) return;
+  navigator.geolocation?.clearWatch(observerWatchId);
+  observerWatchId = null;
 }
 
 // With a selected aircraft this is the tracking toggle. Without one, locate the browser's
@@ -1982,7 +2036,8 @@ async function recenterView() {
   trackingActive.value = false;
   try {
     const here = await browserLocation();
-    tac3d?.setObserver(here); // pin the own-position marker even if a selection grabbed focus
+    pushObserverFix(here); // place the own-position marker even if a selection grabbed focus
+    startObserverWatch(); // the prompt was just answered, so the marker can stay live
     if (selectedHex.value) return; // selection changed while waiting for the permission/location fix
     tac3d?.locateBrowser(here.lon, here.lat);
   } catch (error) {
@@ -2179,6 +2234,11 @@ onMounted(async () => {
     tac3d?.clockPass();
   }, 1000);
   connectEvents();
+  // Permission already granted in an earlier visit: the marker goes live without a prompt.
+  try {
+    const status = await navigator.permissions?.query({ name: "geolocation" });
+    if (status?.state === "granted") startObserverWatch();
+  } catch { /* Permissions API missing: the Locate press remains the entry point */ }
 });
 
 // Fallback poll when the SSE stream is down; the stream itself is the fast path.
@@ -2219,6 +2279,7 @@ onUnmounted(() => {
   coverageRefresher.cancel();
   trackRefresher.cancel();
   destroyHistoryChart(true);
+  stopObserverWatch();
   window.removeEventListener("keydown", onGlobalKeydown);
   window.removeEventListener("resize", onViewportChange);
   window.removeEventListener("pointerdown", onGlobalPointerDown, true);
