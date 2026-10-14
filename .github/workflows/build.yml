@@ -160,7 +160,7 @@ jobs:
         run: |
           binary="$RUNNER_TEMP/extracted/skytrace-agent-$IMAGE_TAG-${{ matrix.target }}/bin/skytrace-agent"
           "$binary" --version | grep -Fx "skytrace-agent $IMAGE_TAG"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: receiver-agent-${{ matrix.target }}
           path: ${{ runner.temp }}/agents/skytrace-agent-*.tar.gz
@@ -192,7 +192,7 @@ jobs:
             test -f "skytrace-agent-$IMAGE_TAG-$target.tar.gz"
           done
           test "$(find . -maxdepth 1 -name 'skytrace-agent-*.tar.gz' | wc -l)" -eq 5
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: receiver-agents
           path: ${{ runner.temp }}/agents/skytrace-agent-*.tar.gz
@@ -244,7 +244,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/digests"
           digest="${{ steps.build.outputs.digest }}"
           touch "$RUNNER_TEMP/digests/${digest#sha256:}"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: image-digest-${{ matrix.artifact }}
           path: ${{ runner.temp }}/digests/*
